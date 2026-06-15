@@ -1,35 +1,45 @@
-/** The modular-gradient mark: a ∇ (del / gradient operator) built from
- *  modular cells under one flowing indigo→violet→fuchsia gradient. */
-export default function Logo(props: { size?: number; id?: string; class?: string }) {
+/** modgrad mark: a ∇ of six modular cubes, each its own Blockout-vivid color,
+ *  together a violet→red spectrum (modular gradient + gradient descent). */
+export default function Logo(props: { size?: number; class?: string }) {
   const s = props.size ?? 26;
-  const gid = props.id ?? "mg-mark";
   return (
-    <svg
-      width={s}
-      height={s}
-      viewBox="0 0 32 32"
-      class={props.class}
-      role="img"
-      aria-label="modgrad"
-    >
-      <defs>
-        <linearGradient id={gid} x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stop-color="#6366f1" />
-          <stop offset="0.5" stop-color="#a855f7" />
-          <stop offset="1" stop-color="#e879f9" />
-        </linearGradient>
-      </defs>
-      <g fill={`url(#${gid})`}>
-        <rect x="1.75" y="2" width="6" height="6" rx="1.3" />
-        <rect x="9.25" y="2" width="6" height="6" rx="1.3" />
-        <rect x="16.75" y="2" width="6" height="6" rx="1.3" />
-        <rect x="24.25" y="2" width="6" height="6" rx="1.3" />
-        <rect x="5.5" y="9.5" width="6" height="6" rx="1.3" />
-        <rect x="13" y="9.5" width="6" height="6" rx="1.3" />
-        <rect x="20.5" y="9.5" width="6" height="6" rx="1.3" />
-        <rect x="9.25" y="17" width="6" height="6" rx="1.3" />
-        <rect x="16.75" y="17" width="6" height="6" rx="1.3" />
-        <rect x="13" y="24.5" width="6" height="6" rx="1.3" />
+    <svg width={s} height={s} viewBox="0 0 64 64" class={props.class} role="img" aria-label="modgrad">
+      <g
+        transform="translate(32 36) scale(1.18) translate(-32 -36)"
+        stroke="#221c33"
+        stroke-width="0.5"
+        stroke-linejoin="round"
+      >
+        <g>
+          <polygon points="18,18 25,21.5 18,25 11,21.5" fill="#8B5CF6" />
+          <polygon points="11,21.5 18,25 18,32 11,28.5" fill="#734CCC" />
+          <polygon points="18,25 25,21.5 25,28.5 18,32" fill="#5D3EA5" />
+        </g>
+        <g>
+          <polygon points="32,18 39,21.5 32,25 25,21.5" fill="#4F86F7" />
+          <polygon points="25,21.5 32,25 32,32 25,28.5" fill="#426FCD" />
+          <polygon points="32,25 39,21.5 39,28.5 32,32" fill="#355AA5" />
+        </g>
+        <g>
+          <polygon points="46,18 53,21.5 46,25 39,21.5" fill="#29C7D6" />
+          <polygon points="39,21.5 46,25 46,32 39,28.5" fill="#22A5B2" />
+          <polygon points="46,25 53,21.5 53,28.5 46,32" fill="#1B858F" />
+        </g>
+        <g>
+          <polygon points="25,29 32,32.5 25,36 18,32.5" fill="#34C759" />
+          <polygon points="18,32.5 25,36 25,43 18,39.5" fill="#2BA54A" />
+          <polygon points="25,36 32,32.5 32,39.5 25,43" fill="#23853C" />
+        </g>
+        <g>
+          <polygon points="39,29 46,32.5 39,36 32,32.5" fill="#FBB024" />
+          <polygon points="32,32.5 39,36 39,43 32,39.5" fill="#D0921E" />
+          <polygon points="39,36 46,32.5 46,39.5 39,43" fill="#A87618" />
+        </g>
+        <g>
+          <polygon points="32,40 39,43.5 32,47 25,43.5" fill="#FB5E6D" />
+          <polygon points="25,43.5 32,47 32,54 25,50.5" fill="#D04E5A" />
+          <polygon points="32,47 39,43.5 39,50.5 32,54" fill="#A83F49" />
+        </g>
       </g>
     </svg>
   );

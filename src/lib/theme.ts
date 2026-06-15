@@ -3,7 +3,7 @@ import { createSignal } from "solid-js";
 type Theme = "dark" | "light";
 
 const initial = (): Theme =>
-  (document.documentElement.dataset.theme as Theme) || "dark";
+  (document.documentElement.dataset.theme as Theme) || "light";
 
 export const [theme, setTheme] = createSignal<Theme>(initial());
 

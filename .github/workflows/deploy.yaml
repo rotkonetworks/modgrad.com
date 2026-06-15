@@ -99,9 +99,10 @@ jobs:
             NGINX_EOF
 
             tar xzf site.tar.gz
+            # zsh aborts on globs that match nothing — avoid PROJECT_DIR/* and dist/*
+            rm -rf ${{ env.PROJECT_DIR }}
             mkdir -p ${{ env.PROJECT_DIR }}
-            rm -rf ${{ env.PROJECT_DIR }}/*
-            mv dist/* ${{ env.PROJECT_DIR }}/
+            cp -a dist/. ${{ env.PROJECT_DIR }}/
 
             # shared network for nginx ↔ api
             podman network exists ${{ env.NETWORK }} || podman network create ${{ env.NETWORK }}

@@ -1,6 +1,9 @@
 import { createSignal, Show } from "solid-js";
 import { useDocMeta } from "@/lib/meta";
+import { reveal } from "@/lib/reveal";
 import { site } from "@/data/site";
+
+false && reveal;
 
 type Status = "idle" | "sending" | "sent" | "error";
 
@@ -65,7 +68,7 @@ export default function Contact() {
         headed — use the form.
       </p>
 
-      <div class="grid lg:grid-cols-[1.1fr_0.9fr] gap-5 mt-10">
+      <div use:reveal class="grid lg:grid-cols-[1.1fr_0.9fr] gap-5 mt-10">
         {/* form */}
         <div class="card glow-card">
           <Show

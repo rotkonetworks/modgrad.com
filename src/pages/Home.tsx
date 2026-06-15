@@ -1,6 +1,10 @@
 import { A } from "@solidjs/router";
 import { For } from "solid-js";
+import { reveal } from "@/lib/reveal";
 import { useDocMeta } from "@/lib/meta";
+
+// keep the directive referenced for the compiler
+false && reveal;
 import { site } from "@/data/site";
 import {
   crates,
@@ -65,7 +69,7 @@ export default function Home() {
 
       {/* ── the bet ──────────────────────────────────── */}
       <section class="container-page py-20 sm:py-24">
-        <div class="max-w-[760px]">
+        <div use:reveal class="max-w-[760px]">
           <div class="eyebrow mb-4">The bet</div>
           <h2 class="text-[clamp(1.7rem,4vw,2.5rem)] tracking-[-0.025em] leading-[1.12]">
             Betting on architecture, not scale.
@@ -90,7 +94,7 @@ export default function Home() {
       </section>
 
       {/* ── proof ────────────────────────────────────── */}
-      <section class="container-page pb-8">
+      <section use:reveal class="container-page pb-8">
         <div class="grid lg:grid-cols-[0.9fr_1.1fr] gap-6">
           <div class="card glow-card">
             <div class="eyebrow mb-4">Measured, reproducible</div>
@@ -143,7 +147,7 @@ export default function Home() {
       </section>
 
       {/* ── pillars ──────────────────────────────────── */}
-      <section class="container-page py-20">
+      <section use:reveal class="container-page py-20">
         <div class="eyebrow mb-3">Capabilities</div>
         <h2 class="text-[clamp(1.6rem,3.6vw,2.3rem)] tracking-[-0.025em] mb-10">
           Compose what you need.
@@ -163,7 +167,7 @@ export default function Home() {
       </section>
 
       {/* ── brain regions ────────────────────────────── */}
-      <section class="container-page py-12">
+      <section use:reveal class="container-page py-12">
         <div class="card glow-card">
           <div class="grid lg:grid-cols-[0.8fr_1.2fr] gap-8 items-center">
             <div>
@@ -195,7 +199,7 @@ export default function Home() {
       </section>
 
       {/* ── how it works ─────────────────────────────── */}
-      <section class="container-page py-20">
+      <section use:reveal class="container-page py-20">
         <div class="eyebrow mb-3">How it works</div>
         <h2 class="text-[clamp(1.6rem,3.6vw,2.3rem)] tracking-[-0.025em] mb-10">
           Think, compose, learn.
@@ -221,7 +225,7 @@ export default function Home() {
       </section>
 
       {/* ── differentiators ──────────────────────────── */}
-      <section class="container-page py-20">
+      <section use:reveal class="container-page py-20">
         <div class="eyebrow mb-3">Design</div>
         <h2 class="text-[clamp(1.6rem,3.6vw,2.3rem)] tracking-[-0.025em] mb-10">
           Four deliberate constraints.
@@ -244,7 +248,7 @@ export default function Home() {
       </section>
 
       {/* ── what you can build ───────────────────────── */}
-      <section class="container-page py-20">
+      <section use:reveal class="container-page py-20">
         <div class="eyebrow mb-3">What you can build</div>
         <h2 class="text-[clamp(1.6rem,3.6vw,2.3rem)] tracking-[-0.025em] mb-10">
           A toolkit, not a model.
@@ -262,7 +266,7 @@ export default function Home() {
       </section>
 
       {/* ── crates ───────────────────────────────────── */}
-      <section class="container-page py-12">
+      <section use:reveal class="container-page py-12">
         <div class="flex items-end justify-between mb-8 flex-wrap gap-3">
           <div>
             <div class="eyebrow mb-3">The SDK</div>
@@ -288,7 +292,7 @@ export default function Home() {
       </section>
 
       {/* ── CTA band ─────────────────────────────────── */}
-      <section class="container-page py-20">
+      <section use:reveal class="container-page py-20">
         <div class="glow-card p-10 sm:p-14 text-center relative overflow-hidden">
           <div class="hero-glow" />
           <div class="relative">

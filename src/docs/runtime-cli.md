@@ -64,10 +64,18 @@ model over TCP. It renders:
 modgrad-debugger 127.0.0.1:4747
 ```
 
+The debugger speaks a small bincode protocol over TCP — `GetMeta`, `GetState`,
+`GetHistory`, `GetTrace(region)`, `Step`, `Resume`, `InjectToken` — so any tool can
+drive a running brain, not just the GUI.
+
 ## Examples
 
-The repo ships ~36 examples covering the surface: `mazes` and `parity`
-(benchmarks), `cifar10_probe` / `filter_viz` / `babyai_probe` (vision),
-`qwen_chat` / `qwen_load_smoke` (foundation-model inference), `lm_validate`
-(LM training proof), `blt_*` (byte-latent transformer), `dream_gallery` and
-`brain_nas_*` (research). Each is a self-contained proof of one feature.
+The repo ships ~36 self-contained examples — each a proof of one feature:
+
+| group | examples |
+|-------|----------|
+| **benchmarks** | `mazes` / `maze_viz` (brain vs single CTM), `parity` (CPU/GPU numerical parity), `bench_brain_crossover` (GPU speedup vs `d_model`) |
+| **language models** | `lm_validate` (the 5.72→0.74 training proof), `minictm`, `qwen_chat` / `qwen_load_smoke` (Qwen2.5 inference), `blt_generate` / `blt_train_real_text` / `blt_cerebellum_smoke` (byte-latent transformer) |
+| **vision** | `cifar10_probe`, `v4ctm_classifier`, `ocr_smoke`, `babyai_probe`, `filter_viz` / `retina_viz` (learned vs fixed filters), `pretrain_retina`, `attention_viz` |
+| **multimodal** | `multimodal_smoke` (text + image + audio in one token space) |
+| **research** | `dream_bench` / `dream_gallery` (offline replay & hallucination), `hebbian_sanity`, `brain_nas_*` (architecture search), `penumbra_arena` (plural alters), `eight_region_v2_brain_smoke`, `zec_mm_homeostatic` (sleep/consolidation) |

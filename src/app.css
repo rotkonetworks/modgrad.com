@@ -27,6 +27,8 @@
 
   --mono: "JetBrains Mono", "SF Mono", ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, system-ui, sans-serif;
+  /* editorial body — system serifs first, so nothing is downloaded */
+  --serif: Charter, "Iowan Old Style", "Source Serif 4", "Source Serif Pro", "Apple Garamond", Georgia, Cambria, "Times New Roman", serif;
 
   --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 30px rgba(0,0,0,.35);
   color-scheme: dark;
@@ -62,9 +64,9 @@
 html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
 
 body {
-  font-family: var(--sans);
-  font-size: 16px;
-  line-height: 1.6;
+  font-family: var(--serif);
+  font-size: 16.5px;
+  line-height: 1.62;
   background: var(--bg);
   color: var(--text);
   -webkit-font-smoothing: antialiased;
@@ -73,12 +75,27 @@ body {
 }
 
 a { color: inherit; text-decoration: none; }
-button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+button { font-family: var(--sans); color: inherit; background: none; border: 0; cursor: pointer; }
 ::selection { background: rgba(168,85,247,.32); color: #fff; }
 
-h1, h2, h3, h4 { line-height: 1.15; font-weight: 600; letter-spacing: -0.02em; }
+/* display headings stay sans; body/prose is serif (editorial) */
+h1, h2, h3, h4 { font-family: var(--sans); line-height: 1.13; font-weight: 600; letter-spacing: -0.02em; }
 
 code, pre, .mono { font-family: var(--mono); }
+
+/* gradient drop cap for an opening paragraph */
+.dropcap::first-letter {
+  float: left;
+  font-family: var(--sans);
+  font-weight: 650;
+  font-size: 3.1em;
+  line-height: .76;
+  padding: .04em .12em 0 0;
+  background: var(--grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
 
 /* ── gradient helpers ──────────────────────────── */
 
@@ -96,6 +113,9 @@ code, pre, .mono { font-family: var(--mono); }
 }
 
 .hairline { border: 1px solid var(--line); }
+
+/* UI chrome stays sans; long-form content is serif */
+header, .ui-sans { font-family: var(--sans); }
 
 /* ── buttons ───────────────────────────────────── */
 

@@ -68,8 +68,8 @@ export default function Home() {
           <h2 class="text-[clamp(1.7rem,4vw,2.5rem)] tracking-[-0.025em] leading-[1.12]">
             Betting on architecture, not scale.
           </h2>
-          <div class="mt-7 text-[1.06rem] text-dim leading-relaxed flex flex-col gap-4">
-            <p>
+          <div class="mt-7 text-[1.1rem] text-dim leading-relaxed flex flex-col gap-4">
+            <p class="dropcap">
               The frontier scaled a single architecture, the transformer, to the limits of
               capital. modgrad takes a different bet: that intelligence comes from specialized
               regions that <strong>think recurrently</strong>, route information between each

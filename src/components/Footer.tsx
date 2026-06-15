@@ -9,6 +9,7 @@ const cols = [
       ["Continuous Thought Machine", "/docs/continuous-thought-machine"],
       ["Brain composition", "/docs/brain-composition"],
       ["Bio-inspired learning", "/docs/bio-inspired"],
+      ["Memory & multiplicity", "/docs/memory"],
     ],
   },
   {

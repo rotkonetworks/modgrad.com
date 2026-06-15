@@ -3,7 +3,9 @@ import { createEffect, lazy, Suspense, type JSX } from "solid-js";
 import Header from "@/components/Header";
 import Footer from "@/components/Footer";
 
-const Home = lazy(() => import("@/pages/Home"));
+// Home is the landing page — import it directly so it paints in the first mount
+// (lazy-loading it inserts content after Header/Footer and causes a large CLS).
+import Home from "@/pages/Home";
 const Docs = lazy(() => import("@/pages/Docs"));
 const Contact = lazy(() => import("@/pages/Contact"));
 

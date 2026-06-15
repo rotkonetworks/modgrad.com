@@ -66,7 +66,7 @@ export default function Home() {
         <div class="max-w-[760px]">
           <div class="eyebrow mb-4">The bet</div>
           <h2 class="text-[clamp(1.7rem,4vw,2.5rem)] tracking-[-0.025em] leading-[1.12]">
-            Betting on <span class="grad-text">architecture,</span> not scale.
+            Betting on architecture, not scale.
           </h2>
           <div class="mt-7 text-[1.06rem] text-dim leading-relaxed flex flex-col gap-4">
             <p>
@@ -151,7 +151,7 @@ export default function Home() {
             {(p) => (
               <A href={p.href} class="card card-hover group flex flex-col">
                 <span class="tag w-fit mb-4">{p.tag}</span>
-                <h3 class="text-[1.12rem] mb-2 group-hover:grad-text transition">{p.title}</h3>
+                <h3 class="text-[1.12rem] mb-2">{p.title}</h3>
                 <p class="text-sm text-dim leading-relaxed flex-1">{p.body}</p>
                 <span class="mt-4 text-sm text-accent">Learn more →</span>
               </A>
@@ -182,7 +182,7 @@ export default function Home() {
               <For each={regions}>
                 {([name, role]) => (
                   <div class="rounded-xl border border-line bg-panel p-3 hover:border-line-2 transition">
-                    <div class="font-mono text-[.82rem] grad-text font-600">{name}</div>
+                    <div class="font-mono text-[.82rem] text-accent font-600">{name}</div>
                     <div class="text-[.72rem] text-mute leading-snug mt-1">{role}</div>
                   </div>
                 )}
@@ -200,9 +200,11 @@ export default function Home() {
         </h2>
         <div class="grid sm:grid-cols-2 gap-4">
           <For each={differentiators}>
-            {([title, body]) => (
+            {([title, body], i) => (
               <div class="card flex gap-4">
-                <span class="text-2xl grad-text font-mono leading-none">∇</span>
+                <span class="font-mono text-sm text-mute mt-1 tabular-nums">
+                  {String(i() + 1).padStart(2, "0")}
+                </span>
                 <div>
                   <h3 class="text-[1.05rem] mb-1.5">{title}</h3>
                   <p class="text-sm text-dim leading-relaxed">{body}</p>

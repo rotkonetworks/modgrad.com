@@ -10,7 +10,7 @@
 
   --text:      #ECECF2;
   --text-dim:  #A6A6B8;
-  --text-mute: #6E6E85;
+  --text-mute: #8A8BA6;
 
   --line:      #1E1E30;
   --line-2:    #2A2A40;
@@ -125,8 +125,9 @@ code, pre, .mono { font-family: var(--mono); }
 /* ── chips / tags ──────────────────────────────── */
 
 .chip {
-  display: inline-flex; align-items: center; gap: .4rem;
-  padding: .28rem .7rem;
+  display: inline-flex; align-items: center; gap: .5rem;
+  padding: .5rem .9rem;
+  line-height: 1;
   border-radius: 999px;
   border: 1px solid var(--line-2);
   background: var(--bg-2);

@@ -1,0 +1,23 @@
+# modgrad
+
+> Composable Rust crates for building brains: Continuous Thought Machines, multi-region composition, bio-inspired learning, and full-residency GPU training. No framework. No YAML. Just functions.
+
+modgrad is an open-source SDK (MIT, by Rotko Networks) for building general intelligence out of composable parts. You assemble neural runtimes from primitives you can reason about — a Continuous Thought Machine (a faithful Rust port of the Sakana AI CTM, arXiv 2505.05522), multi-region brains, neuromodulated learning, multimodal codecs, transformers, and GPU residency.
+
+## Docs
+- [Introduction](https://modgrad.com/docs/introduction): What modgrad is and its design philosophy
+- [Quickstart](https://modgrad.com/docs/quickstart): Build and train an 8-region brain in ~20 lines of Rust
+- [Continuous Thought Machine](https://modgrad.com/docs/continuous-thought-machine): The core recurrent architecture — ticks, NLM, U-Net synapse, sync, BPTT
+- [Brain composition](https://modgrad.com/docs/brain-composition): Wiring CTMs into a directed graph of 8 brain regions
+- [Bio-inspired learning](https://modgrad.com/docs/bio-inspired): Pain, neuromodulators, dream consolidation, episodic memory, plural alters
+- [Compute & GPU](https://modgrad.com/docs/compute-gpu): CPU/CUDA/ROCm/KFD/Vulkan backends and weight residency
+- [Multimodal & token space](https://modgrad.com/docs/multimodal): One embedding table for bytes, images, audio, actions
+- [Foundation models](https://modgrad.com/docs/foundation-models): Transformers, the byte-latent transformer (BLT), and cerebellum-as-LLM
+- [SDK crates](https://modgrad.com/docs/crates): The 14 composable crates and the trait foundation
+- [CLI & runtime](https://modgrad.com/docs/runtime-cli): the isis runtime, minictm, and the live 3D debugger
+- [FAQ](https://modgrad.com/docs/faq)
+
+## Links
+- [GitHub](https://github.com/rotkonetworks/modgrad)
+- [Discussions](https://github.com/rotkonetworks/modgrad/discussions)
+- [Contact](https://modgrad.com/contact)

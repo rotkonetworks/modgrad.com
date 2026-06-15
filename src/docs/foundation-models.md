@@ -33,18 +33,53 @@ it.
   on next-token prediction and mountable as a frozen module the cortex blends
   across layers. CPU and zero-copy VRAM paths.
 
-## The byte-latent path
+## The byte-latent transformer
 
 `modgrad-blt` implements a Byte-Latent Transformer
-([Pagnoni et al. 2024](https://arxiv.org/abs/2412.09871)): an **entropy patcher**
-segments the byte stream, a **local encoder/decoder** maps bytes ↔ patches, and a
-heavier **latent transformer** runs over patches (a ~4–8× shorter sequence than
-raw bytes). The `ByteifyRecipe::from_qwen2` recipe initializes the latent
-transformer from a pretrained Qwen2.5 and trains the local stack at one-tenth the
-learning rate. The forward path lands today; resident backward through the
-patch-aware cross-attention is the next slice. A `BltCerebellum` adapter already
-wraps a BLT model as a `FrozenCerebellum`, exposing per-layer hidden states keyed
-by **patch** count rather than byte count.
+([Pagnoni et al. 2024](https://arxiv.org/abs/2412.09871)) — a way to run a
+transformer on raw bytes without a tokenizer, by spending compute where the bytes
+are actually hard to predict. The pipeline is hierarchical:
+
+```
+bytes → entropy patcher → local encoder → latent transformer → local decoder → bytes
+           (segment)       (bytes→patches)   (the heavy model)   (patches→bytes)
+```
+
+**The entropy patcher.** A small byte-level model estimates the next-byte entropy at
+every position; a patch boundary fires where the entropy (or its jump from the
+previous byte) crosses a threshold — so predictable runs collapse into one patch and
+surprising bytes get their own. The context resets on newlines to avoid baseline
+drift. The patch sequence ends up roughly **4–8× shorter** than the raw bytes, and
+the expensive model runs only once per patch.
+
+**Local encoder and decoder.** The encoder embeds each byte (augmented with rolling
+3–8-byte n-gram hashes, so a pure-byte model matches tokenizer-level features) and
+pools bytes into patch representations through patch-aware cross-attention. The
+decoder runs the inverse — byte queries cross-attend over patch keys/values, causally
+up to the containing patch — to produce logits over the 256-value byte vocabulary.
+
+**The latent transformer.** The heavy "global" model runs over patches. It's a
+standard transformer with its embedding and LM head **bypassed** — patch
+representations feed straight into the blocks, and its KV cache is keyed by **patch
+count, not byte count**. That alignment is what lets a byte stream and a much shorter
+patch stream share one model, and it's why a pretrained tokenizer model can be
+repurposed for bytes at all.
+
+**The byteify recipe.** `ByteifyRecipe::from_qwen2` initializes the latent from a
+pretrained **Qwen2.5**, then trains the freshly-initialized local encoder/decoder at
+the full learning rate while the latent moves at **one-tenth** — adapting a
+tokenizer-based LLM into a byte-level one without forgetting what it already knows.
+
+**As a cerebellum.** `BltCerebellum` wraps a trained BLT as a `FrozenCerebellum`,
+exposing its per-layer latent hidden states (one row per patch) for the cortex to
+read — the byte-native path to mounting an LLM as the brain's cerebellum.
+
+**Status.** The full forward pipeline works and is tested — entropy model, patcher,
+encoder, latent, decoder, and the cerebellum wrapper. Encoder, latent, and decoder
+backward are all implemented; the one remaining gap is an upstream attention detail
+(propagating gradients through cached keys/values during full-sequence training,
+tracked in `docs/BLT_BACKWARD.md`) before end-to-end byteify training is numerically
+exact.
 
 ## The substrate (roadmap)
 

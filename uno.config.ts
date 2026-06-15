@@ -20,6 +20,7 @@ export default defineConfig({
     // fonts
     ["font-mono", { "font-family": "var(--mono)" }],
     // text-transform (not in presetMini)
+    ["tabular-nums", { "font-variant-numeric": "tabular-nums" }],
     ["uppercase", { "text-transform": "uppercase" }],
     ["lowercase", { "text-transform": "lowercase" }],
     ["capitalize", { "text-transform": "capitalize" }],

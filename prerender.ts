@@ -7,8 +7,15 @@ import { fileURLToPath } from "url";
 import { buildDocs } from "./docs-build";
 
 const dist = join(dirname(fileURLToPath(import.meta.url)), "dist");
-const template = readFileSync(join(dist, "index.html"), "utf-8");
+let template = readFileSync(join(dist, "index.html"), "utf-8");
 const SITE = "https://modgrad.com";
+
+// Inline the stylesheet so there's no render-blocking CSS request (performance).
+const cssLink = template.match(/<link rel="stylesheet"[^>]*href="([^"]+)"[^>]*>/);
+if (cssLink) {
+  const css = readFileSync(join(dist, cssLink[1].replace(/^\//, "")), "utf-8");
+  template = template.replace(cssLink[0], `<style>${css}</style>`);
+}
 
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
 
@@ -66,4 +73,12 @@ for (const p of pages) {
   emit(`/docs/${p.slug}`, variant(`${p.title} — modgrad`, p.description || DEFAULT_DESC, `/docs/${p.slug}`));
 }
 
-console.log(`prerendered ${pages.length + 3} routes`);
+// sitemap.xml
+const urls = ["/", "/contact", "/docs", ...pages.map((p) => `/docs/${p.slug}`)];
+const sitemap =
+  `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
+  urls.map((u) => `  <url><loc>${SITE}${u}</loc></url>`).join("\n") +
+  `\n</urlset>\n`;
+writeFileSync(join(dist, "sitemap.xml"), sitemap);
+
+console.log(`prerendered ${pages.length + 3} routes + sitemap`);

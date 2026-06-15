@@ -122,9 +122,14 @@ jobs:
               --restart unless-stopped \
               ${{ env.API_CONTAINER }}:latest
 
-            # (re)start nginx on the same network
+            # (re)start nginx on the same network — free the http port first
             podman stop ${{ env.CONTAINER_NAME }} 2>/dev/null || true
-            podman rm ${{ env.CONTAINER_NAME }} 2>/dev/null || true
+            podman rm -f ${{ env.CONTAINER_NAME }} 2>/dev/null || true
+            # remove any other container still publishing the port (e.g. a prior manual deploy)
+            for c in $(podman ps -a --format '{{.ID}} {{.Ports}}' | grep ':${{ env.CONTAINER_PORT }}->' | awk '{print $1}'); do
+              podman rm -f "$c" 2>/dev/null || true
+            done
+            sleep 2
             podman run -d \
               --name ${{ env.CONTAINER_NAME }} \
               --network ${{ env.NETWORK }} \

@@ -7,23 +7,27 @@ directly. Nginx proxies `POST /api/contact` to this service.
 
 ## Environment
 
+Stalwart JMAP uses **Basic auth** with the account's own credentials.
+
 | var | required | default | notes |
 |-----|----------|---------|-------|
-| `JMAP_SESSION_URL` | **yes** | — | JMAP session resource, e.g. `https://<mail-host>/.well-known/jmap` |
-| `JMAP_TOKEN` | **yes** | — | bearer token for the sending account (has a `noreply@rotko.net` identity) |
-| `MAIL_FROM` | no | `noreply@rotko.net` | envelope + From address |
+| `JMAP_URL` | **yes** | — | mail server base, e.g. `https://mail.rotko.net` (session = `…/.well-known/jmap`) |
+| `JMAP_USER` | **yes** | — | sending account, `noreply@rotko.net` |
+| `JMAP_PASS` | **yes** | — | that account's password |
+| `MAIL_FROM` | no | `JMAP_USER` | envelope + From address |
 | `MAIL_TO` | no | `modgrad@rotko.net` | destination inbox |
 | `PORT` | no | `3001` | listen port (internal to the podman network) |
 
-`JMAP_SESSION_URL` and `JMAP_TOKEN` are **secrets** — set them in the repo's
+`JMAP_URL`, `JMAP_USER`, `JMAP_PASS` are **secrets** — set them in the repo's
 GitHub Actions secrets; the deploy workflow passes them to the container. Never
 commit them.
 
 ## Run locally
 
 ```bash
-JMAP_SESSION_URL=https://mail.example/.well-known/jmap \
-JMAP_TOKEN=xxxx \
+JMAP_URL=https://mail.rotko.net \
+JMAP_USER=noreply@rotko.net \
+JMAP_PASS=xxxx \
 node contact.mjs
 # POST http://localhost:3001/api/contact  {"email":"you@x.com","message":"hi"}
 ```

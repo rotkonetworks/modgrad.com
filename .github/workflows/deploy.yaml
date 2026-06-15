@@ -50,13 +50,14 @@ jobs:
       - name: Deploy containers
         uses: appleboy/ssh-action@v1.0.0
         env:
-          JMAP_SESSION_URL: ${{ secrets.JMAP_SESSION_URL }}
-          JMAP_TOKEN: ${{ secrets.JMAP_TOKEN }}
+          JMAP_URL: ${{ secrets.JMAP_URL }}
+          JMAP_USER: ${{ secrets.JMAP_USER }}
+          JMAP_PASS: ${{ secrets.JMAP_PASS }}
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_KEY }}
-          envs: JMAP_SESSION_URL,JMAP_TOKEN
+          envs: JMAP_URL,JMAP_USER,JMAP_PASS
           script: |
             set -e
             cd /home/${{ secrets.DEPLOY_USER }}
@@ -114,8 +115,9 @@ jobs:
             podman run -d \
               --name ${{ env.API_CONTAINER }} \
               --network ${{ env.NETWORK }} \
-              -e JMAP_SESSION_URL="$JMAP_SESSION_URL" \
-              -e JMAP_TOKEN="$JMAP_TOKEN" \
+              -e JMAP_URL="$JMAP_URL" \
+              -e JMAP_USER="$JMAP_USER" \
+              -e JMAP_PASS="$JMAP_PASS" \
               -e MAIL_FROM="noreply@rotko.net" \
               -e MAIL_TO="modgrad@rotko.net" \
               -e PORT="${{ env.API_PORT }}" \

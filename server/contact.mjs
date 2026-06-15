@@ -4,9 +4,13 @@
 import { createServer } from "node:http";
 
 const PORT = Number(process.env.PORT || 3001);
-const SESSION_URL = process.env.JMAP_SESSION_URL || "";
-const TOKEN = process.env.JMAP_TOKEN || "";
-const MAIL_FROM = process.env.MAIL_FROM || "noreply@rotko.net";
+// Stalwart JMAP uses Basic auth with the account's own credentials.
+const JMAP_URL = (process.env.JMAP_URL || "").replace(/\/$/, "");
+const JMAP_USER = process.env.JMAP_USER || "";
+const JMAP_PASS = process.env.JMAP_PASS || "";
+const SESSION_URL = JMAP_URL ? `${JMAP_URL}/.well-known/jmap` : "";
+const AUTH = "Basic " + Buffer.from(`${JMAP_USER}:${JMAP_PASS}`).toString("base64");
+const MAIL_FROM = process.env.MAIL_FROM || JMAP_USER || "noreply@rotko.net";
 const MAIL_TO = process.env.MAIL_TO || "modgrad@rotko.net";
 
 const USING = [
@@ -33,7 +37,7 @@ async function jmap(url, body) {
   const res = await fetch(url, {
     method: body ? "POST" : "GET",
     headers: {
-      Authorization: `Bearer ${TOKEN}`,
+      Authorization: AUTH,
       ...(body ? { "Content-Type": "application/json" } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
@@ -43,7 +47,7 @@ async function jmap(url, body) {
 }
 
 async function send({ name, email, message }) {
-  if (!SESSION_URL || !TOKEN) throw new Error("JMAP not configured");
+  if (!JMAP_URL || !JMAP_USER || !JMAP_PASS) throw new Error("JMAP not configured");
 
   const session = await jmap(SESSION_URL);
   const accountId = session.primaryAccounts["urn:ietf:params:jmap:mail"];

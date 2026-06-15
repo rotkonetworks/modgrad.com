@@ -1,0 +1,23 @@
+{
+  "name": "modgrad.com",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && tsx prerender.ts",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@solidjs/router": "^0.16.1",
+    "solid-js": "^1.9.10"
+  },
+  "devDependencies": {
+    "@types/markdown-it": "^14.1.2",
+    "@unocss/reset": "^66.5.4",
+    "markdown-it": "^14.2.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.8.3",
+    "unocss": "^66.5.4",
+    "vite": "^7.1.12",
+    "vite-plugin-solid": "^2.11.6"
+  }
+}

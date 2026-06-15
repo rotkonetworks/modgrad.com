@@ -1,0 +1,159 @@
+name: Deploy modgrad.com
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+env:
+  CONTAINER_NAME: modgrad-com
+  API_CONTAINER: modgrad-api
+  NETWORK: modgrad-net
+  CONTAINER_PORT: 55560
+  API_PORT: 3001
+  PROJECT_DIR: modgrad.com
+  NODE_VERSION: "20"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Build site
+        run: |
+          npm install
+          npm run build
+
+          if [ ! -f dist/index.html ]; then
+            echo "Build failed: no index.html found"
+            exit 1
+          fi
+
+          # ship the static site and the contact-form service
+          tar czf site.tar.gz dist/ server/
+
+      - name: Upload site
+        uses: appleboy/scp-action@v0.1.5
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          source: site.tar.gz
+          target: /home/${{ secrets.DEPLOY_USER }}/
+
+      - name: Deploy containers
+        uses: appleboy/ssh-action@v1.0.0
+        env:
+          JMAP_SESSION_URL: ${{ secrets.JMAP_SESSION_URL }}
+          JMAP_TOKEN: ${{ secrets.JMAP_TOKEN }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          envs: JMAP_SESSION_URL,JMAP_TOKEN
+          script: |
+            set -e
+            cd /home/${{ secrets.DEPLOY_USER }}
+
+            cat > nginx-modgrad.conf << 'NGINX_EOF'
+            server {
+                listen 80;
+                server_name localhost;
+                root /usr/share/nginx/html;
+                index index.html;
+
+                gzip on;
+                gzip_vary on;
+                gzip_min_length 1024;
+                gzip_types text/plain text/css text/xml text/javascript application/javascript application/xml+rss application/json image/svg+xml;
+
+                # contact form → JMAP service on the shared network
+                location /api/ {
+                    proxy_pass http://modgrad-api:3001;
+                    proxy_set_header Host $host;
+                    proxy_set_header X-Real-IP $remote_addr;
+                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                    proxy_read_timeout 30s;
+                }
+
+                location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+                    expires 1y;
+                    add_header Cache-Control "public, immutable";
+                }
+
+                location / {
+                    try_files $uri $uri/ /index.html;
+                }
+
+                add_header X-Frame-Options "SAMEORIGIN" always;
+                add_header X-Content-Type-Options "nosniff" always;
+                add_header X-XSS-Protection "1; mode=block" always;
+                add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+            }
+            NGINX_EOF
+
+            tar xzf site.tar.gz
+            mkdir -p ${{ env.PROJECT_DIR }}
+            rm -rf ${{ env.PROJECT_DIR }}/*
+            mv dist/* ${{ env.PROJECT_DIR }}/
+
+            # shared network for nginx ↔ api
+            podman network exists ${{ env.NETWORK }} || podman network create ${{ env.NETWORK }}
+
+            # build + (re)start the contact-form service
+            podman build -t ${{ env.API_CONTAINER }}:latest ./server
+            podman stop ${{ env.API_CONTAINER }} 2>/dev/null || true
+            podman rm ${{ env.API_CONTAINER }} 2>/dev/null || true
+            podman run -d \
+              --name ${{ env.API_CONTAINER }} \
+              --network ${{ env.NETWORK }} \
+              -e JMAP_SESSION_URL="$JMAP_SESSION_URL" \
+              -e JMAP_TOKEN="$JMAP_TOKEN" \
+              -e MAIL_FROM="noreply@rotko.net" \
+              -e MAIL_TO="modgrad@rotko.net" \
+              -e PORT="${{ env.API_PORT }}" \
+              --restart unless-stopped \
+              ${{ env.API_CONTAINER }}:latest
+
+            # (re)start nginx on the same network
+            podman stop ${{ env.CONTAINER_NAME }} 2>/dev/null || true
+            podman rm ${{ env.CONTAINER_NAME }} 2>/dev/null || true
+            podman run -d \
+              --name ${{ env.CONTAINER_NAME }} \
+              --network ${{ env.NETWORK }} \
+              -p 127.0.0.1:${{ env.CONTAINER_PORT }}:80 \
+              -v /home/${{ secrets.DEPLOY_USER }}/${{ env.PROJECT_DIR }}:/usr/share/nginx/html:ro,Z \
+              -v /home/${{ secrets.DEPLOY_USER }}/nginx-modgrad.conf:/etc/nginx/conf.d/default.conf:ro,Z \
+              --restart unless-stopped \
+              nginx:alpine
+
+            sleep 2
+            if ! podman ps | grep -q ${{ env.CONTAINER_NAME }}; then
+              echo "nginx failed to start"
+              podman logs ${{ env.CONTAINER_NAME }}
+              exit 1
+            fi
+
+            curl -f http://127.0.0.1:${{ env.CONTAINER_PORT }}/ > /dev/null || {
+              echo "Site not responding"
+              podman logs ${{ env.CONTAINER_NAME }}
+              exit 1
+            }
+
+            # confirm the form proxy is wired (health check needs no JMAP creds)
+            if ! curl -fs http://127.0.0.1:${{ env.CONTAINER_PORT }}/api/health | grep -q '"ok":true'; then
+              echo "Contact API not responding through nginx"
+              podman logs ${{ env.API_CONTAINER }}
+              exit 1
+            fi
+
+            rm -f site.tar.gz
+            rm -rf dist/
+
+            echo "Deployment successful"

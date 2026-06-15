@@ -1,0 +1,10 @@
+{
+  "name": "modgrad-contact",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "description": "JMAP-backed contact endpoint for modgrad.com",
+  "scripts": {
+    "start": "node contact.mjs"
+  }
+}

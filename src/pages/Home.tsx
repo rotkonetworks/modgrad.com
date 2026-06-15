@@ -6,10 +6,12 @@ import {
   crates,
   differentiators,
   heroCode,
+  howItWorks,
   pillars,
   proofStat,
   regions,
   runningToday,
+  useCases,
 } from "@/data/content";
 
 export default function Home() {
@@ -192,6 +194,32 @@ export default function Home() {
         </div>
       </section>
 
+      {/* ── how it works ─────────────────────────────── */}
+      <section class="container-page py-20">
+        <div class="eyebrow mb-3">How it works</div>
+        <h2 class="text-[clamp(1.6rem,3.6vw,2.3rem)] tracking-[-0.025em] mb-10">
+          Think, compose, learn.
+        </h2>
+        <div class="border border-line rounded-xl overflow-hidden">
+          <For each={howItWorks}>
+            {([title, body], i) => (
+              <div
+                class="bg-card p-6 sm:p-8 grid sm:grid-cols-[3rem_1fr] gap-x-5 items-baseline"
+                classList={{ "border-t border-line": i() > 0 }}
+              >
+                <div class="font-mono text-sm text-mute tabular-nums">
+                  {String(i() + 1).padStart(2, "0")}
+                </div>
+                <div>
+                  <h3 class="text-[1.15rem] mb-2">{title}</h3>
+                  <p class="text-dim leading-relaxed max-w-[62ch]">{body}</p>
+                </div>
+              </div>
+            )}
+          </For>
+        </div>
+      </section>
+
       {/* ── differentiators ──────────────────────────── */}
       <section class="container-page py-20">
         <div class="eyebrow mb-3">Design</div>
@@ -213,6 +241,24 @@ export default function Home() {
             )}
           </For>
         </div>
+      </section>
+
+      {/* ── what you can build ───────────────────────── */}
+      <section class="container-page py-20">
+        <div class="eyebrow mb-3">What you can build</div>
+        <h2 class="text-[clamp(1.6rem,3.6vw,2.3rem)] tracking-[-0.025em] mb-10">
+          A toolkit, not a model.
+        </h2>
+        <dl class="border-t border-line">
+          <For each={useCases}>
+            {([term, desc]) => (
+              <div class="py-4 border-b border-line grid sm:grid-cols-[12rem_1fr] gap-x-6 gap-y-1 items-baseline">
+                <dt class="text-[1.02rem]" style={{ "font-weight": 600 }}>{term}</dt>
+                <dd class="text-dim leading-relaxed max-w-[60ch]">{desc}</dd>
+              </div>
+            )}
+          </For>
+        </dl>
       </section>
 
       {/* ── crates ───────────────────────────────────── */}

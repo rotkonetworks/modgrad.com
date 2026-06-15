@@ -92,6 +92,29 @@ export const differentiators = [
   ["A faithful port, with tests", "A line-for-line Rust port of the Sakana AI CTM (arXiv 2505.05522), with full BPTT. No architectural shortcuts, and the tests to back it."],
 ];
 
+export const howItWorks: [string, string][] = [
+  [
+    "It thinks",
+    "A Continuous Thought Machine iterates a single neuron pool over internal ticks — reading its memory, attending to the input, accumulating evidence — and exits when it's confident. Depth comes from deliberation time, not stacked layers.",
+  ],
+  [
+    "It composes",
+    "Wire many CTMs into a directed graph of specialized regions that route information, remember, and feed action back into perception. Eight regions at 187k parameters beat a single 450k model.",
+  ],
+  [
+    "It learns",
+    "Full backpropagation through every tick — and, if you want, from its own surprise: pain relative to expectation, neuromodulators, dream replay, and sleep consolidation.",
+  ],
+];
+
+export const useCases: [string, string][] = [
+  ["Language models", "Byte-level CTMs and byte-latent transformers — no tokenizer, raw bytes in."],
+  ["Reasoning agents", "The NeuralComputer holds state across turns: generate, observe, act, repeat."],
+  ["Multimodal systems", "One embedding table for text, images, audio, timestamps, and actions."],
+  ["Bio-inspired research", "Episodic memory, neuromodulated learning, even multiple selves on one brain."],
+  ["LLM composition", "Mount a frozen Qwen2.5 — or a byte-latent transformer — as the cerebellum."],
+];
+
 export const heroCode = `use modgrad_ctm::graph::{RegionalConfig, RegionalWeights,
     RegionalAdamW, RegionalGradients, regional_train_token,
     NeuralComputer};

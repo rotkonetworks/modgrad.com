@@ -64,8 +64,8 @@ export default function Contact() {
       </h1>
       <p class="mt-4 text-dim text-[1.05rem] max-w-[58ch] leading-relaxed">
         Technical questions are best asked in the open, where the answers help
-        everyone. For private inquiries — building on modgrad, or funding where it's
-        headed — use the form.
+        everyone. For private inquiries (building on modgrad, or funding where it's
+        headed), use the form.
       </p>
 
       <div use:reveal class="grid lg:grid-cols-[1.1fr_0.9fr] gap-5 mt-10">
@@ -78,7 +78,7 @@ export default function Contact() {
                 <div class="text-3xl grad-text font-mono mb-3">∇</div>
                 <h2 class="text-xl mb-2">Message sent.</h2>
                 <p class="text-dim text-sm leading-relaxed max-w-[34ch] mx-auto">
-                  Thanks — it's on its way to the team and we'll reply to the address
+                  Thanks. It's on its way to the team, and we'll reply to the address
                   you gave.
                 </p>
               </div>
@@ -98,7 +98,7 @@ export default function Contact() {
                 <textarea id="c-msg" class="field" required value={message()} onInput={(e) => setMessage(e.currentTarget.value)} placeholder="What are you working on?" />
               </div>
 
-              {/* honeypot — hidden from humans */}
+              {/* honeypot, hidden from humans */}
               <input class="hp" tabindex="-1" autocomplete="off" aria-hidden="true" value={company()} onInput={(e) => setCompany(e.currentTarget.value)} name="company" />
 
               <Show when={status() === "error"}>
@@ -121,7 +121,7 @@ export default function Contact() {
             <div class="eyebrow mb-3">Open forum</div>
             <h2 class="text-lg mb-2">Ask in public</h2>
             <p class="text-sm text-dim leading-relaxed mb-4">
-              Questions, ideas, and design discussion happen on GitHub Discussions —
+              Questions, ideas, and design discussion happen on GitHub Discussions,
               searchable, and open to everyone.
             </p>
             <a href={site.discussions} target="_blank" rel="noopener" class="btn btn-ghost w-full justify-center">

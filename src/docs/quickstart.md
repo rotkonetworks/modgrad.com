@@ -10,9 +10,9 @@ description: Build, train, and run an 8-region brain in about twenty lines of Ru
 ## Build a brain
 
 Pick a preset, train it on your data, and run it as an interactive neural
-computer. The presets — `four_region`, `eight_region_small` (187k params),
-`eight_region` (~81M), `eight_region_medium`, `eight_region_large`, and
-`eight_region_billion` — all live in `modgrad_ctm::graph::RegionalConfig`.
+computer. The presets all live in `modgrad_ctm::graph::RegionalConfig`:
+`four_region`, `eight_region_small` (187k params), `eight_region` (~81M),
+`eight_region_medium`, `eight_region_large`, and `eight_region_billion`.
 
 ```rust
 use modgrad_ctm::graph::{RegionalConfig, RegionalWeights, RegionalAdamW,
@@ -37,9 +37,9 @@ let mut nc = NeuralComputer::new(w);
 let response = nc.chat("hello", 100, 0.8);
 ```
 
-You own the training loop. modgrad gives you pure functions —
-`regional_train_token` returns a loss and accumulates gradients; `opt.step`
-applies them — and stays out of your way.
+You own the training loop. modgrad gives you pure functions and stays out of your
+way: `regional_train_token` returns a loss and accumulates gradients, and
+`opt.step` applies them.
 
 ## Build flags
 
@@ -56,7 +56,7 @@ build time. modgrad requires the Rust 2024 edition.
 
 ## Try the minimal example
 
-`minictm` is nanoGPT for CTMs — a single-file trainer that uses the SDK directly,
+`minictm` is nanoGPT for CTMs: a single-file trainer that uses the SDK directly,
 with no runtime around it.
 
 ```bash

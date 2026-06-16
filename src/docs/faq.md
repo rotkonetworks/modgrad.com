@@ -19,7 +19,7 @@ naturally spends more compute on harder inputs.
 
 No garbage-collector pauses during training, no Python in the inner loop, and
 explicit memory layout. The type system enforces the brain/host boundary at
-compile time — a brain module literally cannot do I/O. You get fearless
+compile time, so a brain module literally cannot do I/O. You get fearless
 concurrency for parallel multi-region computation, and hand-written AVX-512
 kernels where they matter.
 
@@ -50,5 +50,5 @@ page says which is which.
 modgrad is open source under MIT. The code lives on
 [GitHub](https://github.com/rotkonetworks/modgrad), and technical questions are
 best asked in [Discussions](https://github.com/rotkonetworks/modgrad/discussions).
-For private inquiries — collaboration or investment — use the
+For private inquiries such as collaboration or investment, use the
 [contact form](/contact).

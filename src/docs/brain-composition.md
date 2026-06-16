@@ -2,15 +2,15 @@
 title: Brain composition
 section: Architecture
 order: 40
-description: Wiring CTMs into a directed graph of eight brain regions — the closed cortical loop, each region in depth, inter-region synapses, learned routing, and the presets behind the maze result.
+description: Wiring CTMs into a directed graph of eight brain regions. The closed cortical loop, each region in depth, inter-region synapses, learned routing, and the presets behind the maze result.
 ---
 
 # Brain composition
 
 A single [CTM](/docs/continuous-thought-machine) is one region. Graph composition
 (`RegionalConfig`, `RegionalWeights`, `regional_train_token`) wires many of them
-into a directed brain. Each region is its own CTM — its own neuron pool, memory
-depth, tick budget, and exit gate — and they exchange signals over learned
+into a directed brain. Each region is its own CTM, with its own neuron pool, memory
+depth, tick budget, and exit gate, and they exchange signals over learned
 inter-region synapses.
 
 ## The closed cortical loop
@@ -40,7 +40,7 @@ hippocampus ──→ attention               (memory-guided attention)
 ## The eight regions
 
 Cortical regions are wide; subcortical regions are deliberately small. Memory
-depth and the exit-gate β are tuned per region — fast peripheral regions exit
+depth and the exit-gate β are tuned per region: fast peripheral regions exit
 early, memory-heavy regions deliberate longer.
 
 | region | tier | width (full / small) | memory | β (exit) |
@@ -67,14 +67,14 @@ also reads the hippocampus, so **past context shapes what the cortex attends to*
 
 ### output
 
-Integrates attention's routing over many ticks to pick the next action or token —
-the longest-deliberating cortical region. **In:** attention. **Out:** motor, basal
+Integrates attention's routing over many ticks to pick the next action or token.
+It is the longest-deliberating cortical region. **In:** attention. **Out:** motor, basal
 ganglia.
 
 ### motor
 
 Emits the action and closes the cortical loop by feeding it back to input. It also
-carries the action plus the observation to the cerebellum — the seam where a forward
+carries the action plus the observation to the cerebellum, the seam where a forward
 model, or a mounted LLM, sees both the action and the world. **In:** output.
 **Out:** input (+ obs), cerebellum (+ obs).
 
@@ -98,7 +98,7 @@ Monitors internal state, biased by hippocampal memory, to weight what matters no
 ### hippocampus
 
 Binds the activations of all four cortical regions into the longest, deepest memory
-in the brain, then feeds back into attention — the edge that turns stored experience
+in the brain, then feeds back into attention. That edge turns stored experience
 into recalled context. Without it, memory accumulates but never influences a
 prediction. **In:** input, attention, output, motor. **Out:** insula (and attention).
 
@@ -106,18 +106,18 @@ prediction. **In:** input, attention, output, motor. **Out:** insula (and attent
 
 A `Connection` concatenates the activations of its source regions (optionally
 appending the raw observation), projects them through a learned linear "synapse"
-into the destination's input width, and — when several connections target one
-region — **sums** the projected inputs element-wise. So the hippocampus can
-receive from four cortical regions without changing its neuron count; each edge
+into the destination's input width, and, when several connections target one
+region, **sums** the projected inputs element-wise. So the hippocampus can
+receive from four cortical regions without changing its neuron count, and each edge
 trains independently.
 
-## Routing — fixed or learned
+## Routing: fixed or learned
 
 You either hand-write the topology above, or switch on the **`RegionalRouter`**: a
 thalamus-style mechanism that, every tick, scores region-to-region affinity from
 the global sync state plus a tick embedding and selects the **top-k sources per
 destination** (k = 3, with a little ε-greedy exploration). On the 8-region brain
-it adds roughly 40k parameters — under 0.3% — and replaces fixed wiring with
+it adds roughly 40k parameters, under 0.3%, and replaces fixed wiring with
 learned, tick-conditioned routing.
 
 ## Auxiliary losses
@@ -159,7 +159,7 @@ cargo run -p mazes --release -- --brain --size 21 --steps 5000 --seed 42
 
 ## The NeuralComputer
 
-`NeuralComputer` wraps a trained brain for interactive use — a `generate →
+`NeuralComputer` wraps a trained brain for interactive use: a `generate →
 observe → step` loop and a text `chat(prompt, max_tokens, temperature)` helper that
 holds state across turns. Run it as a daemon and the
 [3D debugger](/docs/runtime-cli) attaches over TCP.

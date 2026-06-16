@@ -2,7 +2,7 @@
 title: SDK crates
 section: Reference
 order: 90
-description: Fourteen composable Rust crates — use any of them independently.
+description: Fourteen composable Rust crates. Use any of them independently.
 ---
 
 # SDK crates
@@ -19,8 +19,8 @@ know about `modgrad-codec`. Import one, or import all fourteen.
 | **modgrad-compute** | `Linear`, tensor ops, batched dispatch, resident GPU buffers |
 | **modgrad-device** | CPU / CUDA / ROCm / KFD / Vulkan backends; resident kernels (matvec, AdamW, RoPE, RMSNorm) |
 | **modgrad-transformer** | transformer blocks, MHA, RoPE, KV cache, `GptModelResident`, Qwen-class loader |
-| **modgrad-blt** | byte-latent transformer — entropy patcher, local encoder/decoder, byteify recipe |
-| **modgrad-substrate** | foundation-model substrate — Q4_K residency, streaming loaders, 7B-on-8 GB target |
+| **modgrad-blt** | byte-latent transformer: entropy patcher, local encoder/decoder, byteify recipe |
+| **modgrad-substrate** | foundation-model substrate: Q4_K residency, streaming loaders, 7B-on-8 GB target |
 | **modgrad-codec** | `VisualRetina` (V1→V4), VQ-VAE, audio codec, FSQ, byte n-gram hash |
 | **modgrad-ffn** | SwiGLU language prior + `FrozenCerebellum` trait |
 | **modgrad-data** | type-safe multimodal tokenization, mixed-modality streaming, lazy loading |
@@ -28,7 +28,7 @@ know about `modgrad-codec`. Import one, or import all fourteen.
 | **modgrad-memory** | episodic memory with valence, content-addressable recall, surprise-gated replay |
 | **modgrad-io** | telemetry, wincode serialization, safetensors + ONNX + GGUF backends |
 | **modgrad-persist** | wincode / JSON save-load, f32/f16/i8 quantization |
-| **modgrad-traits** | the core traits — `Brain`, `Encoder`, `LossFn`, `TokenInput` |
+| **modgrad-traits** | the core traits: `Brain`, `Encoder`, `LossFn`, `TokenInput` |
 
 ## The trait foundation
 
@@ -44,11 +44,11 @@ trait Brain {
 }
 ```
 
-State is **explicit** and threaded through — never hidden behind `&mut self`. The
+State is **explicit** and threaded through, never hidden behind `&mut self`. The
 type system enforces the brain/host boundary at compile time: a brain literally
 cannot do I/O. The paired `Vjp` trait requires a `backward` alongside every
 `forward`, so a new op can't be merged half-differentiable.
 
 This is the "pure functions over magic" design: no YAML, no framework defaults, no
-hidden global state. Optimizer moments, NLM history, sync buffers — all are
+hidden global state. Optimizer moments, NLM history, and sync buffers are all
 serializable structs you can inspect and checkpoint.

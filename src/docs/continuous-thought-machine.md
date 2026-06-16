@@ -2,7 +2,7 @@
 title: Continuous Thought Machine
 section: Architecture
 order: 30
-description: The exact mechanics of a CTM — the per-tick loop, U-Net synapse, non-local memory, synchronization read-out, learned early-exit, the loss blend, and full BPTT.
+description: The exact mechanics of a CTM. The per-tick loop, U-Net synapse, non-local memory, synchronization read-out, learned early-exit, the loss blend, and full BPTT.
 ---
 
 # Continuous Thought Machine
@@ -11,7 +11,7 @@ The Continuous Thought Machine (CTM) is the core of modgrad: a recurrent
 architecture whose depth comes from **thinking time**, not stacked layers. A
 single shared neuron pool of width `d_model` is iterated over `T` internal ticks,
 accumulating evidence before it commits to an answer. It is a faithful Rust port
-of the [Sakana AI CTM](https://arxiv.org/abs/2505.05522) — the forward pass
+of the [Sakana AI CTM](https://arxiv.org/abs/2505.05522). The forward pass
 matches `ContinuousThoughtMachine.forward()` and the synapse matches `SynapseUNET`
 from the reference implementation, with full backpropagation through time.
 
@@ -42,7 +42,7 @@ ticks, not more parameters.
 Inter-neuron mixing is not a single linear layer. The synapse is a
 skip-connected **U-Net** whose intermediate widths are laid out with a `linspace`
 bottleneck (`SynapseUNet`), so information is compressed and re-expanded with
-residual skips at each level. This is the component that gives a CTM its
+residual skips at each level. This component gives a CTM its
 expressivity per tick.
 
 ## Non-local memory (NLM)
@@ -51,10 +51,10 @@ Every neuron keeps a sliding window of its last `memory_length` pre-activations.
 A small per-neuron network turns that history into the neuron's next state. Two
 variants ship:
 
-- **deep** — a two-stage SuperLinear map `M → H → 2` with GLU gating;
-- **shallow** — a single `M → 2` map.
+- **deep**: a two-stage SuperLinear map `M → H → 2` with GLU gating;
+- **shallow**: a single `M → 2` map.
 
-NLM is what lets a neuron's behavior depend on its own recent trajectory rather
+NLM lets a neuron's behavior depend on its own recent trajectory rather
 than only the instantaneous input.
 
 ## Synchronization read-out
@@ -92,7 +92,7 @@ losses extend this:
 
 ## Data structures
 
-A CTM is a handful of explicit, serializable structs — there is no hidden state:
+A CTM is a handful of explicit, serializable structs, with no hidden state:
 
 | type | role |
 |------|------|
@@ -107,9 +107,9 @@ every tick and head (`[ticks][heads][tokens]`).
 
 ## Full backpropagation through time
 
-Training unrolls all `T` ticks and computes gradients for **every** weight — the
+Training unrolls all `T` ticks and computes gradients for **every** weight: the
 U-Net blocks, both NLM stages, the sync decays, the attention projections, the
-output projection, and the exit gate. There are no stop-gradient shortcuts; a
+output projection, and the exit gate. There are no stop-gradient shortcuts, and a
 dedicated test (`small_scale_bptt`) checks the unrolled backward against a
 reference. Every hot-path operation (matmul, layer norm, SiLU/GLU backward,
 outer products) routes through `modgrad-device`, so the identical forward and
@@ -120,7 +120,7 @@ backward run on CPU or any GPU backend.
 The implementation tracks the published Sakana AI CTM rather than re-inventing
 it: the forward pass, the U-Net synapse, and the synchronization mechanism each
 correspond to the reference code, and the config presets are covered by tests.
-That faithfulness is the point — modgrad is the architecture you can read,
+That faithfulness is the point. modgrad is the architecture you can read,
 re-derive, and trust.
 
 Next: compose many CTMs into a [multi-region brain →](/docs/brain-composition).

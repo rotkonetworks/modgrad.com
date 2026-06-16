@@ -177,7 +177,7 @@ export default function Home() {
               </h2>
               <p class="text-dim leading-relaxed text-[.98rem]">
                 Each region is its own CTM with its own neuron count, memory depth, and tick
-                budget. They talk over learned inter-region synapses — a cortical loop plus
+                budget. They talk over learned inter-region synapses: a cortical loop plus
                 subcortical value, salience, and episodic memory pathways.
               </p>
               <A href="/docs/brain-composition" class="inline-block mt-5 text-sm text-accent">

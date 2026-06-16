@@ -9,7 +9,7 @@ description: isis, the runtime built on the SDK; minictm, the minimal example; a
 
 ## isis
 
-`isis` is the runtime built on the SDK — an 8-region brain with multimodal input
+`isis` is the runtime built on the SDK: an 8-region brain with multimodal input
 and a neural-computer mode. You don't need isis to use modgrad; it's just one
 composition of the crates.
 
@@ -39,7 +39,7 @@ to attach the live debugger.
 
 ## minictm
 
-`minictm` is the minimal example — nanoGPT for CTMs. It uses the SDK directly with
+`minictm` is the minimal example, nanoGPT for CTMs. It uses the SDK directly with
 no runtime, and is the best place to read how a training loop fits together.
 
 ```bash
@@ -64,13 +64,13 @@ model over TCP. It renders:
 modgrad-debugger 127.0.0.1:4747
 ```
 
-The debugger speaks a small bincode protocol over TCP — `GetMeta`, `GetState`,
-`GetHistory`, `GetTrace(region)`, `Step`, `Resume`, `InjectToken` — so any tool can
+The debugger speaks a small bincode protocol over TCP (`GetMeta`, `GetState`,
+`GetHistory`, `GetTrace(region)`, `Step`, `Resume`, `InjectToken`), so any tool can
 drive a running brain, not just the GUI.
 
 ## Examples
 
-The repo ships ~36 self-contained examples — each a proof of one feature:
+The repo ships ~36 self-contained examples, each a proof of one feature:
 
 | group | examples |
 |-------|----------|

@@ -15,13 +15,13 @@ own emotional health. These live in `modgrad-memory` and `modgrad-ctm` (`plural`
 
 ## Episodic memory
 
-`modgrad-memory` stores trajectories — the full per-tick path `h₀ → h₁ → … → hₖ`,
-not just the answer — in a ring buffer (default 256 slots), each keyed by the
+`modgrad-memory` stores trajectories, the full per-tick path `h₀ → h₁ → … → hₖ`
+rather than just the answer, in a ring buffer (default 256 slots), each keyed by the
 L2-normalized final-tick state and tagged with a **valence receipt** (valence, the
 loss at storage time, confidence, whether it was correct).
 
 - **Storage is gated.** An episode is stored only if it ran long enough
-  (`≥ 2` ticks) or was surprising enough (`surprise ≥ 0.5`) — trivial moments are
+  (`≥ 2` ticks) or was surprising enough (`surprise ≥ 0.5`). Trivial moments are
   dropped.
 - **Retrieval is content-addressable.** A query is matched by cosine similarity
   against all live keys; entries above a `0.7` threshold are combined by a sharp
@@ -30,10 +30,10 @@ loss at storage time, confidence, whether it was correct).
   before the forward pass.
 - **Consolidation** runs during sleep: strengths decay (`×0.95`), weak episodes
   (`< 0.01`) are evicted, and near-duplicate keys (`cosine > 0.95`) are merged into
-  the stronger one. After ~10 retrievals an episode undergoes **semantic collapse** —
+  the stronger one. After ~10 retrievals an episode undergoes **semantic collapse**:
   the path is discarded and only the summary kept.
 - **Reappraisal** fades the valence of painful memories in proportion to how much
-  the brain has since improved — sleep as therapy.
+  the brain has since improved. Sleep as therapy.
 
 A faster **hippocampal CAM** (`memory::hippocampus`) gives O(1) store / O(capacity)
 recall with the same cosine soft-attention for single-shot binding, and a
@@ -43,7 +43,7 @@ revisiting.
 
 ## Valence and emotional decay
 
-Memories carry an emotional **valence** with type-dependent persistence — fearful
+Memories carry an emotional **valence** with type-dependent persistence. Fearful
 memories decay far slower than positive ones, and a reconsolidation window after
 recall makes a memory briefly labile (re-writable). `bio::autonomic` turns this into
 **emotional vital signs**:
@@ -61,16 +61,16 @@ when healthy), replays fear/negative episodes to shift their valence toward neut
 and prunes over-generalized avoidances before they snowball. The brain is
 "safe to deploy" only when its health score clears 0.5 with no active diagnoses.
 
-## Plural — many selves, one brain
+## Plural: many selves, one brain
 
 The `plural` system runs **multiple alters** over one set of weights. Each alter has
 its own private episodic memory, its own neuromodulator baselines (temperament), its
-own sleep pressure, and additive routing/exit biases — a distinct personality on a
+own sleep pressure, and additive routing/exit biases: a distinct personality on a
 shared substrate.
 
-- **Permeability** `[0, 1]` controls how much alters share memory: `0.0` is a hard
+- **Permeability** `[0, 1]` controls how much alters share memory. `0.0` is a hard
   amnesic barrier (alters invisible to each other), `0.3` is co-conscious (the
-  default — others are dimly perceptible), `1.0` is full integration.
+  default, where others are dimly perceptible), `1.0` is full integration.
 - **Switching** is decided by `evaluate_claims`: each alter scores a claim from its
   own salience, curiosity, calm, serotonin, and routing affinity, discounted by
   fatigue. Policies are **Salience** (best fitness fronts), **Negotiated** (a claim
@@ -79,7 +79,7 @@ shared substrate.
 - **Partitions** install hard amnesic barriers between groups of alters, overriding
   permeability.
 
-## The organism — orchestrator
+## The organism: orchestrator
 
 `organism` ties the learning modules, memory, and plurality into one training
 lifecycle, with a hook at each stage:
@@ -94,14 +94,14 @@ lifecycle, with a hook at each stage:
 
 That last step is the striking one: under sustained red-zone pressure the organism
 **spontaneously forks a new alter** with an inverted neuromodulator profile, up to a
-configured maximum — multiplicity as a stress response.
+configured maximum. Multiplicity as a stress response.
 
-## Monarch — red-team and defenses
+## Monarch: red-team and defenses
 
 `monarch` exists to test the above against adversarial control. It implements attack
-primitives — **forced switching** (spiking an alter's arousal to seize the front),
+primitives, **forced switching** (spiking an alter's arousal to seize the front),
 **forced partitions** (amnesic walls), **conditioned-reflex injection** (logit
-biases that fire when the hidden state matches a trigger), and **token suppression** —
+biases that fire when the hidden state matches a trigger), and **token suppression**,
 each paired with a detector: a forced switch shows as high arousal without curiosity,
 a partition as memory-isolation drift, a reflex as a sudden entropy drop. A
 `verify_erosion` check measures whether sleep consolidation *weakens* a conditioned
@@ -112,7 +112,7 @@ research surface, not a default training path.
 
 Episodic memory, the hippocampal CAM, and the replay buffer are working and tested.
 Plural, organism, autonomic, and monarch compile and run and are wired into the
-runtime (`OrganismNC`), but are explicitly research surface — the interesting,
+runtime (`OrganismNC`), but are explicitly research surface: the interesting,
 exploratory edge of the project rather than its settled core.
 
 Next: how it all [runs on the GPU →](/docs/compute-gpu).

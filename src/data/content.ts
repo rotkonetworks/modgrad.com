@@ -1,5 +1,5 @@
 // Landing-page content. Every number here is grounded in the modgrad
-// source tree (maze benchmark, GPU benches, crate manifest) — keep it honest.
+// source tree (maze benchmark, GPU benches, crate manifest). Keep it honest.
 
 export const proofStat = {
   headline: "187k-param brain beats a 450k single model",
@@ -14,7 +14,7 @@ export const proofStat = {
 export const runningToday = [
   ["Qwen2.5-0.5B inference", "Loads safetensors, decodes coherent text on the resident GPU runtime."],
   ["End-to-end LM training", "lm_validate drives cross-entropy 5.72 → 0.74 in 10 steps on real text."],
-  ["Full-residency GPU path", "Weights stay on-device across steps — up to 5.6× faster per call (1024×512, RX 7600M XT)."],
+  ["Full-residency GPU path", "Weights stay on-device across steps, up to 5.6× faster per call (1024×512, RX 7600M XT)."],
   ["Live 3D brain debugger", "Attach over TCP and watch neurons, token streams, and sync in real time."],
 ];
 
@@ -22,7 +22,7 @@ export const pillars = [
   {
     tag: "core",
     title: "Continuous Thought Machine",
-    body: "A neuron pool that thinks over internal ticks instead of stacking layers. NLM memory traces, U-Net synapse, sync readout, learned early-exit — full BPTT through every tick.",
+    body: "A neuron pool that thinks over internal ticks instead of stacking layers. NLM memory traces, U-Net synapse, sync readout, learned early-exit, full BPTT through every tick.",
     href: "/docs/continuous-thought-machine",
   },
   {
@@ -52,7 +52,7 @@ export const pillars = [
   {
     tag: "transformers",
     title: "Transformers & foundation models",
-    body: "A full transformer stack — MHA, RoPE, KV cache, resident GPT — runs native Qwen2.5 inference today. Plus a byte-latent transformer (BLT) and mounting a frozen LLM as the brain's cerebellum.",
+    body: "A full transformer stack (MHA, RoPE, KV cache, resident GPT) runs native Qwen2.5 inference today. Plus a byte-latent transformer (BLT) and mounting a frozen LLM as the brain's cerebellum.",
     href: "/docs/foundation-models",
   },
 ];
@@ -73,7 +73,7 @@ export const crates: [string, string][] = [
   ["modgrad-compute", "Linear, tensor ops, batched + resident GPU dispatch"],
   ["modgrad-device", "CPU / CUDA / ROCm / KFD / Vulkan backends, resident kernels"],
   ["modgrad-transformer", "blocks, MHA, RoPE, KV cache, resident GPT, Qwen loader"],
-  ["modgrad-blt", "byte-latent transformer — entropy patcher, byteify recipe"],
+  ["modgrad-blt", "byte-latent transformer: entropy patcher, byteify recipe"],
   ["modgrad-substrate", "Q4_K residency, streaming loaders, 7B on 8 GB target"],
   ["modgrad-codec", "VisualRetina V1→V4, VQ-VAE, audio codec, FSQ"],
   ["modgrad-ffn", "SwiGLU language prior + FrozenCerebellum trait"],
@@ -82,7 +82,7 @@ export const crates: [string, string][] = [
   ["modgrad-memory", "episodic memory with valence, content-addressable recall"],
   ["modgrad-io", "telemetry, safetensors + ONNX + GGUF backends"],
   ["modgrad-persist", "wincode / JSON save-load, f32/f16/i8 quantization"],
-  ["modgrad-traits", "Brain, Encoder, LossFn — the compile-time foundation"],
+  ["modgrad-traits", "Brain, Encoder, LossFn: the compile-time foundation"],
 ];
 
 export const differentiators = [
@@ -95,7 +95,7 @@ export const differentiators = [
 export const howItWorks: [string, string][] = [
   [
     "It thinks",
-    "A Continuous Thought Machine iterates a single neuron pool over internal ticks — reading its memory, attending to the input, accumulating evidence — and exits when it's confident. Depth comes from deliberation time, not stacked layers.",
+    "A Continuous Thought Machine iterates a single neuron pool over internal ticks, reading its memory, attending to the input, and accumulating evidence, then exits when it's confident. Depth comes from deliberation time, not stacked layers.",
   ],
   [
     "It composes",
@@ -103,23 +103,23 @@ export const howItWorks: [string, string][] = [
   ],
   [
     "It learns",
-    "Full backpropagation through every tick — and, if you want, from its own surprise: pain relative to expectation, neuromodulators, dream replay, and sleep consolidation.",
+    "Full backpropagation through every tick. And, if you want, from its own surprise: pain relative to expectation, neuromodulators, dream replay, and sleep consolidation.",
   ],
 ];
 
 export const useCases: [string, string][] = [
-  ["Language models", "Byte-level CTMs and byte-latent transformers — no tokenizer, raw bytes in."],
+  ["Language models", "Byte-level CTMs and byte-latent transformers. No tokenizer, raw bytes in."],
   ["Reasoning agents", "The NeuralComputer holds state across turns: generate, observe, act, repeat."],
   ["Multimodal systems", "One embedding table for text, images, audio, timestamps, and actions."],
   ["Bio-inspired research", "Episodic memory, neuromodulated learning, even multiple selves on one brain."],
-  ["LLM composition", "Mount a frozen Qwen2.5 — or a byte-latent transformer — as the cerebellum."],
+  ["LLM composition", "Mount a frozen Qwen2.5 (or a byte-latent transformer) as the cerebellum."],
 ];
 
 export const heroCode = `use modgrad_ctm::graph::{RegionalConfig, RegionalWeights,
     RegionalAdamW, RegionalGradients, regional_train_token,
     NeuralComputer};
 
-// an 8-region brain — 187k params
+// an 8-region brain (187k params)
 let cfg = RegionalConfig::eight_region_small(128, 256, 16);
 let mut w   = RegionalWeights::new(cfg);
 let mut opt = RegionalAdamW::new(&w).with_lr(3e-4);

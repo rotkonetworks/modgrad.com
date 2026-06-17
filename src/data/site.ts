@@ -15,6 +15,7 @@ export const nav = [
   { label: "architecture", href: "/docs/continuous-thought-machine" },
   { label: "sdk", href: "/docs/crates" },
   { label: "docs", href: "/docs" },
+  { label: "play", href: "/play" },
   { label: "community", href: "/contact" },
   { label: "github", href: site.repo, ext: true },
 ] as const;

@@ -8,6 +8,7 @@ import Footer from "@/components/Footer";
 import Home from "@/pages/Home";
 const Docs = lazy(() => import("@/pages/Docs"));
 const Contact = lazy(() => import("@/pages/Contact"));
+const Play = lazy(() => import("@/pages/Play"));
 
 function Layout(props: { children?: JSX.Element }) {
   const loc = useLocation();
@@ -35,6 +36,7 @@ export default function App() {
       <Route path="/" component={Home} />
       <Route path="/docs" component={Docs} />
       <Route path="/docs/:slug" component={Docs} />
+      <Route path="/play" component={Play} />
       <Route path="/contact" component={Contact} />
       <Route path="*" component={Docs} />
     </Router>

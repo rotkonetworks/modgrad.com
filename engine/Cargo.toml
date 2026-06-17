@@ -1,0 +1,23 @@
+[package]
+name = "modgrad-mini"
+version = "0.1.0"
+edition = "2021"
+description = "Standalone faithful reimplementation of the modgrad CTM forward pass for in-browser demos."
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+wasm = ["dep:wasm-bindgen", "dep:serde-wasm-bindgen"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wasm-bindgen = { version = "0.2", optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
+
+[profile.release]
+opt-level = 3
+lto = true

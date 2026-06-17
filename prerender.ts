@@ -57,6 +57,16 @@ emit(
   ),
 );
 
+// play — interactive demo
+emit(
+  "/play",
+  variant(
+    "Watch it think — modgrad",
+    "A real modgrad Continuous Thought Machine solves a maze in your browser. Watch its neurons fire, attention sweep the maze, and certainty rise as it commits each move. Runs entirely client-side via wasm.",
+    "/play",
+  ),
+);
+
 // community / contact
 emit(
   "/contact",
@@ -74,11 +84,11 @@ for (const p of pages) {
 }
 
 // sitemap.xml
-const urls = ["/", "/contact", "/docs", ...pages.map((p) => `/docs/${p.slug}`)];
+const urls = ["/", "/play", "/contact", "/docs", ...pages.map((p) => `/docs/${p.slug}`)];
 const sitemap =
   `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
   urls.map((u) => `  <url><loc>${SITE}${u}</loc></url>`).join("\n") +
   `\n</urlset>\n`;
 writeFileSync(join(dist, "sitemap.xml"), sitemap);
 
-console.log(`prerendered ${pages.length + 3} routes + sitemap`);
+console.log(`prerendered ${pages.length + 4} routes + sitemap`);

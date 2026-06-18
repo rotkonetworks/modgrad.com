@@ -25,10 +25,11 @@ type Tick = {
   attention: number[];
 };
 
-// per-tick brain state, condensed for the viz: one magnitude per region,
-// the global-sync magnitude, and the outer exit lambda.
+// per-tick brain state for the 3D particle viz: every neuron's activation
+// (grouped by region) so individual neurons spike, plus global-sync magnitude
+// and the outer exit lambda.
 type BrainTick = {
-  region: number[]; // [n_regions] RMS activation per region this tick
+  acts: number[][]; // [n_regions][d_model] per-neuron activation this tick
   global: number; // RMS of the global-sync vector
   exit: number | null; // outer AdaptiveGate lambda (null if no gate)
 };
@@ -153,7 +154,7 @@ function runBrain(
     const px = renderPixels(grid, ar, ac, gr, gc);
     const out = engine.run_brain_pixels(px);
     const ticks: BrainTick[] = out.ticks.map((t) => ({
-      region: t.region_activations.map((ra) => rms(ra)),
+      acts: t.region_activations, // [region][neuron] — passed straight to the viz
       global: rms(t.global_sync),
       exit: t.exit_lambda,
     }));

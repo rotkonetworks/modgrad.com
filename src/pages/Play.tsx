@@ -17,7 +17,7 @@ type Tick = {
   activations: number[];
   attention: number[];
 };
-type BrainTick = { region: number[]; global: number; exit: number | null };
+type BrainTick = { acts: number[][]; global: number; exit: number | null };
 type BrainTrace = { ticks: BrainTick[]; ticksUsed: number };
 type StepMsg = {
   type: "step";
@@ -575,30 +575,71 @@ export default function Play() {
     ctx.fillText(`${total - 1}`, W - padR - 12, H - 4);
   }
 
-  // ── the 8-region brain map (Model B) ──
-  // anatomical-ish fixed layout, keyed by region name (robust to index order).
-  // cortical loop (input→attention→output→motor→input) as a left diamond with
-  // hippocampus at its centre; subcortical structures down the right.
-  const BRAIN_POS: Record<string, [number, number]> = {
-    input: [0.15, 0.5],
-    attention: [0.35, 0.17],
-    output: [0.55, 0.5],
-    motor: [0.35, 0.83],
-    hippocampus: [0.35, 0.5],
-    basal_ganglia: [0.78, 0.25],
-    insula: [0.8, 0.52],
-    cerebellum: [0.78, 0.79],
-  };
-  const BRAIN_LABEL: Record<string, string> = {
-    input: "input",
-    attention: "attn",
-    output: "output",
-    motor: "motor",
-    cerebellum: "cereb",
-    basal_ganglia: "basal",
-    insula: "insula",
-    hippocampus: "hippo",
-  };
+  // ── the 8-region brain as a rotating 3D particle cloud (Model B) ──
+  // Mirrors the modgrad debugger's 3D brain (debugger/src/main.rs): each neuron
+  // is a point, clustered by region and coloured by region; brightness + size =
+  // its activation, so individual neurons spike as the brain thinks. Hand-rolled
+  // 3D→2D projection, no WebGL.
+  const REGION_COLORS = [
+    "#4488ff", "#44ff88", "#ff8844", "#ff4488",
+    "#8844ff", "#88ff44", "#ff88ff", "#ffff44",
+  ];
+  const shortRegion = (n: string): string =>
+    ({
+      input: "input",
+      attention: "attn",
+      output: "output",
+      motor: "motor",
+      cerebellum: "cereb",
+      basal_ganglia: "basal",
+      insula: "insula",
+      hippocampus: "hippo",
+    })[n] ?? n;
+  type NeuronPos = { x: number; y: number; z: number; region: number; index: number };
+  let neuronPos: NeuronPos[] = [];
+  let builtFor = -1; // total neuron count the layout was built for
+
+  // deterministic [-1,1) RNG (mulberry32) so the layout is stable across frames
+  function makeRand(seed: number) {
+    let s = seed >>> 0;
+    return () => {
+      s = (s + 0x6d2b79f5) >>> 0;
+      let t = s;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return (((t ^ (t >>> 14)) >>> 0) / 4294967296) * 2 - 1;
+    };
+  }
+  // port of debugger build_neuron_positions: a spherical blob per region,
+  // cortical (regions 0–3) on the top row, subcortical (4–7) on the bottom.
+  function buildNeuronPositions(dmodels: number[]) {
+    neuronPos = [];
+    const rand = makeRand(42);
+    for (let ri = 0; ri < dmodels.length; ri++) {
+      const neurons = dmodels[ri];
+      const col = ri % 4;
+      const row = Math.floor(ri / 4);
+      const cx = col * 3.5 - 5.25;
+      const cy = 1.9 - row * 3.8;
+      const cz = ri * 0.3 - 0.5;
+      const spread = Math.sqrt(neurons) * 0.34;
+      for (let ni = 0; ni < neurons; ni++) {
+        const theta = rand() * Math.PI;
+        const phi = rand() * Math.PI * 2;
+        const rr = spread * (0.3 + 0.7 * Math.abs(rand()));
+        neuronPos.push({
+          x: cx + rr * Math.sin(theta) * Math.cos(phi),
+          y: cy + rr * Math.cos(theta),
+          z: cz + rr * Math.sin(theta) * Math.sin(phi),
+          region: ri,
+          index: ni,
+        });
+      }
+    }
+    builtFor = neuronPos.length;
+  }
+  let brainRotY = 0.7;
+  const brainRotX = -0.32;
 
   // brain tick aligned to the current animation tick (held at the last brain
   // tick if the brain exited earlier than the solver's tick count).
@@ -608,120 +649,76 @@ export default function Play() {
     return bt.ticks[Math.min(tickIdx(), bt.ticks.length - 1)];
   };
 
-  function drawBrain() {
+  function drawBrain3D() {
     const bref = brainRef();
     if (!brainCanvas || !bref) return;
-    const W = brainCanvas.clientWidth || 720;
-    const H = Math.round(Math.max(260, Math.min(420, W * 0.46)));
-    const ctx = ctxOf(brainCanvas, W, H);
-    const padX = W * 0.07;
-    const padY = H * 0.12;
-    const px = (nx: number) => padX + nx * (W - 2 * padX);
-    const py = (ny: number) => padY + ny * (H - 2 * padY);
-
-    const names = bref.region_names;
     const dmodels = bref.regions.map((r) => r.d_model);
-    const big = Math.max(...dmodels); // 32 cortical
-    const nodeR = (d: number) => {
-      const s = Math.min(W, H * 1.7) / 720;
-      return (10 + 16 * Math.sqrt(d / big)) * s;
-    };
+    const total = dmodels.reduce((a, b) => a + b, 0);
+    if (builtFor !== total) buildNeuronPositions(dmodels);
 
-    const accent = cssVar("--accent", "#6243D9");
-    const teal = "#29C7D6";
-    const line = cssVar("--line-2", "#D8D2C3");
-    const dim = cssVar("--text-mute", "#6A6676");
-    const cardbg = cssVar("--bg-card", "#fff");
+    const W = brainCanvas.clientWidth || 720;
+    const H = Math.round(Math.max(300, Math.min(460, W * 0.52)));
+    const ctx = ctxOf(brainCanvas, W, H);
+    const cxp = W / 2;
+    const cyp = H / 2;
+    const fov = W * 0.42;
 
-    const pos = (i: number): [number, number] => {
-      const p = BRAIN_POS[names[i]] ?? [0.5, 0.5];
-      return [px(p[0]), py(p[1])];
-    };
-
-    // normalise region magnitudes across the whole step for stable glow
-    const bt = brainTrace();
-    let mmax = 1e-6;
-    if (bt) for (const t of bt.ticks) for (const v of t.region) if (v > mmax) mmax = v;
     const tick = curBrainTick();
-    const magOf = (i: number) => (tick ? Math.min(1, (tick.region[i] ?? 0) / mmax) : 0);
+    // per-step normaliser so spike brightness is stable in scale
+    const bt = brainTrace();
+    let amax = 1e-6;
+    if (bt)
+      for (const t of bt.ticks)
+        for (const ra of t.acts)
+          for (const v of ra) {
+            const a = v < 0 ? -v : v;
+            if (a > amax) amax = a;
+          }
+    const actOf = (region: number, index: number) => {
+      if (!tick) return 0;
+      const v = tick.acts[region]?.[index] ?? 0;
+      return Math.min(1, (v < 0 ? -v : v) / amax);
+    };
 
-    // ── edges (drawn under nodes) ──
-    for (const conn of bref.connections) {
-      const [tx, ty] = pos(conn.to);
-      for (const f of conn.from) {
-        const [sx, sy] = pos(f);
-        const act = magOf(f); // brightness follows the source region
-        ctx.strokeStyle = line;
-        ctx.lineWidth = 1;
-        ctx.globalAlpha = 0.55;
-        ctx.beginPath();
-        ctx.moveTo(sx, sy);
-        ctx.lineTo(tx, ty);
-        ctx.stroke();
-        ctx.globalAlpha = 1;
-        if (act > 0.05 && runState() === "thinking") {
-          // live signal: brighter edge + a pulse travelling toward the target
-          ctx.strokeStyle = accent;
-          ctx.lineWidth = 1 + act * 2.2;
-          ctx.globalAlpha = 0.25 + act * 0.5;
-          ctx.beginPath();
-          ctx.moveTo(sx, sy);
-          ctx.lineTo(tx, ty);
-          ctx.stroke();
-          ctx.globalAlpha = 1;
-          const fr = 0.35 + 0.4 * ((tickIdx() % 3) / 2); // marches with ticks
-          const dx = sx + (tx - sx) * fr;
-          const dy = sy + (ty - sy) * fr;
-          ctx.beginPath();
-          ctx.fillStyle = accent;
-          ctx.arc(dx, dy, 2 + act * 2.5, 0, Math.PI * 2);
-          ctx.fill();
-        }
-      }
+    const sy = Math.sin(brainRotY);
+    const cy = Math.cos(brainRotY);
+    const sx = Math.sin(brainRotX);
+    const cx = Math.cos(brainRotX);
+    const pts: { x: number; y: number; depth: number; region: number; a: number }[] = [];
+    for (const np of neuronPos) {
+      const rx = np.x * cy + np.z * sy;
+      const ry = np.y * cx - (-np.x * sy + np.z * cy) * sx;
+      const rz = np.y * sx + (-np.x * sy + np.z * cy) * cx;
+      const depth = rz + 11;
+      if (depth < 0.5) continue;
+      pts.push({
+        x: cxp + (rx * fov) / depth,
+        y: cyp - (ry * fov) / depth,
+        depth,
+        region: np.region,
+        a: actOf(np.region, np.index),
+      });
     }
+    pts.sort((p, q) => q.depth - p.depth); // painter's algorithm: far first
 
-    // ── nodes ──
-    for (let i = 0; i < names.length; i++) {
-      const [x, y] = pos(i);
-      const r = nodeR(dmodels[i]);
-      const m = magOf(i);
-
-      // glow halo scaled by activation
-      if (m > 0.02) {
-        const g = ctx.createRadialGradient(x, y, r * 0.4, x, y, r * (1.7 + m));
-        g.addColorStop(0, `color-mix(in srgb, ${accent} ${28 + m * 55}%, transparent)`);
-        g.addColorStop(1, "transparent");
-        ctx.fillStyle = g;
+    for (const p of pts) {
+      const col = REGION_COLORS[p.region % REGION_COLORS.length];
+      const size = Math.max(0.6, (fov / p.depth) * 0.013 * (0.55 + 1.7 * p.a));
+      if (p.a > 0.5) {
+        // spike halo
+        ctx.globalAlpha = (p.a - 0.5) * 0.8;
+        ctx.fillStyle = col;
         ctx.beginPath();
-        ctx.arc(x, y, r * (1.7 + m), 0, Math.PI * 2);
+        ctx.arc(p.x, p.y, size * 3.4, 0, Math.PI * 2);
         ctx.fill();
       }
-
-      // node body — lerp teal→violet by activation, on a faint base
+      ctx.globalAlpha = 0.18 + 0.82 * p.a;
+      ctx.fillStyle = col;
       ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
-      ctx.fillStyle = `color-mix(in srgb, ${m > 0.5 ? accent : teal} ${15 + m * 80}%, ${cardbg})`;
+      ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
       ctx.fill();
-      ctx.lineWidth = 1.5;
-      ctx.strokeStyle = m > 0.1 ? accent : line;
-      ctx.stroke();
-
-      // hippocampus: episodic memory stack (one entry accrues per tick)
-      if (names[i] === "hippocampus" && runState() === "thinking") {
-        const entries = Math.min(tickIdx() + 1, 6);
-        for (let e = 0; e < entries; e++) {
-          ctx.fillStyle = `color-mix(in srgb, ${accent} ${40 + e * 8}%, transparent)`;
-          ctx.fillRect(x - r * 0.5 + e * (r * 0.2), y - r - 7, r * 0.13, 4);
-        }
-      }
-
-      // label
-      ctx.fillStyle = m > 0.3 ? cssVar("--text", "#1B1822") : dim;
-      ctx.font = `${Math.round(10 * Math.min(1.4, W / 600))}px ui-monospace, monospace`;
-      ctx.textAlign = "center";
-      ctx.fillText(BRAIN_LABEL[names[i]] ?? names[i], x, y + r + 13);
     }
-    ctx.textAlign = "left";
+    ctx.globalAlpha = 1;
   }
 
   // global-sync magnitude at the current tick, for the header meter
@@ -757,12 +754,17 @@ export default function Play() {
     commitTick();
     drawCertainty();
   });
-  createEffect(() => {
-    tickIdx();
-    brainTrace();
-    brainRef();
-    runState();
-    drawBrain();
+  // the brain cloud renders continuously (slow rotation) via rAF, sampling the
+  // current animation tick's per-neuron activations each frame.
+  onMount(() => {
+    let raf = 0;
+    const spin = () => {
+      if (!reduced) brainRotY += 0.0045;
+      drawBrain3D();
+      raf = requestAnimationFrame(spin);
+    };
+    raf = requestAnimationFrame(spin);
+    onCleanup(() => cancelAnimationFrame(raf));
   });
 
   // redraw on resize (canvas is fluid width)
@@ -771,7 +773,6 @@ export default function Play() {
       drawMaze();
       drawNeurons();
       drawCertainty();
-      drawBrain();
     };
     window.addEventListener("resize", onResize);
     onCleanup(() => window.removeEventListener("resize", onResize));
@@ -829,13 +830,14 @@ export default function Play() {
           Watch it <span class="grad-text">think.</span>
         </h1>
         <p class="mt-5 text-dim text-[1.05rem] max-w-[64ch] leading-relaxed">
-          This is a real modgrad Continuous Thought Machine, a single pool of{" "}
-          {ref()?.d_model ?? 256} neurons trained on {ref()?.size ?? 9}×
-          {ref()?.size ?? 9} mazes. To pick each move it thinks over{" "}
-          {ref()?.ticks ?? 8} internal ticks, and what you see below is
-          its actual internal state, not a recording. Further down, the full{" "}
-          <span class="grad-text">8-region brain</span> runs on the same maze. Both
-          models load entirely client-side, into a web worker as wasm.
+          This page runs <span class="text-base">two</span> real modgrad models in
+          your browser. The <span class="text-base">solver</span> (shown first) is a
+          single Continuous Thought Machine — one pool of {ref()?.d_model ?? 256}{" "}
+          neurons that navigates {ref()?.size ?? 9}×{ref()?.size ?? 9} mazes by
+          thinking over {ref()?.ticks ?? 8} internal ticks per move. Below it,
+          modgrad's full <span class="grad-text">8-region brain</span> watches the
+          same maze and thinks in 3D alongside it. Everything is each model's actual
+          internal state, not a recording, loaded as wasm.
         </p>
       </div>
 
@@ -847,8 +849,16 @@ export default function Play() {
         </div>
       </Show>
 
+      {/* ── model 1: the solver ───────────────────────── */}
+      <div class="flex items-baseline gap-3 mt-12 mb-1">
+        <h2 class="text-[1.4rem] tracking-[-0.02em]">
+          <span class="text-mute font-mono text-base mr-1.5">1 ·</span> The solver
+        </h2>
+        <span class="text-mute text-sm">single CTM — picks the moves</span>
+      </div>
+
       {/* ── the lab ───────────────────────────────────── */}
-      <div class="grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)] gap-5 mt-10">
+      <div class="grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)] gap-5 mt-4">
         {/* LEFT: maze hero + controls + move bars */}
         <div class="flex flex-col gap-5">
           <div class="card relative">
@@ -1094,12 +1104,19 @@ export default function Play() {
         </div>
       </div>
 
-      {/* ── the whole brain (Model B) ─────────────────── */}
+      {/* ── model 2: the brain ────────────────────────── */}
       <Show when={brainRef()}>
-        <div class="card mt-5">
+        <div class="flex items-baseline gap-3 mt-12 mb-1">
+          <h2 class="text-[1.4rem] tracking-[-0.02em]">
+            <span class="text-mute font-mono text-base mr-1.5">2 ·</span> The{" "}
+            <span class="grad-text">brain</span>
+          </h2>
+          <span class="text-mute text-sm">8 regions — watches &amp; thinks</span>
+        </div>
+        <div class="card mt-4">
           <div class="flex items-center justify-between mb-1 flex-wrap gap-2">
             <div class="eyebrow">
-              The whole brain · <span class="grad-text">8 regions</span>
+              live in 3D · <span class="grad-text">{brainRef()?.region_names.length ?? 8} regions</span>
             </div>
             <div class="flex items-center gap-3">
               <Show when={brainOn()}>
@@ -1122,13 +1139,15 @@ export default function Play() {
             </div>
           </div>
 
-          <p class="text-dim text-sm max-w-[72ch] leading-relaxed mb-4">
-            The same modgrad brain modgrad ships, running live next to the solver
-            above. It is eight specialised regions — a cortical loop
-            (input&nbsp;→&nbsp;attention&nbsp;→&nbsp;output&nbsp;→&nbsp;motor) wired
-            to a hippocampus with episodic memory and three subcortical helpers —
-            all fed by a visual retina that looks at the maze. Watch each region
-            fire and route signals as the agent thinks through a move.
+          <p class="text-dim text-sm max-w-[74ch] leading-relaxed mb-4">
+            This is a <span class="text-base">second, separate model</span>:
+            modgrad's full 8-region brain, running live in 3D as the solver works.
+            Every dot is one neuron, grouped and coloured by its region — a cortical
+            loop (input&nbsp;→&nbsp;attention&nbsp;→&nbsp;output&nbsp;→&nbsp;motor)
+            wired to a hippocampus with episodic memory, plus subcortical helpers —
+            all fed by a visual retina that looks at the maze. Neurons brighten as
+            they spike, so you watch the whole brain compute. It doesn't move the
+            agent; the single-CTM solver above does that. This is the look inside.
           </p>
 
           <div class="rounded-lg overflow-hidden" style={{ background: "var(--bg-2)" }}>
@@ -1139,16 +1158,19 @@ export default function Play() {
             />
           </div>
 
-          <div class="flex flex-wrap items-center gap-x-5 gap-y-1.5 mt-3 text-[.72rem] text-mute font-mono">
-            <span class="inline-flex items-center gap-1.5">
-              <i class="w-2.5 h-2.5 rounded-full inline-block" style={{ background: "var(--accent)" }} />
-              firing
-            </span>
-            <span class="inline-flex items-center gap-1.5">
-              <i class="w-2.5 h-2.5 rounded-full inline-block" style={{ background: "#29C7D6" }} />
-              quiet
-            </span>
-            <span>big node = cortical (32 neurons) · small = subcortical (8)</span>
+          <div class="flex flex-wrap items-center gap-x-4 gap-y-1.5 mt-3 text-[.72rem] text-mute font-mono">
+            <span class="opacity-80">each dot = 1 neuron · brighter = spiking</span>
+            <For each={brainRef()?.region_names ?? []}>
+              {(nm, i) => (
+                <span class="inline-flex items-center gap-1.5">
+                  <i
+                    class="w-2.5 h-2.5 rounded-full inline-block"
+                    style={{ background: REGION_COLORS[i() % REGION_COLORS.length] }}
+                  />
+                  {shortRegion(nm)}
+                </span>
+              )}
+            </For>
             <span class="ml-auto opacity-80">bit-exact with the modgrad SDK</span>
           </div>
         </div>

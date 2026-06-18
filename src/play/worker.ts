@@ -266,9 +266,14 @@ self.onmessage = async (e: MessageEvent) => {
       // dynamic import by absolute URL — resolved at runtime, served from
       // public/engine. The URL is assembled from a variable so the bundler
       // leaves it as a real runtime import instead of trying to resolve it.
-      const enginePath = ["", "engine", "modgrad_mini.js"].join("/");
+      // ?v=… busts any stale cached engine (a mismatched glue/wasm pair fails
+      // to instantiate); bump ENGINE_VER whenever the wasm is rebuilt.
+      const ENGINE_VER = "20260619a";
+      const enginePath =
+        ["", "engine", "modgrad_mini.js"].join("/") + "?v=" + ENGINE_VER;
       const mod: any = await import(/* @vite-ignore */ enginePath);
-      await mod.default(); // init() — fetches /engine/modgrad_mini_bg.wasm
+      // pass the wasm URL (also versioned) so init() doesn't fetch a stale .wasm
+      await mod.default("/engine/modgrad_mini_bg.wasm?v=" + ENGINE_VER);
       mod.load_weights(msg.weights);
       SIZE = msg.size ?? 7;
       RAW_DIM = msg.rawDim ?? 9;

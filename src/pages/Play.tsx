@@ -794,6 +794,34 @@ export default function Play() {
 
   return (
     <div class="container-page py-14 sm:py-16">
+      <style>{`
+        @keyframes nd-float {
+          0%,100% { transform: translateY(0) rotate(0deg); }
+          50%     { transform: translateY(-12px) rotate(10deg); }
+        }
+        @keyframes nd-halo {
+          0%,100% { opacity: .18; transform: scale(.7); }
+          50%     { opacity: .5;  transform: scale(1.35); }
+        }
+        @keyframes nd-dots {
+          0%   { content: ""; }
+          25%  { content: "·"; }
+          50%  { content: "··"; }
+          75%,100% { content: "···"; }
+        }
+        @keyframes nd-sweep {
+          0%   { transform: translateX(-120%); }
+          100% { transform: translateX(360%); }
+        }
+        .nd-glyph { display:inline-block; animation: nd-float 2.4s ease-in-out infinite; }
+        .nd-halo  { animation: nd-halo 2.4s ease-in-out infinite; }
+        .nd-dots::after { content: ""; animation: nd-dots 1.4s steps(1) infinite; }
+        .nd-sweep { animation: nd-sweep 1.3s ease-in-out infinite; }
+        @media (prefers-reduced-motion: reduce) {
+          .nd-glyph,.nd-halo,.nd-dots::after,.nd-sweep { animation: none; }
+          .nd-dots::after { content: "···"; }
+        }
+      `}</style>
       {/* ── intro ─────────────────────────────────────── */}
       <div class="max-w-[760px]">
         <div class="eyebrow mb-3">Live demo · runs in your browser</div>
@@ -847,10 +875,40 @@ export default function Play() {
                 aria-label="maze the brain is solving"
               />
               <Show when={status() === "loading"}>
-                <div class="absolute inset-0 grid place-items-center">
+                <div
+                  class="absolute inset-0 grid place-items-center"
+                  style={{ background: "var(--bg-card)" }}
+                >
                   <div class="text-center">
-                    <div class="text-2xl grad-text font-mono mb-2 animate-pulse">∇</div>
-                    <div class="text-mute text-xs font-mono">loading the brain…</div>
+                    <div class="relative mx-auto mb-5 grid place-items-center" style={{ width: "72px", height: "72px" }}>
+                      <span
+                        class="nd-halo absolute rounded-full"
+                        style={{
+                          width: "64px",
+                          height: "64px",
+                          background:
+                            "radial-gradient(closest-side, color-mix(in srgb, var(--accent) 45%, transparent), transparent)",
+                        }}
+                      />
+                      <span class="nd-glyph grad-text font-mono" style={{ "font-size": "2.6rem", "line-height": "1" }}>
+                        ∇
+                      </span>
+                    </div>
+                    <div class="text-dim text-sm font-mono">
+                      warming up the brain<span class="nd-dots" />
+                    </div>
+                    <div
+                      class="relative mt-4 mx-auto overflow-hidden rounded-full"
+                      style={{ width: "180px", height: "3px", background: "var(--bg-2)" }}
+                    >
+                      <div
+                        class="nd-sweep absolute inset-y-0 rounded-full"
+                        style={{ width: "40%", background: "var(--accent)" }}
+                      />
+                    </div>
+                    <div class="text-mute text-[.7rem] font-mono mt-3">
+                      loading two models · ~12 MB · runs on your device
+                    </div>
                   </div>
                 </div>
               </Show>

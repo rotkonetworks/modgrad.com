@@ -1,5 +1,3 @@
-/* @ts-self-types="./modgrad_mini.d.ts" */
-
 /**
  * Browser-facing maze encoder. `grid` is row-major (1 = wall), returns the
  * flat `[size*size * 9]` observation to pass straight into `run`.

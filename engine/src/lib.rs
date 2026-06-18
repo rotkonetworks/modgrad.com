@@ -16,6 +16,8 @@
 
 use serde::Deserialize;
 
+pub mod brain;
+
 // ═══════════════════════════════════════════════════════════════════════
 //  Weight structs — mirror modgrad with EXACT field names/order.
 // ═══════════════════════════════════════════════════════════════════════
@@ -71,7 +73,7 @@ pub struct Linear {
 
 impl Linear {
     /// Faithful to `Linear::forward` (CPU matvec): row-major `[out_dim × in_dim]`.
-    fn forward(&self, x: &[f32]) -> Vec<f32> {
+    pub(crate) fn forward(&self, x: &[f32]) -> Vec<f32> {
         let mut y = vec![0.0f32; self.out_dim];
         for i in 0..self.out_dim {
             let row = &self.weight[i * self.in_dim..(i + 1) * self.in_dim];
@@ -98,7 +100,7 @@ pub struct SuperLinear {
 
 impl SuperLinear {
     /// Faithful to `SuperLinear::forward_cpu`: per-neuron, sequential.
-    fn forward(&self, trace: &[f32]) -> Vec<f32> {
+    pub(crate) fn forward(&self, trace: &[f32]) -> Vec<f32> {
         let mut out = vec![0.0f32; self.n_neurons * self.out_per];
         for n in 0..self.n_neurons {
             let t = &trace[n * self.in_per..(n + 1) * self.in_per];
@@ -128,7 +130,7 @@ pub struct SynapseBlock {
 impl SynapseBlock {
     /// Faithful to `SynapseBlock::forward`: `linear.forward` then `ln_silu_fwd`
     /// (= LayerNorm(affine, eps 1e-5) followed by SiLU).
-    fn forward(&self, x: &[f32]) -> Vec<f32> {
+    pub(crate) fn forward(&self, x: &[f32]) -> Vec<f32> {
         let y = self.linear.forward(x);
         let mut out = vec![0.0f32; y.len()];
         ln_silu_fwd(&y, &self.ln_gamma, &self.ln_beta, &mut out);
@@ -149,7 +151,7 @@ pub struct SynapseUNet {
 
 impl SynapseUNet {
     /// Faithful to `SynapseUNet::forward`.
-    fn forward(&self, x: &[f32]) -> Vec<f32> {
+    pub(crate) fn forward(&self, x: &[f32]) -> Vec<f32> {
         let n_blocks = self.down_blocks.len();
 
         // Initial projection
@@ -212,7 +214,7 @@ pub struct CtmWeights {
 
 /// Mirrors `cpu::sigmoid` (with the same clamp at ±12).
 #[inline]
-fn sigmoid(x: f32) -> f32 {
+pub(crate) fn sigmoid(x: f32) -> f32 {
     if x > 12.0 {
         1.0
     } else if x < -12.0 {
@@ -223,7 +225,7 @@ fn sigmoid(x: f32) -> f32 {
 }
 
 /// Mirrors `cpu::ln_silu_fwd`: LayerNorm(affine, eps 1e-5) then SiLU.
-fn ln_silu_fwd(x: &[f32], gamma: &[f32], beta: &[f32], out: &mut [f32]) {
+pub(crate) fn ln_silu_fwd(x: &[f32], gamma: &[f32], beta: &[f32], out: &mut [f32]) {
     let n = x.len();
     let nf = n as f32;
     let mean: f32 = x.iter().sum::<f32>() / nf;
@@ -239,7 +241,7 @@ fn ln_silu_fwd(x: &[f32], gamma: &[f32], beta: &[f32], out: &mut [f32]) {
 }
 
 /// Mirrors `forward::affine_ln` (the synapse skip-conn LN and kv LN).
-fn affine_ln(x: &mut [f32], gamma: &[f32], beta: &[f32]) {
+pub(crate) fn affine_ln(x: &mut [f32], gamma: &[f32], beta: &[f32]) {
     let n = x.len();
     if n == 0 {
         return;
@@ -257,7 +259,7 @@ fn affine_ln(x: &mut [f32], gamma: &[f32], beta: &[f32]) {
 //  Sync (random-pairing) — mirror forward::sync_*.
 // ═══════════════════════════════════════════════════════════════════════
 
-fn sync_init(
+pub(crate) fn sync_init(
     activated: &[f32],
     left: &[usize],
     right: &[usize],
@@ -274,7 +276,7 @@ fn sync_init(
     }
 }
 
-fn sync_update(
+pub(crate) fn sync_update(
     activated: &[f32],
     left: &[usize],
     right: &[usize],
@@ -291,7 +293,7 @@ fn sync_update(
     sync_read(alpha, beta)
 }
 
-fn sync_read(alpha: &[f32], beta: &[f32]) -> Vec<f32> {
+pub(crate) fn sync_read(alpha: &[f32], beta: &[f32]) -> Vec<f32> {
     alpha
         .iter()
         .zip(beta)
@@ -304,7 +306,7 @@ fn sync_read(alpha: &[f32], beta: &[f32]) -> Vec<f32> {
 // ═══════════════════════════════════════════════════════════════════════
 
 /// Mirrors `forward::per_neuron_glu`: `[n_neurons × 2k] → [n_neurons × k]`.
-fn per_neuron_glu(x: &[f32], n_neurons: usize, out_per: usize) -> Vec<f32> {
+pub(crate) fn per_neuron_glu(x: &[f32], n_neurons: usize, out_per: usize) -> Vec<f32> {
     let half = out_per / 2;
     let mut result = Vec::with_capacity(n_neurons * half);
     for n in 0..n_neurons {
@@ -319,7 +321,7 @@ fn per_neuron_glu(x: &[f32], n_neurons: usize, out_per: usize) -> Vec<f32> {
 }
 
 /// Mirrors `forward::nlm_forward`.
-fn nlm_forward(
+pub(crate) fn nlm_forward(
     trace: &[f32],
     stage1: &SuperLinear,
     stage2: Option<&SuperLinear>,
@@ -341,7 +343,7 @@ fn nlm_forward(
 // ═══════════════════════════════════════════════════════════════════════
 
 /// Mirrors `forward::linear_slice`: partial matvec over rows `[row_start, row_end)`.
-fn linear_slice(x: &[f32], linear: &Linear, row_start: usize, row_end: usize) -> Vec<f32> {
+pub(crate) fn linear_slice(x: &[f32], linear: &Linear, row_start: usize, row_end: usize) -> Vec<f32> {
     let in_dim = linear.in_dim;
     let out_dim = row_end - row_start;
     let mut out = vec![0.0f32; out_dim];
@@ -359,7 +361,7 @@ fn linear_slice(x: &[f32], linear: &Linear, row_start: usize, row_end: usize) ->
 
 /// Mirrors `forward::multihead_attention_with_attn`. Returns `(out, per_head_weights)`.
 /// `per_head_weights` is `[n_heads][n_tokens]` softmax weights.
-fn multihead_attention(
+pub(crate) fn multihead_attention(
     q_in: &[f32],
     kv_flat: &[f32],
     n_tokens: usize,
@@ -425,7 +427,7 @@ fn multihead_attention(
 // ═══════════════════════════════════════════════════════════════════════
 
 /// Mirrors `forward::compute_certainty`: `[normalized_entropy, 1 - normalized_entropy]`.
-fn compute_certainty(prediction: &[f32]) -> [f32; 2] {
+pub(crate) fn compute_certainty(prediction: &[f32]) -> [f32; 2] {
     let n = prediction.len();
     if n <= 1 {
         return [0.0, 1.0];

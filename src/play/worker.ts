@@ -25,12 +25,22 @@ type Tick = {
   attention: number[];
 };
 
+// per-tick brain state, condensed for the viz: one magnitude per region,
+// the global-sync magnitude, and the outer exit lambda.
+type BrainTick = {
+  region: number[]; // [n_regions] RMS activation per region this tick
+  global: number; // RMS of the global-sync vector
+  exit: number | null; // outer AdaptiveGate lambda (null if no gate)
+};
+type BrainTrace = { ticks: BrainTick[]; ticksUsed: number };
+
 type StepResult = {
   type: "step";
   agent: [number, number];
   move: number; // committed move index
   commitTick: number;
   ticks: Tick[];
+  brain: BrainTrace | null; // the 8-region brain's run on the same maze state
   done: boolean;
   reached: boolean;
 };
@@ -45,6 +55,7 @@ let engine: {
     gc: number,
   ) => Float32Array;
   run: (obs: Float32Array, nTokens: number, rawDim: number) => RawOut;
+  run_brain_pixels: ((pixels: Float32Array) => BrainOut) | null;
 } | null = null;
 
 type RawOut = {
@@ -52,6 +63,17 @@ type RawOut = {
   certainties: number[][];
   activations: number[][];
   attention: number[][][]; // [tick][head][cell]
+};
+
+// shape returned by the wasm `run_brain_pixels`
+type BrainOut = {
+  ticks: {
+    prediction: number[];
+    region_activations: number[][]; // [n_regions][d_model]
+    global_sync: number[];
+    exit_lambda: number | null;
+  }[];
+  ticks_used: number;
 };
 
 let SIZE = 7;
@@ -79,6 +101,66 @@ function flattenAttention(perHead: number[][]): number[] {
   }
   const span = hi - lo || 1;
   return avg.map((v) => (v - lo) / span);
+}
+
+function rms(a: number[]): number {
+  if (a.length === 0) return 0;
+  let s = 0;
+  for (const v of a) s += v * v;
+  return Math.sqrt(s / a.length);
+}
+
+// Render the maze to RGB pixels [3 × SIZE × SIZE] in CHW order — the exact
+// colour scheme the retina was trained on (agent blue, goal orange, wall
+// dark, open light). Mirrors render_pixels() in the Rust exporter.
+function renderPixels(
+  grid: number[],
+  ar: number,
+  ac: number,
+  gr: number,
+  gc: number,
+): Float32Array {
+  const n = SIZE * SIZE;
+  const px = new Float32Array(3 * n);
+  for (let r = 0; r < SIZE; r++) {
+    for (let c = 0; c < SIZE; c++) {
+      const idx = r * SIZE + c;
+      let rr: number, gg: number, bb: number;
+      if (r === ar && c === ac) [rr, gg, bb] = [0.1, 0.4, 0.9];
+      else if (r === gr && c === gc) [rr, gg, bb] = [0.9, 0.3, 0.1];
+      else if (grid[idx] !== 0) [rr, gg, bb] = [0.1, 0.1, 0.1];
+      else [rr, gg, bb] = [0.8, 0.8, 0.8];
+      px[idx] = rr;
+      px[n + idx] = gg;
+      px[2 * n + idx] = bb;
+    }
+  }
+  return px;
+}
+
+// Run the 8-region brain on the current maze state and condense its per-tick
+// internal state to region/global magnitudes for the viz. Returns null if the
+// brain engine isn't available (older wasm / load failure).
+function runBrain(
+  grid: number[],
+  ar: number,
+  ac: number,
+  gr: number,
+  gc: number,
+): BrainTrace | null {
+  if (!engine?.run_brain_pixels) return null;
+  try {
+    const px = renderPixels(grid, ar, ac, gr, gc);
+    const out = engine.run_brain_pixels(px);
+    const ticks: BrainTick[] = out.ticks.map((t) => ({
+      region: t.region_activations.map((ra) => rms(ra)),
+      global: rms(t.global_sync),
+      exit: t.exit_lambda,
+    }));
+    return { ticks, ticksUsed: out.ticks_used };
+  } catch {
+    return null; // never let the brain panel break the maze demo
+  }
 }
 
 function thinkOnce(
@@ -187,10 +269,27 @@ self.onmessage = async (e: MessageEvent) => {
       const mod: any = await import(/* @vite-ignore */ enginePath);
       await mod.default(); // init() — fetches /engine/modgrad_mini_bg.wasm
       mod.load_weights(msg.weights);
-      engine = { encode_maze_js: mod.encode_maze_js, run: mod.run };
       SIZE = msg.size ?? 7;
       RAW_DIM = msg.rawDim ?? 9;
-      post({ type: "ready" });
+
+      // The 8-region brain is optional: load it if weights were supplied and
+      // the (rebuilt) wasm exposes the brain entry points. Failure here must
+      // not break the maze solver, so it degrades to brain = null.
+      let runBrainPixels: ((pixels: Float32Array) => BrainOut) | null = null;
+      if (msg.brainWeights && typeof mod.load_brain_weights === "function") {
+        try {
+          mod.load_brain_weights(msg.brainWeights);
+          runBrainPixels = mod.run_brain_pixels;
+        } catch {
+          runBrainPixels = null;
+        }
+      }
+      engine = {
+        encode_maze_js: mod.encode_maze_js,
+        run: mod.run,
+        run_brain_pixels: runBrainPixels,
+      };
+      post({ type: "ready", brain: runBrainPixels !== null });
       return;
     }
 
@@ -205,6 +304,8 @@ self.onmessage = async (e: MessageEvent) => {
       const [ar, ac] = agent;
       const [gr, gc] = goal;
       const { ticks, move, commitTick } = thinkOnce(g, ar, ac, gr, gc);
+      // the brain "watches" the same maze state and thinks alongside the solver
+      const brain = runBrain(grid, ar, ac, gr, gc);
 
       const [dr, dc] = DELTA[move];
       const nr = ar + dr;
@@ -224,6 +325,7 @@ self.onmessage = async (e: MessageEvent) => {
         move,
         commitTick,
         ticks,
+        brain,
         done: reached || blocked,
         reached,
       };

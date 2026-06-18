@@ -17,14 +17,25 @@ type Tick = {
   activations: number[];
   attention: number[];
 };
+type BrainTick = { region: number[]; global: number; exit: number | null };
+type BrainTrace = { ticks: BrainTick[]; ticksUsed: number };
 type StepMsg = {
   type: "step";
   agent: [number, number];
   move: number;
   commitTick: number;
   ticks: Tick[];
+  brain: BrainTrace | null;
   done: boolean;
   reached: boolean;
+};
+// structure of the 8-region brain, read from brain_reference.json
+type BrainConn = { from: number[]; to: number; receives_observation: boolean };
+type BrainRef = {
+  region_names: string[];
+  regions: { name: string; d_model: number }[];
+  connections: BrainConn[];
+  n_global_sync: number;
 };
 type Maze = {
   grid: number[];
@@ -82,6 +93,11 @@ export default function Play() {
   const [playing, setPlaying] = createSignal(false);
   const [showAttention, setShowAttention] = createSignal(true);
 
+  // ── 8-region brain (Model B) ──
+  const [brainRef, setBrainRef] = createSignal<BrainRef | null>(null);
+  const [brainOn, setBrainOn] = createSignal(false); // brain wasm available
+  const [brainTrace, setBrainTrace] = createSignal<BrainTrace | null>(null);
+
   // dimensions from the reference; defaults avoid layout shift before load
   let SIZE = 7;
   let DMODEL = 128;
@@ -126,6 +142,7 @@ export default function Play() {
     worker.onmessage = (ev: MessageEvent) => {
       const msg = ev.data;
       if (msg.type === "ready") {
+        setBrainOn(!!msg.brain);
         setStatus("ready");
         // start on a fresh, brain-solvable maze so every visit is different
         requestNewMaze();
@@ -148,12 +165,24 @@ export default function Play() {
       if (msg.type === "step") onStepResult(msg as StepMsg);
     };
 
+    // brain structure (small) loads in parallel; the 9MB brain weights are
+    // optional — if they fail, the maze demo still runs without the brain map.
+    fetch("/models/brain_reference.json")
+      .then((r) => r.json())
+      .then((b: BrainRef) => setBrainRef(b))
+      .catch(() => {});
+
     try {
-      const wr = await fetch("/models/maze_weights.json");
-      const weights = await wr.text();
+      const [wr, br] = await Promise.all([
+        fetch("/models/maze_weights.json").then((r) => r.text()),
+        fetch("/models/brain_weights.json")
+          .then((r) => r.text())
+          .catch(() => ""),
+      ]);
       worker.postMessage({
         type: "init",
-        weights,
+        weights: wr,
+        brainWeights: br || undefined,
         size: reference.size,
         rawDim: reference.raw_dim,
       });
@@ -177,6 +206,7 @@ export default function Play() {
       setVisited([[m.start[0], m.start[1]]]);
       setStepCount(0);
       setTicks([]);
+      setBrainTrace(null);
       setTickIdx(0);
       setCommitTick(0);
       setCommittedMove(-1);
@@ -216,6 +246,7 @@ export default function Play() {
     pendingStep = false;
     batch(() => {
       setTicks(msg.ticks);
+      setBrainTrace(msg.brain);
       setCommitTick(msg.commitTick);
       setCommittedMove(msg.move);
       setTickIdx(0);
@@ -315,6 +346,7 @@ export default function Play() {
   let mazeCanvas!: HTMLCanvasElement;
   let neuronCanvas!: HTMLCanvasElement;
   let certCanvas!: HTMLCanvasElement;
+  let brainCanvas!: HTMLCanvasElement;
 
   // high-dpi helper
   function ctxOf(c: HTMLCanvasElement, cssW: number, cssH: number) {
@@ -543,6 +575,165 @@ export default function Play() {
     ctx.fillText(`${total - 1}`, W - padR - 12, H - 4);
   }
 
+  // ── the 8-region brain map (Model B) ──
+  // anatomical-ish fixed layout, keyed by region name (robust to index order).
+  // cortical loop (input→attention→output→motor→input) as a left diamond with
+  // hippocampus at its centre; subcortical structures down the right.
+  const BRAIN_POS: Record<string, [number, number]> = {
+    input: [0.15, 0.5],
+    attention: [0.35, 0.17],
+    output: [0.55, 0.5],
+    motor: [0.35, 0.83],
+    hippocampus: [0.35, 0.5],
+    basal_ganglia: [0.78, 0.25],
+    insula: [0.8, 0.52],
+    cerebellum: [0.78, 0.79],
+  };
+  const BRAIN_LABEL: Record<string, string> = {
+    input: "input",
+    attention: "attn",
+    output: "output",
+    motor: "motor",
+    cerebellum: "cereb",
+    basal_ganglia: "basal",
+    insula: "insula",
+    hippocampus: "hippo",
+  };
+
+  // brain tick aligned to the current animation tick (held at the last brain
+  // tick if the brain exited earlier than the solver's tick count).
+  const curBrainTick = (): BrainTick | null => {
+    const bt = brainTrace();
+    if (!bt || bt.ticks.length === 0) return null;
+    return bt.ticks[Math.min(tickIdx(), bt.ticks.length - 1)];
+  };
+
+  function drawBrain() {
+    const bref = brainRef();
+    if (!brainCanvas || !bref) return;
+    const W = brainCanvas.clientWidth || 720;
+    const H = Math.round(Math.max(260, Math.min(420, W * 0.46)));
+    const ctx = ctxOf(brainCanvas, W, H);
+    const padX = W * 0.07;
+    const padY = H * 0.12;
+    const px = (nx: number) => padX + nx * (W - 2 * padX);
+    const py = (ny: number) => padY + ny * (H - 2 * padY);
+
+    const names = bref.region_names;
+    const dmodels = bref.regions.map((r) => r.d_model);
+    const big = Math.max(...dmodels); // 32 cortical
+    const nodeR = (d: number) => {
+      const s = Math.min(W, H * 1.7) / 720;
+      return (10 + 16 * Math.sqrt(d / big)) * s;
+    };
+
+    const accent = cssVar("--accent", "#6243D9");
+    const teal = "#29C7D6";
+    const line = cssVar("--line-2", "#D8D2C3");
+    const dim = cssVar("--text-mute", "#6A6676");
+    const cardbg = cssVar("--bg-card", "#fff");
+
+    const pos = (i: number): [number, number] => {
+      const p = BRAIN_POS[names[i]] ?? [0.5, 0.5];
+      return [px(p[0]), py(p[1])];
+    };
+
+    // normalise region magnitudes across the whole step for stable glow
+    const bt = brainTrace();
+    let mmax = 1e-6;
+    if (bt) for (const t of bt.ticks) for (const v of t.region) if (v > mmax) mmax = v;
+    const tick = curBrainTick();
+    const magOf = (i: number) => (tick ? Math.min(1, (tick.region[i] ?? 0) / mmax) : 0);
+
+    // ── edges (drawn under nodes) ──
+    for (const conn of bref.connections) {
+      const [tx, ty] = pos(conn.to);
+      for (const f of conn.from) {
+        const [sx, sy] = pos(f);
+        const act = magOf(f); // brightness follows the source region
+        ctx.strokeStyle = line;
+        ctx.lineWidth = 1;
+        ctx.globalAlpha = 0.55;
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(tx, ty);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+        if (act > 0.05 && runState() === "thinking") {
+          // live signal: brighter edge + a pulse travelling toward the target
+          ctx.strokeStyle = accent;
+          ctx.lineWidth = 1 + act * 2.2;
+          ctx.globalAlpha = 0.25 + act * 0.5;
+          ctx.beginPath();
+          ctx.moveTo(sx, sy);
+          ctx.lineTo(tx, ty);
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+          const fr = 0.35 + 0.4 * ((tickIdx() % 3) / 2); // marches with ticks
+          const dx = sx + (tx - sx) * fr;
+          const dy = sy + (ty - sy) * fr;
+          ctx.beginPath();
+          ctx.fillStyle = accent;
+          ctx.arc(dx, dy, 2 + act * 2.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+
+    // ── nodes ──
+    for (let i = 0; i < names.length; i++) {
+      const [x, y] = pos(i);
+      const r = nodeR(dmodels[i]);
+      const m = magOf(i);
+
+      // glow halo scaled by activation
+      if (m > 0.02) {
+        const g = ctx.createRadialGradient(x, y, r * 0.4, x, y, r * (1.7 + m));
+        g.addColorStop(0, `color-mix(in srgb, ${accent} ${28 + m * 55}%, transparent)`);
+        g.addColorStop(1, "transparent");
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(x, y, r * (1.7 + m), 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // node body — lerp teal→violet by activation, on a faint base
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fillStyle = `color-mix(in srgb, ${m > 0.5 ? accent : teal} ${15 + m * 80}%, ${cardbg})`;
+      ctx.fill();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = m > 0.1 ? accent : line;
+      ctx.stroke();
+
+      // hippocampus: episodic memory stack (one entry accrues per tick)
+      if (names[i] === "hippocampus" && runState() === "thinking") {
+        const entries = Math.min(tickIdx() + 1, 6);
+        for (let e = 0; e < entries; e++) {
+          ctx.fillStyle = `color-mix(in srgb, ${accent} ${40 + e * 8}%, transparent)`;
+          ctx.fillRect(x - r * 0.5 + e * (r * 0.2), y - r - 7, r * 0.13, 4);
+        }
+      }
+
+      // label
+      ctx.fillStyle = m > 0.3 ? cssVar("--text", "#1B1822") : dim;
+      ctx.font = `${Math.round(10 * Math.min(1.4, W / 600))}px ui-monospace, monospace`;
+      ctx.textAlign = "center";
+      ctx.fillText(BRAIN_LABEL[names[i]] ?? names[i], x, y + r + 13);
+    }
+    ctx.textAlign = "left";
+  }
+
+  // global-sync magnitude at the current tick, for the header meter
+  const brainGlobal = () => {
+    const t = curBrainTick();
+    const bt = brainTrace();
+    if (!t || !bt) return 0;
+    let gmax = 1e-6;
+    for (const x of bt.ticks) if (x.global > gmax) gmax = x.global;
+    return Math.min(1, t.global / gmax);
+  };
+
   // redraw whenever the relevant signals change
   createEffect(() => {
     // dependencies: maze, agent, visited, tick, attention toggle, runState
@@ -566,6 +757,13 @@ export default function Play() {
     commitTick();
     drawCertainty();
   });
+  createEffect(() => {
+    tickIdx();
+    brainTrace();
+    brainRef();
+    runState();
+    drawBrain();
+  });
 
   // redraw on resize (canvas is fluid width)
   onMount(() => {
@@ -573,6 +771,7 @@ export default function Play() {
       drawMaze();
       drawNeurons();
       drawCertainty();
+      drawBrain();
     };
     window.addEventListener("resize", onResize);
     onCleanup(() => window.removeEventListener("resize", onResize));
@@ -602,10 +801,13 @@ export default function Play() {
           Watch it <span class="grad-text">think.</span>
         </h1>
         <p class="mt-5 text-dim text-[1.05rem] max-w-[64ch] leading-relaxed">
-          This is a real modgrad Continuous Thought Machine, a single pool of 128
-          neurons trained on 7×7 mazes. To pick each move it thinks over 16 internal
-          ticks, and what you see below is its actual internal state, not a recording.
-          The model runs entirely client-side, loaded into a web worker as wasm.
+          This is a real modgrad Continuous Thought Machine, a single pool of{" "}
+          {ref()?.d_model ?? 256} neurons trained on {ref()?.size ?? 9}×
+          {ref()?.size ?? 9} mazes. To pick each move it thinks over{" "}
+          {ref()?.ticks ?? 8} internal ticks, and what you see below is
+          its actual internal state, not a recording. Further down, the full{" "}
+          <span class="grad-text">8-region brain</span> runs on the same maze. Both
+          models load entirely client-side, into a web worker as wasm.
         </p>
       </div>
 
@@ -813,7 +1015,7 @@ export default function Play() {
           {/* certainty curve */}
           <div class="card">
             <div class="flex items-center justify-between mb-2">
-              <div class="eyebrow">Certainty over 16 ticks</div>
+              <div class="eyebrow">Certainty over {ref()?.ticks ?? 8} ticks</div>
               <div class="font-mono text-xs text-mute tabular-nums">
                 {(certaintyNow() * 100).toFixed(0)}%
               </div>
@@ -834,11 +1036,73 @@ export default function Play() {
         </div>
       </div>
 
+      {/* ── the whole brain (Model B) ─────────────────── */}
+      <Show when={brainRef()}>
+        <div class="card mt-5">
+          <div class="flex items-center justify-between mb-1 flex-wrap gap-2">
+            <div class="eyebrow">
+              The whole brain · <span class="grad-text">8 regions</span>
+            </div>
+            <div class="flex items-center gap-3">
+              <Show when={brainOn()}>
+                <div class="flex items-center gap-2">
+                  <span class="font-mono text-[.7rem] text-mute">global sync</span>
+                  <div class="w-20 h-1.5 rounded-full bg-panel overflow-hidden">
+                    <div
+                      class="h-full rounded-full transition-all duration-150"
+                      style={{
+                        width: `${Math.round(brainGlobal() * 100)}%`,
+                        background: "var(--accent)",
+                      }}
+                    />
+                  </div>
+                </div>
+              </Show>
+              <span class="tag" classList={{ "tag-wip": runState() === "thinking" }}>
+                Model B
+              </span>
+            </div>
+          </div>
+
+          <p class="text-dim text-sm max-w-[72ch] leading-relaxed mb-4">
+            The same modgrad brain modgrad ships, running live next to the solver
+            above. It is eight specialised regions — a cortical loop
+            (input&nbsp;→&nbsp;attention&nbsp;→&nbsp;output&nbsp;→&nbsp;motor) wired
+            to a hippocampus with episodic memory and three subcortical helpers —
+            all fed by a visual retina that looks at the maze. Watch each region
+            fire and route signals as the agent thinks through a move.
+          </p>
+
+          <div class="rounded-lg overflow-hidden" style={{ background: "var(--bg-2)" }}>
+            <canvas
+              ref={brainCanvas}
+              class="w-full block"
+              aria-label="the eight-region brain computing"
+            />
+          </div>
+
+          <div class="flex flex-wrap items-center gap-x-5 gap-y-1.5 mt-3 text-[.72rem] text-mute font-mono">
+            <span class="inline-flex items-center gap-1.5">
+              <i class="w-2.5 h-2.5 rounded-full inline-block" style={{ background: "var(--accent)" }} />
+              firing
+            </span>
+            <span class="inline-flex items-center gap-1.5">
+              <i class="w-2.5 h-2.5 rounded-full inline-block" style={{ background: "#29C7D6" }} />
+              quiet
+            </span>
+            <span>big node = cortical (32 neurons) · small = subcortical (8)</span>
+            <span class="ml-auto opacity-80">bit-exact with the modgrad SDK</span>
+          </div>
+        </div>
+      </Show>
+
       {/* ── footnote ──────────────────────────────────── */}
       <p class="text-mute text-xs mt-8 max-w-[70ch] leading-relaxed font-mono">
-        Model: single CTM, {DMODEL}-neuron pool, {ref()?.ticks ?? 16} ticks. Move
-        accuracy {((ref()?.move_acc ?? 0.94) * 100).toFixed(0)}% on held-out cells.
-        Weights and wasm load only on this page, after first paint.
+        Solver: single CTM, {ref()?.d_model ?? 256}-neuron pool, {ref()?.ticks ?? 8}{" "}
+        ticks, {((ref()?.move_acc ?? 0.8) * 100).toFixed(0)}% move accuracy on
+        held-out cells. Brain: 8-region modgrad architecture (~187k params) with a
+        visual retina, run bit-exact in wasm. Both load only on this page, after
+        first paint.
       </p>
     </div>
   );

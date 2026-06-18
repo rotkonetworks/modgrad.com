@@ -21,6 +21,20 @@ export function encode_maze_js(grid, size, agent_r, agent_c, goal_r, goal_c) {
 }
 
 /**
+ * Parse `brain_weights.json` (`{ cortex, regional }`) and stash both
+ * the retina and the regional weights for subsequent `run_brain`s.
+ * @param {string} json
+ */
+export function load_brain_weights(json) {
+    const ptr0 = passStringToWasm0(json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.load_brain_weights(ptr0, len0);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
  * Parse weights JSON and stash them in a thread-local for subsequent `run`s.
  * Returns an error string on parse failure.
  * @param {string} json
@@ -52,9 +66,47 @@ export function run(obs, n_tokens, raw_dim) {
     }
     return takeFromExternrefTable0(ret[0]);
 }
+
+/**
+ * Run the brain directly on a pre-computed flat observation
+ * (`[n_tokens × token_dim]`), bypassing the retina. Returns the
+ * per-tick `BrainOut` as a JS value.
+ * @param {Float32Array} obs
+ * @returns {any}
+ */
+export function run_brain_obs(obs) {
+    const ptr0 = passArrayF32ToWasm0(obs, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.run_brain_obs(ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * Run the brain on raw RGB pixels `[3 × H × W]` CHW: retina →
+ * spatial tokens → `regional_forward`. Returns the per-tick
+ * `BrainOut` as a JS value. Requires `load_brain_weights` first.
+ * @param {Float32Array} pixels
+ * @returns {any}
+ */
+export function run_brain_pixels(pixels) {
+    const ptr0 = passArrayF32ToWasm0(pixels, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.run_brain_pixels(ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
+        __wbg_Error_fdd633d4bb5dd76a: function(arg0, arg1) {
+            const ret = Error(getStringFromWasm0(arg0, arg1));
+            return ret;
+        },
         __wbg_String_8564e559799eccda: function(arg0, arg1) {
             const ret = String(arg1);
             const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -87,6 +139,11 @@ function __wbg_get_imports() {
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
             // Cast intrinsic for `Ref(String) -> Externref`.
             const ret = getStringFromWasm0(arg0, arg1);
+            return ret;
+        },
+        __wbindgen_cast_0000000000000003: function(arg0) {
+            // Cast intrinsic for `U64 -> Externref`.
+            const ret = BigInt.asUintN(64, arg0);
             return ret;
         },
         __wbindgen_init_externref_table: function() {

@@ -65,7 +65,7 @@ export default function Play() {
   useDocMeta(() => ({
     title: "Watch it think",
     description:
-      "A real modgrad Continuous Thought Machine solves a maze in your browser. Watch its neurons fire, its attention sweep the maze, and its certainty rise as it commits to each move. Runs entirely client-side via wasm.",
+      "A modgrad Continuous Thought Machine solves a maze in your browser. Watch its neurons fire, its attention sweep the maze, and its certainty rise as it commits to each move. Your trained model, run client-side by a faithful wasm reimplementation of the modgrad SDK's forward pass.",
     path: "/play",
   }));
 
@@ -830,14 +830,16 @@ export default function Play() {
           Watch it <span class="grad-text">think.</span>
         </h1>
         <p class="mt-5 text-dim text-[1.05rem] max-w-[64ch] leading-relaxed">
-          This page runs <span class="text-base">two</span> real modgrad models in
-          your browser. The <span class="text-base">solver</span> (shown first) is a
-          single Continuous Thought Machine — one pool of {ref()?.d_model ?? 256}{" "}
-          neurons that navigates {ref()?.size ?? 9}×{ref()?.size ?? 9} mazes by
-          thinking over {ref()?.ticks ?? 8} internal ticks per move. Below it,
-          modgrad's full <span class="grad-text">8-region brain</span> watches the
-          same maze and thinks in 3D alongside it. Everything is each model's actual
-          internal state, not a recording, loaded as wasm.
+          This page runs <span class="text-base">two</span> modgrad models in your
+          browser. The <span class="text-base">solver</span> (shown first) is a single
+          Continuous Thought Machine — one pool of {ref()?.d_model ?? 256} neurons
+          that navigates {ref()?.size ?? 9}×{ref()?.size ?? 9} mazes by thinking over{" "}
+          {ref()?.ticks ?? 8} internal ticks per move. Below it, modgrad's full{" "}
+          <span class="grad-text">8-region brain</span> watches the same maze and
+          thinks in 3D alongside it. The weights are real — trained by the modgrad
+          SDK — and what you see is each model's actual internal state, computed live
+          by a faithful browser reimplementation of the SDK's forward pass (checked
+          bit-exact against it), not a recording.
         </p>
       </div>
 
@@ -1171,7 +1173,7 @@ export default function Play() {
                 </span>
               )}
             </For>
-            <span class="ml-auto opacity-80">bit-exact with the modgrad SDK</span>
+            <span class="ml-auto opacity-80">reimplemented from the SDK · bit-exact</span>
           </div>
         </div>
       </Show>
@@ -1181,8 +1183,10 @@ export default function Play() {
         Solver: single CTM, {ref()?.d_model ?? 256}-neuron pool, {ref()?.ticks ?? 8}{" "}
         ticks, {((ref()?.move_acc ?? 0.8) * 100).toFixed(0)}% move accuracy on
         held-out cells. Brain: 8-region modgrad architecture (~187k params) with a
-        visual retina, run bit-exact in wasm. Both load only on this page, after
-        first paint.
+        visual retina. The browser engine is a faithful reimplementation of modgrad's
+        forward pass, validated bit-exact against the SDK that trained the weights —
+        not the SDK compiled to wasm (yet). Both load only on this page, after first
+        paint.
       </p>
     </div>
   );

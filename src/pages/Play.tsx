@@ -640,6 +640,12 @@ export default function Play() {
   }
   let brainRotY = 0.7;
   const brainRotX = -0.32;
+  let brainTime = 0; // seconds, advanced by the rAF loop for the idle shimmer
+  // "#rrggbb" + alpha → rgba() string, for additive glow gradients
+  const hexA = (hex: string, a: number): string => {
+    const n = parseInt(hex.slice(1), 16);
+    return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+  };
 
   // brain tick aligned to the current animation tick (held at the last brain
   // tick if the brain exited earlier than the solver's tick count).
@@ -657,11 +663,18 @@ export default function Play() {
     if (builtFor !== total) buildNeuronPositions(dmodels);
 
     const W = brainCanvas.clientWidth || 720;
-    const H = Math.round(Math.max(300, Math.min(460, W * 0.52)));
+    const H = Math.round(Math.max(340, Math.min(520, W * 0.6)));
     const ctx = ctxOf(brainCanvas, W, H);
     const cxp = W / 2;
     const cyp = H / 2;
-    const fov = W * 0.42;
+    const fov = W * 0.52;
+
+    // dark "brain-scan" backdrop — bright region colours only read on dark.
+    const bg = ctx.createRadialGradient(cxp, cyp * 0.9, 8, cxp, cyp, Math.max(W, H) * 0.75);
+    bg.addColorStop(0, "#181527");
+    bg.addColorStop(1, "#0a0912");
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
 
     const tick = curBrainTick();
     // per-step normaliser so spike brightness is stable in scale
@@ -675,9 +688,12 @@ export default function Play() {
             if (a > amax) amax = a;
           }
     const actOf = (region: number, index: number) => {
-      if (!tick) return 0;
-      const v = tick.acts[region]?.[index] ?? 0;
-      return Math.min(1, (v < 0 ? -v : v) / amax);
+      if (tick) {
+        const v = tick.acts[region]?.[index] ?? 0;
+        return Math.min(1, (v < 0 ? -v : v) / amax);
+      }
+      // idle: gentle per-neuron shimmer so the brain looks alive at rest
+      return 0.1 + 0.14 * (0.5 + 0.5 * Math.sin(brainTime * 1.7 + region * 1.3 + index * 0.7));
     };
 
     const sy = Math.sin(brainRotY);
@@ -701,24 +717,28 @@ export default function Play() {
     }
     pts.sort((p, q) => q.depth - p.depth); // painter's algorithm: far first
 
+    // additive blending → overlapping neurons bloom, spikes pop
+    ctx.globalCompositeOperation = "lighter";
     for (const p of pts) {
       const col = REGION_COLORS[p.region % REGION_COLORS.length];
-      const size = Math.max(0.6, (fov / p.depth) * 0.013 * (0.55 + 1.7 * p.a));
-      if (p.a > 0.5) {
-        // spike halo
-        ctx.globalAlpha = (p.a - 0.5) * 0.8;
-        ctx.fillStyle = col;
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, size * 3.4, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      ctx.globalAlpha = 0.18 + 0.82 * p.a;
-      ctx.fillStyle = col;
+      const fogv = Math.max(0.4, Math.min(1, 14 / p.depth - 0.25)); // nearer = brighter/bigger
+      const size = Math.max(1.1, (10 / p.depth) * (1.5 + 3.4 * p.a) * fogv);
+      // soft glow halo
+      const glowA = (0.12 + 0.6 * p.a) * fogv;
+      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, size * 3.4);
+      g.addColorStop(0, hexA(col, glowA));
+      g.addColorStop(1, hexA(col, 0));
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, size * 3.4, 0, Math.PI * 2);
+      ctx.fill();
+      // bright core
+      ctx.fillStyle = hexA(col, Math.min(1, (0.5 + 0.5 * p.a) * fogv));
       ctx.beginPath();
       ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
       ctx.fill();
     }
-    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
   }
 
   // global-sync magnitude at the current tick, for the header meter
@@ -759,6 +779,7 @@ export default function Play() {
   onMount(() => {
     let raf = 0;
     const spin = () => {
+      brainTime += 0.016;
       if (!reduced) brainRotY += 0.0045;
       drawBrain3D();
       raf = requestAnimationFrame(spin);
@@ -1152,7 +1173,7 @@ export default function Play() {
             agent; the single-CTM solver above does that. This is the look inside.
           </p>
 
-          <div class="rounded-lg overflow-hidden" style={{ background: "var(--bg-2)" }}>
+          <div class="rounded-lg overflow-hidden" style={{ background: "#0a0912" }}>
             <canvas
               ref={brainCanvas}
               class="w-full block"

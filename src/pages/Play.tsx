@@ -196,6 +196,7 @@ export default function Play() {
     worker?.terminate();
     clearTimeout(stepTimer);
     clearTimeout(playTimer);
+    brainCanvas?.removeEventListener("wheel", brainWheel);
   });
 
   // ── solve loop ──────────────────────────────────────────────────
@@ -612,8 +613,10 @@ export default function Play() {
   }
   // port of debugger build_neuron_positions: a spherical blob per region,
   // cortical (regions 0–3) on the top row, subcortical (4–7) on the bottom.
+  let regionCenters: { x: number; y: number; z: number }[] = [];
   function buildNeuronPositions(dmodels: number[]) {
     neuronPos = [];
+    regionCenters = [];
     const rand = makeRand(42);
     for (let ri = 0; ri < dmodels.length; ri++) {
       const neurons = dmodels[ri];
@@ -622,6 +625,7 @@ export default function Play() {
       const cx = col * 3.5 - 5.25;
       const cy = 1.9 - row * 3.8;
       const cz = ri * 0.3 - 0.5;
+      regionCenters[ri] = { x: cx, y: cy, z: cz };
       const spread = Math.sqrt(neurons) * 0.34;
       for (let ni = 0; ni < neurons; ni++) {
         const theta = rand() * Math.PI;
@@ -639,7 +643,12 @@ export default function Play() {
     builtFor = neuronPos.length;
   }
   let brainRotY = 0.7;
-  const brainRotX = -0.32;
+  let brainRotX = -0.32;
+  let brainZoom = 1; // wheel / pinch zoom
+  let brainDragging = false;
+  let brainPointers = new Map<number, { x: number; y: number }>(); // active pointers (pinch)
+  let pinchDist = 0;
+  const [brainAutoRotate, setBrainAutoRotate] = createSignal(true);
   let brainTime = 0; // seconds, advanced by the rAF loop for the idle shimmer
   // "#rrggbb" + alpha → rgba() string, for additive glow gradients
   const hexA = (hex: string, a: number): string => {
@@ -667,7 +676,7 @@ export default function Play() {
     const ctx = ctxOf(brainCanvas, W, H);
     const cxp = W / 2;
     const cyp = H / 2;
-    const fov = W * 0.52;
+    const fov = W * 0.52 * brainZoom;
 
     // dark "brain-scan" backdrop — bright region colours only read on dark.
     const bg = ctx.createRadialGradient(cxp, cyp * 0.9, 8, cxp, cyp, Math.max(W, H) * 0.75);
@@ -717,8 +726,61 @@ export default function Play() {
     }
     pts.sort((p, q) => q.depth - p.depth); // painter's algorithm: far first
 
-    // additive blending → overlapping neurons bloom, spikes pop
+    // per-region activity (mean |act|) for the co-spike connections
+    const regionAct: number[] = [];
+    for (let r = 0; r < dmodels.length; r++) {
+      const ra = tick?.acts[r];
+      if (ra && ra.length) {
+        let s = 0;
+        for (const v of ra) s += v < 0 ? -v : v;
+        regionAct[r] = Math.min(1, s / ra.length / amax);
+      } else {
+        regionAct[r] = 0.06;
+      }
+    }
+    // project the region centres (same camera) for the connectome endpoints
+    const centerProj = regionCenters.map((p) => {
+      const rx = p.x * cy + p.z * sy;
+      const ry = p.y * cx - (-p.x * sy + p.z * cy) * sx;
+      const rz = p.y * sx + (-p.x * sy + p.z * cy) * cx;
+      const depth = rz + 11;
+      return { x: cxp + (rx * fov) / depth, y: cyp - (ry * fov) / depth };
+    });
+
     ctx.globalCompositeOperation = "lighter";
+
+    // ── connectome edges: faint as structure, bright when both ends co-spike ──
+    ctx.lineCap = "round";
+    for (const conn of bref.connections) {
+      const tp = centerProj[conn.to];
+      if (!tp) continue;
+      const colT = REGION_COLORS[conn.to % REGION_COLORS.length];
+      for (const f of conn.from) {
+        const fp = centerProj[f];
+        if (!fp) continue;
+        const co = Math.min(1, regionAct[f] * regionAct[conn.to] * 2.4); // co-spike
+        const colF = REGION_COLORS[f % REGION_COLORS.length];
+        const grad = ctx.createLinearGradient(fp.x, fp.y, tp.x, tp.y);
+        grad.addColorStop(0, hexA(colF, 0.04 + 0.6 * co));
+        grad.addColorStop(1, hexA(colT, 0.04 + 0.6 * co));
+        ctx.strokeStyle = grad;
+        ctx.lineWidth = 0.5 + 3 * co;
+        ctx.beginPath();
+        ctx.moveTo(fp.x, fp.y);
+        ctx.lineTo(tp.x, tp.y);
+        ctx.stroke();
+        // a spark travelling source→destination while they co-fire
+        if (co > 0.12) {
+          const fr = (brainTime * 0.55 + f * 0.17) % 1;
+          ctx.fillStyle = hexA("#ffffff", Math.min(0.9, co));
+          ctx.beginPath();
+          ctx.arc(fp.x + (tp.x - fp.x) * fr, fp.y + (tp.y - fp.y) * fr, 1.3 + 2.2 * co, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+
+    // additive blending → overlapping neurons bloom, spikes pop
     for (const p of pts) {
       const col = REGION_COLORS[p.region % REGION_COLORS.length];
       const fogv = Math.max(0.4, Math.min(1, 14 / p.depth - 0.25)); // nearer = brighter/bigger
@@ -751,6 +813,42 @@ export default function Play() {
     return Math.min(1, t.global / gmax);
   };
 
+  // ── mouse / touch orbit + zoom on the brain ──
+  const brainPointerDown = (e: PointerEvent) => {
+    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+    brainPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    brainDragging = true;
+    setBrainAutoRotate(false); // grabbing it stops the auto-spin
+    if (brainPointers.size === 2) {
+      const [a, b] = [...brainPointers.values()];
+      pinchDist = Math.hypot(a.x - b.x, a.y - b.y);
+    }
+  };
+  const brainPointerMove = (e: PointerEvent) => {
+    const prev = brainPointers.get(e.pointerId);
+    if (!prev) return;
+    if (brainPointers.size >= 2) {
+      brainPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      const [a, b] = [...brainPointers.values()];
+      const d = Math.hypot(a.x - b.x, a.y - b.y);
+      if (pinchDist) brainZoom = Math.max(0.5, Math.min(2.6, brainZoom * (d / pinchDist)));
+      pinchDist = d;
+      return;
+    }
+    brainRotY += (e.clientX - prev.x) * 0.01;
+    brainRotX = Math.max(-1.35, Math.min(1.35, brainRotX + (e.clientY - prev.y) * 0.01));
+    brainPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  };
+  const brainPointerUp = (e: PointerEvent) => {
+    brainPointers.delete(e.pointerId);
+    if (brainPointers.size === 0) brainDragging = false;
+    pinchDist = 0;
+  };
+  const brainWheel = (e: WheelEvent) => {
+    e.preventDefault();
+    brainZoom = Math.max(0.5, Math.min(2.6, brainZoom * (1 - e.deltaY * 0.0012)));
+  };
+
   // redraw whenever the relevant signals change
   createEffect(() => {
     // dependencies: maze, agent, visited, tick, attention toggle, runState
@@ -780,7 +878,7 @@ export default function Play() {
     let raf = 0;
     const spin = () => {
       brainTime += 0.016;
-      if (!reduced) brainRotY += 0.0045;
+      if (!reduced && brainAutoRotate() && !brainDragging) brainRotY += 0.0045;
       drawBrain3D();
       raf = requestAnimationFrame(spin);
     };
@@ -1173,12 +1271,53 @@ export default function Play() {
             agent; the single-CTM solver above does that. This is the look inside.
           </p>
 
-          <div class="rounded-lg overflow-hidden" style={{ background: "#0a0912" }}>
+          <div class="rounded-lg overflow-hidden relative" style={{ background: "#0a0912" }}>
             <canvas
-              ref={brainCanvas}
+              ref={(el) => {
+                brainCanvas = el;
+                el.addEventListener("wheel", brainWheel, { passive: false });
+              }}
               class="w-full block"
-              aria-label="the eight-region brain computing"
+              style={{ "touch-action": "none", cursor: brainDragging ? "grabbing" : "grab" }}
+              onPointerDown={brainPointerDown}
+              onPointerMove={brainPointerMove}
+              onPointerUp={brainPointerUp}
+              onPointerCancel={brainPointerUp}
+              aria-label="the eight-region brain computing — drag to rotate, scroll to zoom"
             />
+            <div class="absolute top-2 right-2 flex items-center gap-1.5">
+              <button
+                class="btn-icon text-[.68rem] font-mono px-2 py-1 rounded"
+                style={{
+                  background: "rgba(255,255,255,0.08)",
+                  color: "rgba(255,255,255,0.75)",
+                  "backdrop-filter": "blur(4px)",
+                }}
+                onClick={() => setBrainAutoRotate((v) => !v)}
+                title="toggle auto-rotation"
+              >
+                {brainAutoRotate() ? "❚❚ stop" : "⟳ spin"}
+              </button>
+              <button
+                class="text-[.68rem] font-mono px-2 py-1 rounded"
+                style={{
+                  background: "rgba(255,255,255,0.08)",
+                  color: "rgba(255,255,255,0.75)",
+                  "backdrop-filter": "blur(4px)",
+                }}
+                onClick={() => {
+                  brainRotX = -0.32;
+                  brainRotY = 0.7;
+                  brainZoom = 1;
+                }}
+                title="reset view"
+              >
+                reset
+              </button>
+            </div>
+            <div class="absolute bottom-2 left-3 text-[.66rem] font-mono pointer-events-none" style={{ color: "rgba(255,255,255,0.4)" }}>
+              drag to rotate · scroll / pinch to zoom
+            </div>
           </div>
 
           <div class="flex flex-wrap items-center gap-x-4 gap-y-1.5 mt-3 text-[.72rem] text-mute font-mono">

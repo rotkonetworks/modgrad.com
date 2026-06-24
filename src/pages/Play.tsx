@@ -25,6 +25,7 @@ type StepMsg = {
   brain: BrainTrace | null;
   vision: RetinaMap[] | null;
   attn: number[] | null; // per-cell retina saliency mapped to the maze
+  route: [number, number][]; // the brain's predicted route — its attention targets
   done: boolean;
   reached: boolean;
 };
@@ -99,6 +100,7 @@ export default function Play() {
   // visual-cortex feature maps (retina/V1/V2/V4) for the current cell
   let visionMaps: RetinaMap[] | null = null; // read in the rAF loop, not reactive
   let attnMap: number[] | null = null; // per-cell retina saliency, read in drawMaze
+  let routeCells: [number, number][] = []; // brain's predicted route (attention targets)
 
   // the brain's verdict on its last prediction vs the optimal step, plus a
   // running tally of how often it agreed — honest "it predicts, here's its score"
@@ -240,6 +242,7 @@ export default function Play() {
     const nTicks = msg.brain?.ticks.length ?? 0;
     visionMaps = msg.vision;
     attnMap = msg.attn;
+    routeCells = msg.route ?? [];
     batch(() => {
       setBrainTrace(msg.brain);
       setTicksTotal(nTicks);
@@ -391,19 +394,18 @@ export default function Play() {
       }
     }
 
-    // ── retina eyesight / attention: where the visual cortex responds, mapped
-    // back onto the maze cells. Brighter square = stronger response. This is the
-    // model's "sight" over the board, the same signal the 3D cyan layers show. ──
+    // ── ATTENTION HEATMAP (occlusion attribution): blank each cell, re-run the
+    // brain, measure how much the move shifts. Brighter = the model relied on
+    // that cell for this decision. Real attribution, every cell (walls too). ──
     const am = attnMap;
     if (am) {
       for (let r = 0; r < n; r++) {
         for (let c = 0; c < n; c++) {
-          if (m.grid[r * n + c] === 1) continue; // open cells only
-          const a = Math.pow(Math.max(0, Math.min(1, am[r * n + c])), 1.7);
-          if (a < 0.05) continue;
-          const inset = cell * (0.1 + 0.12 * (1 - a));
-          ctx.fillStyle = `color-mix(in srgb, ${accent} ${Math.round(10 + 64 * a)}%, transparent)`;
-          roundRect(ctx, cx(c) + inset, cy(r) + inset, cell - 2 * inset, cell - 2 * inset, 3);
+          const a = Math.pow(Math.max(0, Math.min(1, am[r * n + c])), 1.25);
+          if (a < 0.06) continue;
+          // amber heat — distinct from the purple trail and teal route
+          ctx.fillStyle = `rgba(245, 158, 11, ${(0.12 + 0.6 * a).toFixed(3)})`;
+          roundRect(ctx, cx(c) + 1, cy(r) + 1, cell - 2, cell - 2, 4);
           ctx.fill();
         }
       }
@@ -440,6 +442,42 @@ export default function Play() {
 
     // agent
     const [ar, ac] = agent();
+
+    // ── attention targets: the brain's PREDICTED ROUTE, decoded from its
+    // multi-step prediction — the cells it's aiming for, several moves ahead.
+    // Teal crosshairs + a beam from the agent; fades into the future. This is
+    // the brain's plan (vs the purple trail = where the agent actually went). ──
+    const rc = routeCells;
+    if (rc.length) {
+      const TARGET = "#13b7a4";
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.strokeStyle = `color-mix(in srgb, ${TARGET} 50%, transparent)`;
+      ctx.lineWidth = Math.max(2, cell * 0.09);
+      ctx.setLineDash([cell * 0.16, cell * 0.16]);
+      ctx.beginPath();
+      ctx.moveTo(cx(ac) + cell / 2, cy(ar) + cell / 2);
+      for (const [r, c] of rc) ctx.lineTo(cx(c) + cell / 2, cy(r) + cell / 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      rc.forEach(([r, c], i) => {
+        const fade = 1 - i / (rc.length + 1);
+        const px = cx(c) + cell / 2;
+        const py = cy(r) + cell / 2;
+        ctx.strokeStyle = `color-mix(in srgb, ${TARGET} ${Math.round(30 + 55 * fade)}%, transparent)`;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(px, py, cell * 0.19, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(px - cell * 0.1, py);
+        ctx.lineTo(px + cell * 0.1, py);
+        ctx.moveTo(px, py - cell * 0.1);
+        ctx.lineTo(px, py + cell * 0.1);
+        ctx.stroke();
+      });
+    }
+
     const ax = cx(ac) + cell / 2;
     const ay = cy(ar) + cell / 2;
     ctx.beginPath();
@@ -605,6 +643,25 @@ export default function Play() {
     const bt = brainTrace();
     if (!bt || bt.ticks.length === 0) return null;
     return bt.ticks[Math.min(tickIdx(), bt.ticks.length - 1)];
+  };
+
+  // per-region live telemetry at the current tick: neuron count + activation RMS
+  // (bar is normalized to the loudest region so they're comparable).
+  const regionStats = () => {
+    const bref = brainRef();
+    if (!bref) return [];
+    const acts = curBrainTick()?.acts ?? [];
+    const stats = bref.regions.map((rg, i) => {
+      const a = acts[i] ?? [];
+      let s = 0;
+      for (const v of a) s += v * v;
+      const rms = a.length ? Math.sqrt(s / a.length) : 0;
+      let peak = 0;
+      for (const v of a) peak = Math.max(peak, Math.abs(v));
+      return { name: rg.name, d: rg.d_model, rms, peak };
+    });
+    const mx = Math.max(1e-6, ...stats.map((s) => s.rms));
+    return stats.map((s) => ({ ...s, level: Math.min(1, s.rms / mx) }));
   };
 
   function drawBrain3D() {
@@ -1156,6 +1213,14 @@ export default function Play() {
                 <i class="w-2.5 h-2.5 inline-block" style={{ background: "#3CB371", "border-radius": "2px" }} />
                 goal
               </span>
+              <span class="inline-flex items-center gap-1.5" title="the cells the brain's multi-step prediction is aiming for">
+                <i class="w-2.5 h-2.5 rounded-full inline-block" style={{ border: "2px solid #13b7a4" }} />
+                brain's target route
+              </span>
+              <span class="inline-flex items-center gap-1.5" title="occlusion attribution: hide a cell, re-run the brain — brighter = the model relied on it for this move">
+                <i class="w-2.5 h-2.5 inline-block" style={{ background: "rgba(245,158,11,0.7)", "border-radius": "2px" }} />
+                attention
+              </span>
             </div>
           </div>
 
@@ -1282,6 +1347,7 @@ export default function Play() {
 
         {/* RIGHT: the 3D brain (Model B), as the second column */}
         <Show when={brainRef()}>
+        <div class="flex flex-col gap-5">
         <div class="card">
           <div class="flex items-center justify-between mb-1 flex-wrap gap-2">
             <div class="eyebrow">
@@ -1403,6 +1469,42 @@ export default function Play() {
             </span>
             <span class="ml-auto opacity-80">reimplemented from the SDK · bit-exact</span>
           </div>
+        </div>
+
+        {/* ── per-region telemetry: live numbers from all eight regions ── */}
+        <div class="card mt-5">
+          <div class="flex items-center justify-between mb-3">
+            <div class="eyebrow">Region telemetry</div>
+            <div class="font-mono text-[.7rem] text-mute tabular-nums">
+              tick {Math.min(tickIdx() + 1, ticksTotal() || 16)}/{ticksTotal() || 16}
+              <Show when={curBrainTick()?.exit != null}>
+                {" "}· exit λ {(curBrainTick()!.exit as number).toFixed(2)}
+              </Show>
+            </div>
+          </div>
+          <div class="flex flex-col gap-2">
+            <For each={regionStats()}>
+              {(s, i) => (
+                <div class="flex items-center gap-2.5 text-xs font-mono">
+                  <i class="w-2 h-2 rounded-full inline-block shrink-0" style={{ background: REGION_COLORS[i() % REGION_COLORS.length] }} />
+                  <span class="w-[4.5rem] shrink-0 text-dim">{shortRegion(s.name)}</span>
+                  <span class="w-9 shrink-0 text-mute tabular-nums text-right">{s.d}n</span>
+                  <div class="flex-1 h-2 rounded bg-panel overflow-hidden">
+                    <div
+                      class="h-full rounded transition-all duration-150"
+                      style={{ width: `${Math.max(2, s.level * 100)}%`, background: REGION_COLORS[i() % REGION_COLORS.length] }}
+                    />
+                  </div>
+                  <span class="w-12 text-right text-base tabular-nums shrink-0" title="activation RMS">{s.rms.toFixed(3)}</span>
+                </div>
+              )}
+            </For>
+          </div>
+          <div class="mt-3 pt-3 border-t border-line grid grid-cols-2 gap-x-4 gap-y-1 text-[.7rem] font-mono text-mute tabular-nums">
+            <span class="flex justify-between"><span>global sync</span><span class="text-dim">{(curBrainTick()?.global ?? 0).toFixed(3)}</span></span>
+            <span class="flex justify-between"><span>ticks used</span><span class="text-dim">{brainTrace()?.ticksUsed ?? 0}/{ticksTotal() || 16}</span></span>
+          </div>
+        </div>
         </div>
         </Show>
       </div>

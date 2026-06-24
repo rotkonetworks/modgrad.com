@@ -31,6 +31,7 @@ type StepResult = {
   brain: BrainTrace | null; // the 8-region brain's run on this maze state
   vision: RetinaMap[] | null; // sight + V1/V2/V4 feature maps the retina computed
   attn: number[] | null; // per-cell retina saliency mapped to the maze (SIZE²)
+  route: [number, number][]; // the brain's predicted route — its attention targets
   done: boolean;
   reached: boolean;
 };
@@ -75,6 +76,7 @@ function renderPixels(
   ac: number,
   gr: number,
   gc: number,
+  maskIdx = -1, // if ≥0, blank that cell to neutral grey (for occlusion saliency)
 ): Float32Array {
   const n = SIZE * SIZE;
   const px = new Float32Array(3 * n);
@@ -82,7 +84,8 @@ function renderPixels(
     for (let c = 0; c < SIZE; c++) {
       const idx = r * SIZE + c;
       let rr: number, gg: number, bb: number;
-      if (r === ar && c === ac) [rr, gg, bb] = [1, 0, 0]; // agent red
+      if (idx === maskIdx) [rr, gg, bb] = [0.5, 0.5, 0.5]; // occluded → grey
+      else if (r === ar && c === ac) [rr, gg, bb] = [1, 0, 0]; // agent red
       else if (r === gr && c === gc) [rr, gg, bb] = [0, 1, 0]; // goal green
       else if (grid[idx] !== 0) [rr, gg, bb] = [0, 0, 0]; // wall black
       else [rr, gg, bb] = [1, 1, 1]; // open white
@@ -117,7 +120,7 @@ function runBrain(
   ac: number,
   gr: number,
   gc: number,
-): { trace: BrainTrace; move: number; moveLogits: number[] } | null {
+): { trace: BrainTrace; move: number; moveLogits: number[]; pred: number[] } | null {
   if (!engine?.run_brain_pixels) return null;
   try {
     const px = renderPixels(grid, ar, ac, gr, gc);
@@ -131,7 +134,9 @@ function runBrain(
     // the move bars show the 4 direction logits of the last tick
     const last = out.ticks[out.ticks.length - 1]?.prediction ?? [];
     const moveLogits = [last[0] ?? 0, last[1] ?? 0, last[2] ?? 0, last[3] ?? 0];
-    return { trace: { ticks, ticksUsed: out.ticks_used }, move, moveLogits };
+    // the full prediction is the brain's whole intended ROUTE (route_len × 5),
+    // not just the first move — we decode it into target cells for the maze.
+    return { trace: { ticks, ticksUsed: out.ticks_used }, move, moveLogits, pred: last };
   } catch {
     return null; // never let a brain hiccup hard-crash the demo
   }
@@ -165,6 +170,45 @@ function goalDist(grid: number[], gr: number, gc: number): number[] {
     }
   }
   return dist;
+}
+
+// Decode the brain's PREDICTED ROUTE — its attention targets — from the
+// out_dims prediction (route_len × N_DIRECTIONS). Each group of N_DIRECTIONS is
+// one move's logits; we argmax each and trace cells forward from the agent,
+// stopping at the goal, a wall, the board edge, a wait token, or a revisit.
+// This is what the brain INTENDS, multiple steps ahead — not just the next move.
+function decodeRoute(
+  pred: number[],
+  grid: number[],
+  ar: number,
+  ac: number,
+  gr: number,
+  gc: number,
+): [number, number][] {
+  const route: [number, number][] = [];
+  let r = ar;
+  let c = ac;
+  const seen = new Set<number>([r * SIZE + c]);
+  const steps = Math.floor(pred.length / N_DIRECTIONS);
+  for (let k = 0; k < steps; k++) {
+    let best = 0;
+    for (let d = 1; d < N_DIRECTIONS; d++) {
+      if (pred[k * N_DIRECTIONS + d] > pred[k * N_DIRECTIONS + best]) best = d;
+    }
+    if (best >= 4) break; // wait token → plan ends
+    const [dr, dc] = DELTA[best];
+    const nr = r + dr;
+    const nc = c + dc;
+    if (nr < 0 || nr >= SIZE || nc < 0 || nc >= SIZE) break; // off the board
+    if (grid[nr * SIZE + nc] === 1) break; // plan walks into a wall → stop
+    if (seen.has(nr * SIZE + nc)) break; // looping
+    r = nr;
+    c = nc;
+    seen.add(r * SIZE + c);
+    route.push([r, c]);
+    if (r === gr && c === gc) break; // plan reaches the goal
+  }
+  return route;
 }
 
 // Collapse the retina/cortex feature maps into one SIZE×SIZE saliency grid —
@@ -204,6 +248,56 @@ function visionSaliency(
   if (!used) return null;
   for (let i = 0; i < out.length; i++) out[i] /= used;
   return out;
+}
+
+// softmax over the first N_DIRECTIONS logits of the last tick — the brain's
+// move distribution (used as the baseline + perturbed signal for occlusion).
+function moveDist(out: BrainOut): number[] {
+  const last = out.ticks[out.ticks.length - 1]?.prediction ?? [];
+  const l = [];
+  for (let d = 0; d < N_DIRECTIONS; d++) l.push(last[d] ?? 0);
+  const mx = Math.max(...l);
+  let s = 0;
+  const e = l.map((v) => {
+    const x = Math.exp(v - mx);
+    s += x;
+    return x;
+  });
+  return e.map((x) => x / (s || 1));
+}
+
+// OCCLUSION ATTENTION — the real "where the model pays attention": blank each
+// cell to neutral grey, re-run the brain, and measure how far its move
+// distribution shifts (total-variation distance from the unperturbed move).
+// A big shift ⇒ the model was relying on that cell for THIS decision. One brain
+// forward per cell (SIZE² of them) — heavy, but it's true attribution, not a
+// proxy. Returns a normalized [SIZE²] grid (or null if the engine is absent).
+function occlusionAttention(
+  grid: number[],
+  ar: number,
+  ac: number,
+  gr: number,
+  gc: number,
+  baseDist: number[],
+): number[] | null {
+  if (!engine?.run_brain_pixels) return null;
+  const n = SIZE * SIZE;
+  const sal = new Array<number>(n).fill(0);
+  let mx = 1e-6;
+  for (let idx = 0; idx < n; idx++) {
+    try {
+      const out = engine.run_brain_pixels(renderPixels(grid, ar, ac, gr, gc, idx));
+      const p = moveDist(out);
+      let tv = 0;
+      for (let d = 0; d < N_DIRECTIONS; d++) tv += Math.abs(p[d] - baseDist[d]);
+      sal[idx] = 0.5 * tv; // total-variation distance ∈ [0,1]
+      if (sal[idx] > mx) mx = sal[idx];
+    } catch {
+      /* leave 0 */
+    }
+  }
+  for (let i = 0; i < n; i++) sal[i] /= mx; // normalize to the strongest cell
+  return sal;
 }
 
 // Generate a random solvable-by-construction maze via randomized DFS
@@ -414,8 +508,23 @@ self.onmessage = async (e: MessageEvent) => {
         optMove >= 0 ? [ar + adr, ac + adc] : [ar, ac];
       const reached = next[0] === gr && next[1] === gc;
 
-      // per-cell saliency: where the retina/cortex responds, mapped to the maze
-      const attn = visionSaliency(vision, SIZE);
+      // OCCLUSION ATTENTION: blank each cell, re-run, measure how much the move
+      // shifts — where the model actually pays attention for THIS decision.
+      let attn: number[] | null = null;
+      if (ran?.pred) {
+        const l = ran.pred.slice(0, N_DIRECTIONS);
+        const mxl = Math.max(...l);
+        let s = 0;
+        const e = l.map((v) => {
+          const x = Math.exp(v - mxl);
+          s += x;
+          return x;
+        });
+        const baseDist = e.map((x) => x / (s || 1));
+        attn = occlusionAttention(grid, ar, ac, gr, gc, baseDist);
+      }
+      // the brain's predicted route — the cells it's attending to / aiming for
+      const route = ran?.pred ? decodeRoute(ran.pred, grid, ar, ac, gr, gc) : [];
 
       const result: StepResult = {
         type: "step",
@@ -427,6 +536,7 @@ self.onmessage = async (e: MessageEvent) => {
         brain: ran ? ran.trace : null,
         vision,
         attn,
+        route,
         done: reached,
         reached,
       };

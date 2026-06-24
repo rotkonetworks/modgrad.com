@@ -19,8 +19,13 @@ export function encode_maze_js(grid, size, agent_r, agent_c, goal_r, goal_c) {
 }
 
 /**
- * Parse `brain_weights.json` (`{ cortex, regional }`) and stash both
- * the retina and the regional weights for subsequent `run_brain`s.
+ * Parse `brain_weights.json` and stash the regional weights (and the
+ * retina, if present) for subsequent `run_brain`s.
+ *
+ * `cortex` is OPTIONAL: the visual-retina brain ships `{ cortex, regional }`,
+ * while the flat-encoding brain ships `{ regional }` with no retina at all.
+ * When `cortex` is absent, CORTEX stays `None` and only `run_brain_obs`
+ * (which takes a flat observation directly) is usable.
  * @param {string} json
  */
 export function load_brain_weights(json) {
@@ -44,6 +49,23 @@ export function load_weights(json) {
     if (ret[1]) {
         throw takeFromExternrefTable0(ret[0]);
     }
+}
+
+/**
+ * Retina feature maps for the given pixels: retina → v1 → v2 → v4
+ * activations (CHW), for the vision panel. Returns `[{name, channels,
+ * h, w, data}]`. Requires `load_brain_weights` first.
+ * @param {Float32Array} pixels
+ * @returns {any}
+ */
+export function retina_maps(pixels) {
+    const ptr0 = passArrayF32ToWasm0(pixels, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.retina_maps(ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
 }
 
 /**

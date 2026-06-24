@@ -44,6 +44,10 @@ export default function Home() {
               </p>
               <div class="mt-8 flex flex-wrap gap-3">
                 <A href="/docs" class="btn btn-primary">Get started →</A>
+                <A href="/play" class="btn btn-ghost">
+                  <span class="inline-block w-1.5 h-1.5 rounded-full bg-accent mr-2 align-middle" />
+                  Watch it think →
+                </A>
                 <a href={site.repo} target="_blank" rel="noopener" class="btn btn-ghost">
                   View on GitHub ↗
                 </a>
@@ -180,9 +184,10 @@ export default function Home() {
                 budget. They talk over learned inter-region synapses: a cortical loop plus
                 subcortical value, salience, and episodic memory pathways.
               </p>
-              <A href="/docs/brain-composition" class="inline-block mt-5 text-sm text-accent">
-                Read the architecture →
-              </A>
+              <div class="mt-5 flex flex-wrap gap-x-5 gap-y-2 text-sm">
+                <A href="/play" class="text-accent">Watch it think live →</A>
+                <A href="/docs/brain-composition" class="text-accent">Read the architecture →</A>
+              </div>
             </div>
             <div class="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
               <For each={regions}>

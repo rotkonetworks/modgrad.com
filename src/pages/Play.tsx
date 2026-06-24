@@ -7,35 +7,38 @@ import {
   For,
   batch,
 } from "solid-js";
+import { A } from "@solidjs/router";
 import { useDocMeta } from "@/lib/meta";
-import { MOVES, softmax, cssVar, neuronColor, heatAlpha } from "@/play/viz";
+import { MOVES, softmax, cssVar } from "@/play/viz";
 
 // ── types mirrored from the worker ────────────────────────────────
-type Tick = {
-  predictions: number[];
-  certainty: number;
-  activations: number[];
-  attention: number[];
-};
 type BrainTick = { acts: number[][]; global: number; exit: number | null };
 type BrainTrace = { ticks: BrainTick[]; ticksUsed: number };
+type RetinaMap = { name: string; channels: number; h: number; w: number; data: number[] };
 type StepMsg = {
   type: "step";
   agent: [number, number];
-  move: number;
-  commitTick: number;
-  ticks: Tick[];
+  move: number; // brain's predicted move 0..3 (4 = wait), drives the move bars
+  verdict: "ok" | "wall" | "astray" | "wait"; // brain prediction vs the maze
+  agreed: boolean; // did the brain match the optimal step?
+  moveLogits: number[]; // last tick's 4 direction logits, for the move bars
   brain: BrainTrace | null;
+  vision: RetinaMap[] | null;
+  attn: number[] | null; // per-cell retina saliency mapped to the maze
   done: boolean;
   reached: boolean;
 };
-// structure of the 8-region brain, read from brain_reference.json
+// structure of the 8-region brain, read from brain_solver_reference.json
 type BrainConn = { from: number[]; to: number; receives_observation: boolean };
 type BrainRef = {
+  size: number;
+  ticks: number;
+  out_dims: number;
   region_names: string[];
   regions: { name: string; d_model: number }[];
   connections: BrainConn[];
   n_global_sync: number;
+  heldout_first_move_acc: number;
 };
 type Maze = {
   grid: number[];
@@ -43,29 +46,25 @@ type Maze = {
   end: [number, number];
   path_length: number;
 };
-type Reference = {
-  size: number;
-  ticks: number;
-  d_model: number;
-  raw_dim: number;
-  out_dims: number;
-  heads: number;
-  move_acc: number;
-  solve_rate: number;
-  mazes: Maze[];
-};
 
 type Status = "loading" | "ready" | "error";
 type RunState = "idle" | "thinking" | "solved" | "stuck";
 
 const TICK_MS = 95; // pace of the "thinking" animation
 const MAX_STEPS = 30; // safety cap
+// UP=0 DOWN=1 LEFT=2 RIGHT=3 — [dr, dc], matches the worker's DELTA
+const DIR_DELTA: [number, number][] = [
+  [-1, 0],
+  [1, 0],
+  [0, -1],
+  [0, 1],
+];
 
 export default function Play() {
   useDocMeta(() => ({
     title: "Watch it think",
     description:
-      "A modgrad Continuous Thought Machine solves a maze in your browser. Watch its neurons fire, its attention sweep the maze, and its certainty rise as it commits to each move. Your trained model, run client-side by a faithful wasm reimplementation of the modgrad SDK's forward pass.",
+      "Watch a real modgrad 8-region brain see and think in your browser. It reads each maze cell through a visual retina, eight regions compute across 16 ticks, and predicts the move — ~84.5% per-move on held-out 9×9. Run client-side by a bit-exact wasm reimplementation of the modgrad SDK.",
     path: "/play",
   }));
 
@@ -85,26 +84,32 @@ export default function Play() {
   const [visited, setVisited] = createSignal<[number, number][]>([[1, 1]]);
   const [stepCount, setStepCount] = createSignal(0);
 
-  const [ticks, setTicks] = createSignal<Tick[]>([]);
+  // the brain's per-tick animation cursor (drives the 3D viz reveal)
   const [tickIdx, setTickIdx] = createSignal(0);
-  const [commitTick, setCommitTick] = createSignal(0);
+  const [ticksTotal, setTicksTotal] = createSignal(0);
   const [committedMove, setCommittedMove] = createSignal(-1);
+  const [moveLogits, setMoveLogits] = createSignal<number[]>([0, 0, 0, 0]);
 
   const [playing, setPlaying] = createSignal(false);
-  const [showAttention, setShowAttention] = createSignal(true);
 
-  // ── 8-region brain (Model B) ──
+  // ── 8-region brain (the solver) ──
   const [brainRef, setBrainRef] = createSignal<BrainRef | null>(null);
   const [brainOn, setBrainOn] = createSignal(false); // brain wasm available
   const [brainTrace, setBrainTrace] = createSignal<BrainTrace | null>(null);
+  // visual-cortex feature maps (retina/V1/V2/V4) for the current cell
+  let visionMaps: RetinaMap[] | null = null; // read in the rAF loop, not reactive
+  let attnMap: number[] | null = null; // per-cell retina saliency, read in drawMaze
+
+  // the brain's verdict on its last prediction vs the optimal step, plus a
+  // running tally of how often it agreed — honest "it predicts, here's its score"
+  const [verdict, setVerdict] = createSignal<StepMsg["verdict"] | null>(null);
+  const [agreeCount, setAgreeCount] = createSignal(0);
+  const [moveCount, setMoveCount] = createSignal(0);
 
   // dimensions from the reference; defaults avoid layout shift before load
-  let SIZE = 7;
-  let DMODEL = 128;
-  const [ref, setRef] = createSignal<Reference | null>(null);
+  let SIZE = 9;
 
   const maze = () => currentMaze();
-  const curTick = (): Tick | null => ticks()[tickIdx()] ?? null;
 
   // ── worker plumbing ─────────────────────────────────────────────
   let worker: Worker | null = null;
@@ -113,21 +118,17 @@ export default function Play() {
   let playTimer: number | undefined;
 
   onMount(async () => {
-    let reference: Reference;
+    let reference: BrainRef;
     try {
-      const r = await fetch("/models/maze_reference.json");
+      const r = await fetch("/models/brain_solver_reference.json");
       reference = await r.json();
     } catch (e) {
       setStatus("error");
-      setErrMsg("Could not load the maze set.");
+      setErrMsg("Could not load the brain reference.");
       return;
     }
     SIZE = reference.size;
-    DMODEL = reference.d_model;
-    batch(() => {
-      setRef(reference);
-      loadMaze(reference.mazes[0]); // instant placeholder until the brain is ready
-    });
+    setBrainRef(reference); // also drives the 3D viz structure
 
     try {
       worker = new Worker(new URL("../play/worker.ts", import.meta.url), {
@@ -165,30 +166,19 @@ export default function Play() {
       if (msg.type === "step") onStepResult(msg as StepMsg);
     };
 
-    // brain structure (small) loads in parallel; the 9MB brain weights are
-    // optional — if they fail, the maze demo still runs without the brain map.
-    fetch("/models/brain_reference.json")
-      .then((r) => r.json())
-      .then((b: BrainRef) => setBrainRef(b))
-      .catch(() => {});
-
     try {
-      const [wr, br] = await Promise.all([
-        fetch("/models/maze_weights.json").then((r) => r.text()),
-        fetch("/models/brain_weights.json")
-          .then((r) => r.text())
-          .catch(() => ""),
-      ]);
+      // the 9MB brain weights are the demo's source — the brain is the solver
+      const br = await fetch("/models/brain_solver_weights.json").then((r) =>
+        r.text(),
+      );
       worker.postMessage({
         type: "init",
-        weights: wr,
-        brainWeights: br || undefined,
+        brainWeights: br,
         size: reference.size,
-        rawDim: reference.raw_dim,
       });
     } catch (e) {
       setStatus("error");
-      setErrMsg("Could not load the trained weights.");
+      setErrMsg("Could not load the trained brain weights.");
     }
   });
 
@@ -197,6 +187,7 @@ export default function Play() {
     clearTimeout(stepTimer);
     clearTimeout(playTimer);
     brainCanvas?.removeEventListener("wheel", brainWheel);
+    brainIO?.disconnect();
   });
 
   // ── solve loop ──────────────────────────────────────────────────
@@ -206,11 +197,11 @@ export default function Play() {
       setAgent([m.start[0], m.start[1]]);
       setVisited([[m.start[0], m.start[1]]]);
       setStepCount(0);
-      setTicks([]);
       setBrainTrace(null);
       setTickIdx(0);
-      setCommitTick(0);
+      setTicksTotal(0);
       setCommittedMove(-1);
+      setMoveLogits([0, 0, 0, 0]);
       setRunState("idle");
     });
   }
@@ -242,20 +233,27 @@ export default function Play() {
     });
   }
 
-  // the worker returns the full per-tick trace for one move; animate through it
+  // the worker returns the brain's full per-tick trace for one move; animate
+  // through the ticks, then commit the brain's chosen move.
   function onStepResult(msg: StepMsg) {
     pendingStep = false;
+    const nTicks = msg.brain?.ticks.length ?? 0;
+    visionMaps = msg.vision;
+    attnMap = msg.attn;
     batch(() => {
-      setTicks(msg.ticks);
       setBrainTrace(msg.brain);
-      setCommitTick(msg.commitTick);
+      setTicksTotal(nTicks);
       setCommittedMove(msg.move);
+      setMoveLogits(msg.moveLogits);
+      setVerdict(msg.verdict);
+      setMoveCount((n) => n + 1);
+      if (msg.agreed) setAgreeCount((n) => n + 1);
       setTickIdx(0);
     });
 
-    if (reduced) {
-      // no animation: jump to the commit tick, then apply the move
-      setTickIdx(msg.commitTick);
+    if (reduced || nTicks === 0) {
+      // no animation: jump to the last tick, then apply the move
+      setTickIdx(Math.max(0, nTicks - 1));
       applyMove(msg);
       return;
     }
@@ -264,7 +262,8 @@ export default function Play() {
 
   function animateTicks(i: number, msg: StepMsg) {
     setTickIdx(i);
-    if (i >= msg.ticks.length - 1) {
+    const total = msg.brain?.ticks.length ?? 0;
+    if (i >= total - 1) {
       // finished the thinking animation → commit
       stepTimer = window.setTimeout(() => applyMove(msg), TICK_MS * 2.4);
       return;
@@ -280,18 +279,14 @@ export default function Play() {
     });
 
     if (msg.reached) {
-      batch(() => {
-        setRunState("solved");
+      const looping = playing();
+      setRunState("solved");
+      // perpetual demo: reached the goal → pause to celebrate, then a fresh maze
+      if (looping) {
+        playTimer = window.setTimeout(() => requestNewMaze(), TICK_MS * 14);
+      } else {
         setPlaying(false);
-      });
-      return;
-    }
-    if (msg.done) {
-      // blocked (shouldn't happen on curated mazes) — stop gracefully
-      batch(() => {
-        setRunState("stuck");
-        setPlaying(false);
-      });
+      }
       return;
     }
     // continue to the next cell if still auto-playing
@@ -335,18 +330,18 @@ export default function Play() {
   }
 
   // ── derived display values ──────────────────────────────────────
+  // the brain's move distribution over the 4 directions (last tick's logits)
   const moveProbs = (): number[] => {
-    const t = ticks()[commitTick()];
-    return t ? softmax(t.predictions) : [0.25, 0.25, 0.25, 0.25];
+    const l = moveLogits();
+    return l.length === 4 && l.some((v) => v !== 0)
+      ? softmax(l)
+      : [0.25, 0.25, 0.25, 0.25];
   };
-  const certaintyNow = () => curTick()?.certainty ?? 0;
 
   // ════════════════════════════════════════════════════════════════
   //  canvas rendering
   // ════════════════════════════════════════════════════════════════
   let mazeCanvas!: HTMLCanvasElement;
-  let neuronCanvas!: HTMLCanvasElement;
-  let certCanvas!: HTMLCanvasElement;
   let brainCanvas!: HTMLCanvasElement;
 
   // high-dpi helper
@@ -396,16 +391,19 @@ export default function Play() {
       }
     }
 
-    // attention heat overlay (open cells only)
-    const t = curTick();
-    if (showAttention() && t && runState() === "thinking") {
+    // ── retina eyesight / attention: where the visual cortex responds, mapped
+    // back onto the maze cells. Brighter square = stronger response. This is the
+    // model's "sight" over the board, the same signal the 3D cyan layers show. ──
+    const am = attnMap;
+    if (am) {
       for (let r = 0; r < n; r++) {
         for (let c = 0; c < n; c++) {
-          if (m.grid[r * n + c] === 1) continue;
-          const a = t.attention[r * n + c] ?? 0;
-          if (a <= 0.02) continue;
-          ctx.fillStyle = `rgba(251, 94, 109, ${heatAlpha(a)})`;
-          roundRect(ctx, cx(c), cy(r), cell, cell, 4);
+          if (m.grid[r * n + c] === 1) continue; // open cells only
+          const a = Math.pow(Math.max(0, Math.min(1, am[r * n + c])), 1.7);
+          if (a < 0.05) continue;
+          const inset = cell * (0.1 + 0.12 * (1 - a));
+          ctx.fillStyle = `color-mix(in srgb, ${accent} ${Math.round(10 + 64 * a)}%, transparent)`;
+          roundRect(ctx, cx(c) + inset, cy(r) + inset, cell - 2 * inset, cell - 2 * inset, 3);
           ctx.fill();
         }
       }
@@ -456,127 +454,55 @@ export default function Play() {
       ctx.beginPath();
       ctx.strokeStyle = `color-mix(in srgb, ${accent} 60%, transparent)`;
       ctx.lineWidth = 2;
-      const pulse = 0.34 + (tickIdx() / Math.max(1, ticks().length)) * 0.18;
+      const pulse = 0.34 + (tickIdx() / Math.max(1, ticksTotal())) * 0.18;
       ctx.arc(ax, ay, cell * pulse, 0, Math.PI * 2);
       ctx.stroke();
     }
-  }
 
-  // ── neuron grid: activations[tick] as a grid ──
-  function drawNeurons() {
-    if (!neuronCanvas) return;
-    const W = neuronCanvas.clientWidth || 360;
-    const cols = 16; // 16 × 8 = 128
-    const rows = Math.ceil(DMODEL / cols);
-    const gap = 3;
-    const cellW = (W - gap * (cols - 1)) / cols;
-    const H = rows * cellW + gap * (rows - 1);
-    const ctx = ctxOf(neuronCanvas, W, H);
-
-    const t = curTick();
-    const base = cssVar("--bg-2", "#F1EEE6");
-    const scale = 3.2; // activations roughly span ±6; saturate around 3
-    for (let i = 0; i < DMODEL; i++) {
-      const r = Math.floor(i / cols);
-      const c = i % cols;
-      const v = t?.activations[i] ?? 0;
-      ctx.fillStyle = base;
-      roundRect(ctx, c * (cellW + gap), r * (cellW + gap), cellW, cellW, 3);
-      ctx.fill();
-      if (t) {
-        ctx.fillStyle = neuronColor(v, scale);
-        roundRect(ctx, c * (cellW + gap), r * (cellW + gap), cellW, cellW, 3);
-        ctx.fill();
+    // ── brain misstep indicator: when the brain's PREDICTED move would walk
+    // into a wall (or away from the goal), flag it on the cell it wanted — the
+    // agent still steps optimally, but you see where the brain got it wrong. ──
+    const v = verdict();
+    const pm = committedMove();
+    if (v && v !== "ok" && pm >= 0 && pm < 4) {
+      const [pr, pc] = DIR_DELTA[pm];
+      const tr = ar + pr;
+      const tc = ac + pc;
+      const bad = "#e0564e";
+      // arrow from the agent toward the brain's (wrong) choice
+      const mx2 = ax + pc * cell * 0.5;
+      const my2 = ay + pr * cell * 0.5;
+      ctx.strokeStyle = bad;
+      ctx.lineWidth = 2.5;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.lineTo(mx2, my2);
+      ctx.stroke();
+      // mark the target cell it wanted (wall = ✕ box, astray = dashed ring)
+      if (tr >= 0 && tr < n && tc >= 0 && tc < n) {
+        ctx.strokeStyle = bad;
+        ctx.lineWidth = 2;
+        const ix = cx(tc);
+        const iy = cy(tr);
+        if (v === "wall" && m.grid[tr * n + tc] === 1) {
+          ctx.beginPath();
+          ctx.moveTo(ix + cell * 0.3, iy + cell * 0.3);
+          ctx.lineTo(ix + cell * 0.7, iy + cell * 0.7);
+          ctx.moveTo(ix + cell * 0.7, iy + cell * 0.3);
+          ctx.lineTo(ix + cell * 0.3, iy + cell * 0.7);
+          ctx.stroke();
+        } else {
+          ctx.setLineDash([4, 3]);
+          roundRect(ctx, ix + 2, iy + 2, cell - 4, cell - 4, 4);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
       }
     }
   }
 
-  // ── certainty curve across the 16 ticks ──
-  function drawCertainty() {
-    if (!certCanvas) return;
-    const W = certCanvas.clientWidth || 360;
-    const H = 120;
-    const ctx = ctxOf(certCanvas, W, H);
-    const padL = 4;
-    const padR = 4;
-    const padT = 10;
-    const padB = 16;
-    const tk = ticks();
-    const total = ref()?.ticks ?? 16;
-
-    const line = cssVar("--line", "#E6E1D5");
-    const accent = cssVar("--accent", "#6243D9");
-    const dim = cssVar("--text-mute", "#6A6676");
-
-    // baseline grid (0 / .5 / 1)
-    ctx.strokeStyle = line;
-    ctx.lineWidth = 1;
-    for (const f of [0, 0.5, 1]) {
-      const y = padT + (1 - f) * (H - padT - padB);
-      ctx.beginPath();
-      ctx.moveTo(padL, y);
-      ctx.lineTo(W - padR, y);
-      ctx.stroke();
-    }
-
-    if (tk.length === 0) return;
-    const xAt = (i: number) =>
-      padL + (i / (total - 1)) * (W - padL - padR);
-    const yAt = (v: number) => padT + (1 - v) * (H - padT - padB);
-
-    // commit tick marker
-    const ci = commitTick();
-    if (ci < tk.length) {
-      ctx.strokeStyle = `color-mix(in srgb, ${accent} 35%, transparent)`;
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([3, 3]);
-      ctx.beginPath();
-      ctx.moveTo(xAt(ci), padT);
-      ctx.lineTo(xAt(ci), H - padB);
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }
-
-    // the curve (only up to ticks revealed so far, so it "draws in")
-    const upTo = Math.min(tickIdx(), tk.length - 1);
-    ctx.strokeStyle = accent;
-    ctx.lineWidth = 2;
-    ctx.lineJoin = "round";
-    ctx.beginPath();
-    for (let i = 0; i <= upTo; i++) {
-      const x = xAt(i);
-      const y = yAt(tk[i].certainty);
-      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-    }
-    ctx.stroke();
-
-    // current point
-    const x = xAt(upTo);
-    const y = yAt(tk[upTo].certainty);
-    ctx.beginPath();
-    ctx.fillStyle = accent;
-    ctx.arc(x, y, 3.5, 0, Math.PI * 2);
-    ctx.fill();
-
-    // commit dot
-    if (ci <= upTo) {
-      ctx.beginPath();
-      ctx.fillStyle = accent;
-      ctx.arc(xAt(ci), yAt(tk[ci].certainty), 4.5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = cssVar("--bg-card", "#fff");
-      ctx.stroke();
-    }
-
-    // x label
-    ctx.fillStyle = dim;
-    ctx.font = "10px ui-monospace, monospace";
-    ctx.fillText("tick 0", padL, H - 4);
-    ctx.fillText(`${total - 1}`, W - padR - 12, H - 4);
-  }
-
-  // ── the 8-region brain as a rotating 3D particle cloud (Model B) ──
+  // ── the 8-region brain as a rotating 3D particle cloud (the solver) ──
   // Mirrors the modgrad debugger's 3D brain (debugger/src/main.rs): each neuron
   // is a point, clustered by region and coloured by region; brightness + size =
   // its activation, so individual neurons spike as the brain thinks. Hand-rolled
@@ -611,22 +537,34 @@ export default function Play() {
       return (((t ^ (t >>> 14)) >>> 0) / 4294967296) * 2 - 1;
     };
   }
-  // port of debugger build_neuron_positions: a spherical blob per region,
-  // cortical (regions 0–3) on the top row, subcortical (4–7) on the bottom.
+  // Anatomical-ish placement keyed by region name (robust to index order):
+  // a brain-shaped egg — cortical lobes around the outside (frontal→occipital,
+  // motor/parietal on top), subcortical structures deep in the centre, and the
+  // cerebellum tucked at the back-bottom. [x=front..back, y=down..up, z=depth].
+  const BRAIN_ANATOMY: Record<string, [number, number, number]> = {
+    input: [3.7, 1.2, 0.5], // frontal
+    attention: [0.6, 3.0, 0.7], // parietal (top)
+    output: [-3.9, 0.9, -0.5], // occipital (back)
+    motor: [1.4, 2.9, -0.7], // motor cortex (top)
+    basal_ganglia: [0.4, 0.1, 0.2], // deep centre
+    hippocampus: [-1.3, -0.5, 0.9], // deep, central-back
+    insula: [1.3, -0.3, -1.3], // lateral, deep
+    cerebellum: [-3.7, -2.7, 0.1], // back-bottom
+  };
   let regionCenters: { x: number; y: number; z: number }[] = [];
-  function buildNeuronPositions(dmodels: number[]) {
+  function buildNeuronPositions(regions: { name: string; d_model: number }[]) {
     neuronPos = [];
     regionCenters = [];
     const rand = makeRand(42);
-    for (let ri = 0; ri < dmodels.length; ri++) {
-      const neurons = dmodels[ri];
-      const col = ri % 4;
-      const row = Math.floor(ri / 4);
-      const cx = col * 3.5 - 5.25;
-      const cy = 1.9 - row * 3.8;
-      const cz = ri * 0.3 - 0.5;
+    for (let ri = 0; ri < regions.length; ri++) {
+      const neurons = regions[ri].d_model;
+      const [cx, cy, cz] = BRAIN_ANATOMY[regions[ri].name] ?? [
+        (ri % 4) * 3 - 4.5,
+        1.5 - Math.floor(ri / 4) * 3,
+        0,
+      ];
       regionCenters[ri] = { x: cx, y: cy, z: cz };
-      const spread = Math.sqrt(neurons) * 0.34;
+      const spread = Math.sqrt(neurons) * 0.36;
       for (let ni = 0; ni < neurons; ni++) {
         const theta = rand() * Math.PI;
         const phi = rand() * Math.PI * 2;
@@ -649,7 +587,12 @@ export default function Play() {
   let brainPointers = new Map<number, { x: number; y: number }>(); // active pointers (pinch)
   let pinchDist = 0;
   const [brainAutoRotate, setBrainAutoRotate] = createSignal(true);
+  // co-spike line persistence: 0 = instant, 1 = long trail (per-frame decay)
+  const [spikeHold, setSpikeHold] = createSignal(0.55);
+  const edgeGlow = new Map<string, number>(); // decayed co-spike per edge
   let brainTime = 0; // seconds, advanced by the rAF loop for the idle shimmer
+  let brainVisible = true; // gated by IntersectionObserver — skip drawing off-screen
+  let brainIO: IntersectionObserver | undefined;
   // "#rrggbb" + alpha → rgba() string, for additive glow gradients
   const hexA = (hex: string, a: number): string => {
     const n = parseInt(hex.slice(1), 16);
@@ -669,14 +612,14 @@ export default function Play() {
     if (!brainCanvas || !bref) return;
     const dmodels = bref.regions.map((r) => r.d_model);
     const total = dmodels.reduce((a, b) => a + b, 0);
-    if (builtFor !== total) buildNeuronPositions(dmodels);
+    if (builtFor !== total) buildNeuronPositions(bref.regions);
 
     const W = brainCanvas.clientWidth || 720;
     const H = Math.round(Math.max(340, Math.min(520, W * 0.6)));
     const ctx = ctxOf(brainCanvas, W, H);
     const cxp = W / 2;
     const cyp = H / 2;
-    const fov = W * 0.52 * brainZoom;
+    const fov = W * 0.72 * brainZoom;
 
     // dark "brain-scan" backdrop — bright region colours only read on dark.
     const bg = ctx.createRadialGradient(cxp, cyp * 0.9, 8, cxp, cyp, Math.max(W, H) * 0.75);
@@ -715,13 +658,14 @@ export default function Play() {
       const ry = np.y * cx - (-np.x * sy + np.z * cy) * sx;
       const rz = np.y * sx + (-np.x * sy + np.z * cy) * cx;
       const depth = rz + 11;
-      if (depth < 0.5) continue;
+      if (!(depth >= 0.5)) continue; // also rejects NaN
+      const a = actOf(np.region, np.index);
       pts.push({
         x: cxp + (rx * fov) / depth,
         y: cyp - (ry * fov) / depth,
         depth,
         region: np.region,
-        a: actOf(np.region, np.index),
+        a: Number.isFinite(a) ? a : 0,
       });
     }
     pts.sort((p, q) => q.depth - p.depth); // painter's algorithm: far first
@@ -749,7 +693,9 @@ export default function Play() {
 
     ctx.globalCompositeOperation = "lighter";
 
-    // ── connectome edges: faint as structure, bright when both ends co-spike ──
+    // ── connectome edges: faint as structure, bright when both ends co-spike,
+    // then fading over a configurable trail (spikeHold → per-frame decay). ──
+    const decay = 0.86 + spikeHold() * 0.135; // 0.86 (brief) … ~0.995 (long)
     ctx.lineCap = "round";
     for (const conn of bref.connections) {
       const tp = centerProj[conn.to];
@@ -759,22 +705,25 @@ export default function Play() {
         const fp = centerProj[f];
         if (!fp) continue;
         const co = Math.min(1, regionAct[f] * regionAct[conn.to] * 2.4); // co-spike
+        const key = f + "_" + conn.to;
+        const g = Math.max(co, (edgeGlow.get(key) ?? 0) * decay); // persistence
+        edgeGlow.set(key, g);
         const colF = REGION_COLORS[f % REGION_COLORS.length];
         const grad = ctx.createLinearGradient(fp.x, fp.y, tp.x, tp.y);
-        grad.addColorStop(0, hexA(colF, 0.04 + 0.6 * co));
-        grad.addColorStop(1, hexA(colT, 0.04 + 0.6 * co));
+        grad.addColorStop(0, hexA(colF, 0.07 + 0.85 * g));
+        grad.addColorStop(1, hexA(colT, 0.07 + 0.85 * g));
         ctx.strokeStyle = grad;
-        ctx.lineWidth = 0.5 + 3 * co;
+        ctx.lineWidth = 0.7 + 4 * g;
         ctx.beginPath();
         ctx.moveTo(fp.x, fp.y);
         ctx.lineTo(tp.x, tp.y);
         ctx.stroke();
-        // a spark travelling source→destination while they co-fire
-        if (co > 0.12) {
+        // a spark travelling source→destination while the link is hot
+        if (g > 0.1) {
           const fr = (brainTime * 0.55 + f * 0.17) % 1;
-          ctx.fillStyle = hexA("#ffffff", Math.min(0.9, co));
+          ctx.fillStyle = hexA("#ffffff", Math.min(0.95, g));
           ctx.beginPath();
-          ctx.arc(fp.x + (tp.x - fp.x) * fr, fp.y + (tp.y - fp.y) * fr, 1.3 + 2.2 * co, 0, Math.PI * 2);
+          ctx.arc(fp.x + (tp.x - fp.x) * fr, fp.y + (tp.y - fp.y) * fr, 1.4 + 2.6 * g, 0, Math.PI * 2);
           ctx.fill();
         }
       }
@@ -784,21 +733,157 @@ export default function Play() {
     for (const p of pts) {
       const col = REGION_COLORS[p.region % REGION_COLORS.length];
       const fogv = Math.max(0.4, Math.min(1, 14 / p.depth - 0.25)); // nearer = brighter/bigger
-      const size = Math.max(1.1, (10 / p.depth) * (1.5 + 3.4 * p.a) * fogv);
-      // soft glow halo
-      const glowA = (0.12 + 0.6 * p.a) * fogv;
-      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, size * 3.4);
-      g.addColorStop(0, hexA(col, glowA));
-      g.addColorStop(1, hexA(col, 0));
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, size * 3.4, 0, Math.PI * 2);
-      ctx.fill();
+      const size = Math.max(1.6, (15 / p.depth) * (1.8 + 4 * p.a) * fogv);
+      // glow halo only for neurons bright enough to show one (skips ~all the
+      // dim/idle dots — avoids ~160 radial gradients/frame for invisible glow)
+      if (p.a > 0.18) {
+        const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, size * 3.4);
+        g.addColorStop(0, hexA(col, (0.12 + 0.6 * p.a) * fogv));
+        g.addColorStop(1, hexA(col, 0));
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, size * 3.4, 0, Math.PI * 2);
+        ctx.fill();
+      }
       // bright core
       ctx.fillStyle = hexA(col, Math.min(1, (0.5 + 0.5 * p.a) * fogv));
       ctx.beginPath();
       ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
       ctx.fill();
+    }
+
+    // ── visual cortex: retina → V1 → V2 → V4 layers feeding the input region.
+    // Each layer is a spatial plane (channels averaged), lit by what it sees,
+    // wired forward into the brain — the eyes-to-cognition pathway, connected. ──
+    if (visionMaps && visionMaps.length) {
+      const proj = (px: number, py: number, pz: number) => {
+        const rx = px * cy + pz * sy;
+        const ry = py * cx - (-px * sy + pz * cy) * sx;
+        const rz = py * sx + (-px * sy + pz * cy) * cx;
+        const depth = rz + 11;
+        return { x: cxp + (rx * fov) / depth, y: cyp - (ry * fov) / depth, depth };
+      };
+      const VIS = "#62e6ff"; // cyan — distinct from the region colours
+      const inIdx = bref.region_names.indexOf("input");
+      const ic = regionCenters[inIdx >= 0 ? inIdx : 0] ?? { x: 3.7, y: 1.2, z: 0.5 };
+      const nL = visionMaps.length;
+      const SPC = 0.6; // layer-to-layer spacing (was 1.05 — too spread out)
+      const centers: { x: number; y: number; act: number }[] = [];
+      for (let li = 0; li < nL; li++) {
+        const m = visionMaps[li];
+        const isSight = m.name === "sight";
+        // sight (the eye's image) farthest out; retina→V4 step in toward input
+        const lx = ic.x + 1.0 + (nL - 1 - li) * SPC;
+        const ly = ic.y + 0.4;
+        const lz = ic.z;
+        const hw = m.h * m.w;
+        const sp = isSight ? 0.28 : 0.2;
+
+        if (isSight) {
+          // ── the literal retinal image — what the model actually sees ──
+          ctx.globalCompositeOperation = "source-over";
+          // a faint frame so it reads as the eye's "screen"
+          const corner = (rr: number, cc: number) =>
+            proj(lx, ly + (rr - (m.h - 1) / 2) * sp, lz + (cc - (m.w - 1) / 2) * sp);
+          const c0 = corner(-0.6, -0.6), c1 = corner(-0.6, m.w - 0.4),
+            c2 = corner(m.h - 0.4, m.w - 0.4), c3 = corner(m.h - 0.4, -0.6);
+          ctx.fillStyle = "rgba(10,12,20,0.72)";
+          ctx.beginPath();
+          ctx.moveTo(c0.x, c0.y); ctx.lineTo(c1.x, c1.y);
+          ctx.lineTo(c2.x, c2.y); ctx.lineTo(c3.x, c3.y); ctx.closePath();
+          ctx.fill();
+          ctx.strokeStyle = hexA(VIS, 0.5);
+          ctx.lineWidth = 1.2;
+          ctx.stroke();
+          for (let r = 0; r < m.h; r++) {
+            for (let c = 0; c < m.w; c++) {
+              const i = r * m.w + c;
+              const R = m.data[i], G = m.data[hw + i], B = m.data[2 * hw + i];
+              let col: string;
+              if (R > 0.5 && G < 0.5 && B < 0.5) col = "#ff5b5b"; // agent
+              else if (G > 0.5 && R < 0.5) col = "#4fd17a"; // goal
+              else if (R > 0.5 && G > 0.5 && B > 0.5) col = "#e9edf6"; // open
+              else col = "#33384a"; // wall
+              const p = proj(lx, ly + (r - (m.h - 1) / 2) * sp, lz + (c - (m.w - 1) / 2) * sp);
+              if (!(p.depth >= 0.5)) continue;
+              const s = Math.max(1.5, (sp * fov) / p.depth) * 0.92;
+              ctx.fillStyle = col;
+              ctx.fillRect(p.x - s / 2, p.y - s / 2, s, s);
+            }
+          }
+          ctx.globalCompositeOperation = "lighter";
+          const cp = proj(lx, ly, lz);
+          centers.push({ x: cp.x, y: cp.y, act: 1 });
+          continue;
+        }
+
+        // ── learned feature map (retina/V1/V2/V4): cyan response field ──
+        ctx.globalCompositeOperation = "lighter";
+        const cell = new Array(hw).fill(0);
+        let mx = 1e-6;
+        for (let i = 0; i < hw; i++) {
+          let s = 0;
+          for (let ch = 0; ch < m.channels; ch++) {
+            const v = m.data[ch * hw + i];
+            s += v < 0 ? -v : v;
+          }
+          cell[i] = s / m.channels;
+          if (cell[i] > mx) mx = cell[i];
+        }
+        let lact = 0;
+        for (let r = 0; r < m.h; r++) {
+          for (let c = 0; c < m.w; c++) {
+            const a = Math.min(1, cell[r * m.w + c] / mx);
+            lact += a;
+            const p = proj(lx, ly + (r - (m.h - 1) / 2) * sp, lz + (c - (m.w - 1) / 2) * sp);
+            if (!(p.depth >= 0.5)) continue;
+            const size = Math.max(1, (8 / p.depth) * (0.9 + 2.0 * a));
+            if (a > 0.35) {
+              const gr = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, size * 2.6);
+              gr.addColorStop(0, hexA(VIS, 0.4 * a));
+              gr.addColorStop(1, hexA(VIS, 0));
+              ctx.fillStyle = gr;
+              ctx.beginPath();
+              ctx.arc(p.x, p.y, size * 2.6, 0, Math.PI * 2);
+              ctx.fill();
+            }
+            ctx.fillStyle = hexA(VIS, 0.22 + 0.72 * a);
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+        const cp = proj(lx, ly, lz);
+        centers.push({ x: cp.x, y: cp.y, act: Math.min(1, lact / hw) });
+      }
+      // feedforward pathway: retina → V1 → V2 → V4 → input region
+      const inP = proj(ic.x, ic.y, ic.z);
+      ctx.lineCap = "round";
+      for (let li = 0; li < centers.length; li++) {
+        const a = centers[li];
+        const b = li + 1 < centers.length ? centers[li + 1] : inP;
+        const g = 0.12 + 0.7 * a.act;
+        ctx.strokeStyle = hexA(VIS, g * 0.65);
+        ctx.lineWidth = 0.8 + 2.4 * a.act;
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+        const fr = (brainTime * 0.5 + li * 0.15) % 1; // info flowing inward
+        ctx.fillStyle = hexA("#ffffff", 0.45 * a.act);
+        ctx.beginPath();
+        ctx.arc(a.x + (b.x - a.x) * fr, a.y + (b.y - a.y) * fr, 1.1 + 1.8 * a.act, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // label the pathway as the visual system (crisp, not additive)
+      if (centers.length) {
+        ctx.globalCompositeOperation = "source-over";
+        ctx.font = "600 9px ui-monospace, monospace";
+        ctx.textAlign = "center";
+        ctx.fillStyle = hexA(VIS, 0.85);
+        ctx.fillText("what it sees", centers[0].x, centers[0].y - 18);
+        ctx.textAlign = "left";
+      }
     }
     ctx.globalCompositeOperation = "source-over";
   }
@@ -851,47 +936,61 @@ export default function Play() {
 
   // redraw whenever the relevant signals change
   createEffect(() => {
-    // dependencies: maze, agent, visited, tick, attention toggle, runState
+    // dependencies: maze, agent, visited, tick, runState
     currentMaze();
     agent();
     visited();
     tickIdx();
-    ticks();
-    showAttention();
     runState();
     drawMaze();
   });
-  createEffect(() => {
-    tickIdx();
-    ticks();
-    drawNeurons();
-  });
-  createEffect(() => {
-    tickIdx();
-    ticks();
-    commitTick();
-    drawCertainty();
-  });
-  // the brain cloud renders continuously (slow rotation) via rAF, sampling the
-  // current animation tick's per-neuron activations each frame.
+  // The brain cloud is GPU-heavy (additive gradients, ~160 neurons + edges per
+  // frame), so we only animate it while the brain is actively thinking — plus a
+  // ~1s settle after each move — and cap to ~30fps. Idle just holds the last
+  // frame. This keeps the loop alive (rotation/IO stay responsive) without
+  // burning the GPU on a static scene.
+  let drewOnce = false;
   onMount(() => {
     let raf = 0;
-    const spin = () => {
-      brainTime += 0.016;
-      if (!reduced && brainAutoRotate() && !brainDragging) brainRotY += 0.0045;
-      drawBrain3D();
+    let lastDraw = 0;
+    let lastThinking = -1e9; // timestamp we were last "thinking", for the settle
+    const SETTLE_MS = 1000;
+    const MIN_FRAME_MS = 33; // ~30fps cap
+    const spin = (now: number) => {
       raf = requestAnimationFrame(spin);
+      if (!brainVisible) return; // off-screen → don't burn frames
+      const thinking = runState() === "thinking";
+      if (thinking) lastThinking = now;
+      // active = thinking, or within the settle window, or the user is orbiting,
+      // or we haven't drawn a single frame yet (so the idle cloud appears once).
+      const active =
+        thinking ||
+        now - lastThinking < SETTLE_MS ||
+        brainDragging ||
+        !drewOnce;
+      if (!active) return; // idle → hold the last drawn frame
+      if (drewOnce && now - lastDraw < MIN_FRAME_MS) return; // 30fps cap
+      lastDraw = now;
+      drewOnce = true;
+      brainTime += 0.033;
+      if (!reduced && brainAutoRotate() && !brainDragging) brainRotY += 0.009;
+      drawBrain3D();
     };
     raf = requestAnimationFrame(spin);
     onCleanup(() => cancelAnimationFrame(raf));
+  });
+
+  // when a fresh brain trace arrives, re-arm a one-shot redraw so the idle
+  // cloud reflects the new run even outside the thinking window.
+  createEffect(() => {
+    brainTrace();
+    drewOnce = false;
   });
 
   // redraw on resize (canvas is fluid width)
   onMount(() => {
     const onResize = () => {
       drawMaze();
-      drawNeurons();
-      drawCertainty();
     };
     window.addEventListener("resize", onResize);
     onCleanup(() => window.removeEventListener("resize", onResize));
@@ -948,18 +1047,24 @@ export default function Play() {
         <h1 class="text-[clamp(2rem,5vw,3rem)] tracking-[-0.03em] leading-[1.08]">
           Watch it <span class="grad-text">think.</span>
         </h1>
-        <p class="mt-5 text-dim text-[1.05rem] max-w-[64ch] leading-relaxed">
-          This page runs <span class="text-base">two</span> modgrad models in your
-          browser. The <span class="text-base">solver</span> (shown first) is a single
-          Continuous Thought Machine — one pool of {ref()?.d_model ?? 256} neurons
-          that navigates {ref()?.size ?? 9}×{ref()?.size ?? 9} mazes by thinking over{" "}
-          {ref()?.ticks ?? 8} internal ticks per move. Below it, modgrad's full{" "}
-          <span class="grad-text">8-region brain</span> watches the same maze and
-          thinks in 3D alongside it. The weights are real — trained by the modgrad
-          SDK — and what you see is each model's actual internal state, computed live
-          by a faithful browser reimplementation of the SDK's forward pass (checked
-          bit-exact against it), not a recording.
+        <p class="mt-5 text-dim text-[1.05rem] max-w-[60ch] leading-relaxed">
+          A real modgrad{" "}
+          <span class="grad-text">8-region brain</span> sees and thinks, live in
+          your browser. It reads each cell through a visual retina, eight regions
+          compute across 16 ticks, and the motor region predicts the move —{" "}
+          ~84.5% right per move on held-out 9×9. The agent walks the goal path so
+          you can watch the brain see and decide at every step; the maze flags
+          where its call would miss. Forward pass: a bit-exact in-browser
+          reimplementation of the SDK.
         </p>
+        <div class="mt-4 flex flex-wrap gap-x-5 gap-y-1 text-sm">
+          <A href="/docs/brain-composition" class="text-accent">
+            The 8-region brain →
+          </A>
+          <A href="/docs/continuous-thought-machine" class="text-accent">
+            How a region thinks →
+          </A>
+        </div>
       </div>
 
       {/* ── loading / error states ────────────────────── */}
@@ -970,16 +1075,8 @@ export default function Play() {
         </div>
       </Show>
 
-      {/* ── model 1: the solver ───────────────────────── */}
-      <div class="flex items-baseline gap-3 mt-12 mb-1">
-        <h2 class="text-[1.4rem] tracking-[-0.02em]">
-          <span class="text-mute font-mono text-base mr-1.5">1 ·</span> The solver
-        </h2>
-        <span class="text-mute text-sm">single CTM — picks the moves</span>
-      </div>
-
-      {/* ── the lab ───────────────────────────────────── */}
-      <div class="grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)] gap-5 mt-4">
+      {/* ── solver (the maze) + brain, side by side, one view ───── */}
+      <div class="grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1.12fr)] gap-5 mt-8 items-start">
         {/* LEFT: maze hero + controls + move bars */}
         <div class="flex flex-col gap-5">
           <div class="card relative">
@@ -1038,7 +1135,7 @@ export default function Play() {
                       />
                     </div>
                     <div class="text-mute text-[.7rem] font-mono mt-3">
-                      loading two models · ~12 MB · runs on your device
+                      loading the 8-region brain · ~9 MB · runs on your device
                     </div>
                   </div>
                 </div>
@@ -1055,12 +1152,10 @@ export default function Play() {
                 <i class="w-2.5 h-2.5 inline-block" style={{ background: "var(--text)", "border-radius": "2px" }} />
                 wall
               </span>
-              <Show when={showAttention()}>
-                <span class="inline-flex items-center gap-1.5">
-                  <i class="w-2.5 h-2.5 rounded-full inline-block" style={{ background: "#FB5E6D" }} />
-                  attention
-                </span>
-              </Show>
+              <span class="inline-flex items-center gap-1.5">
+                <i class="w-2.5 h-2.5 inline-block" style={{ background: "#3CB371", "border-radius": "2px" }} />
+                goal
+              </span>
             </div>
           </div>
 
@@ -1099,14 +1194,9 @@ export default function Play() {
             </div>
 
             <div class="flex items-center justify-between mt-4 pt-4 border-t border-line">
-              <label class="flex items-center gap-2 text-sm text-dim cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={showAttention()}
-                  onChange={(e) => setShowAttention(e.currentTarget.checked)}
-                />
-                Attention overlay
-              </label>
+              <div class="text-sm text-dim">
+                The agent walks the goal path; the brain predicts each step.
+              </div>
               <div class="font-mono text-xs text-mute tabular-nums">
                 maze #{Math.max(1, mazeNum())} · step {stepCount()}
               </div>
@@ -1116,9 +1206,31 @@ export default function Play() {
           {/* move bars */}
           <div class="card">
             <div class="flex items-center justify-between mb-3">
-              <div class="eyebrow">Committed move</div>
+              <div class="flex items-center gap-2">
+                <div class="eyebrow">Brain's prediction</div>
+                <Show when={verdict()}>
+                  <span
+                    class="text-[.62rem] font-mono px-1.5 py-0.5 rounded"
+                    style={{
+                      background:
+                        verdict() === "ok"
+                          ? "color-mix(in srgb, var(--accent) 16%, transparent)"
+                          : "color-mix(in srgb, #e0564e 18%, transparent)",
+                      color: verdict() === "ok" ? "var(--accent)" : "#c63d35",
+                    }}
+                  >
+                    {verdict() === "ok"
+                      ? "✓ on the goal path"
+                      : verdict() === "wall"
+                        ? "✕ would hit a wall"
+                        : verdict() === "astray"
+                          ? "→ away from goal"
+                          : "· no move"}
+                  </span>
+                </Show>
+              </div>
               <div class="font-mono text-xs text-mute">
-                argmax @ tick {commitTick()}
+                motor argmax · {ticksTotal() || 16} ticks
               </div>
             </div>
             <div class="flex flex-col gap-2.5">
@@ -1156,85 +1268,21 @@ export default function Play() {
                 }}
               </For>
             </div>
-          </div>
-        </div>
-
-        {/* RIGHT: neurons, certainty, readout */}
-        <div class="flex flex-col gap-5">
-          {/* readout */}
-          <div class="card">
-            <div class="grid grid-cols-3 gap-4">
-              <Readout label="tick" value={`${tickIdx()} / ${(ref()?.ticks ?? 16) - 1}`} />
-              <Readout
-                label="certainty"
-                value={`${(certaintyNow() * 100).toFixed(0)}%`}
-              />
-              <Readout
-                label="move"
-                value={committedMove() >= 0 ? MOVES[committedMove()] : "—"}
-                accent
-              />
-            </div>
-          </div>
-
-          {/* neuron grid */}
-          <div class="card">
-            <div class="flex items-center justify-between mb-3">
-              <div class="eyebrow">Neuron pool · {DMODEL}</div>
-              <div class="font-mono text-[.7rem] text-mute flex items-center gap-2">
-                <span class="inline-flex items-center gap-1">
-                  <i class="w-2 h-2 inline-block rounded-sm" style={{ background: "#29C7D6" }} />−
-                </span>
-                <span class="inline-flex items-center gap-1">
-                  <i class="w-2 h-2 inline-block rounded-sm" style={{ background: "var(--accent)" }} />+
+            <Show when={moveCount() > 0}>
+              <div class="mt-3 pt-3 border-t border-line flex items-center justify-between text-xs font-mono text-mute tabular-nums">
+                <span>brain agreed with the optimal step</span>
+                <span class="text-dim">
+                  {Math.round((agreeCount() / moveCount()) * 100)}% ({agreeCount()}/
+                  {moveCount()})
                 </span>
               </div>
-            </div>
-            <canvas
-              ref={neuronCanvas}
-              class="w-full block"
-              aria-label="neuron activations"
-            />
-            <p class="text-mute text-xs mt-3 leading-relaxed">
-              Each square is one neuron at the current tick. Violet fires positive,
-              teal inhibited. The pattern is the brain's evolving thought.
-            </p>
-          </div>
-
-          {/* certainty curve */}
-          <div class="card">
-            <div class="flex items-center justify-between mb-2">
-              <div class="eyebrow">Certainty over {ref()?.ticks ?? 8} ticks</div>
-              <div class="font-mono text-xs text-mute tabular-nums">
-                {(certaintyNow() * 100).toFixed(0)}%
-              </div>
-            </div>
-            <div style={{ height: "120px" }}>
-              <canvas
-                ref={certCanvas}
-                class="w-full h-full block"
-                aria-label="certainty over thinking ticks"
-              />
-            </div>
-            <p class="text-mute text-xs mt-2 leading-relaxed">
-              Confidence (1 − entropy) as the thought unfolds. The dashed line marks
-              the tick the brain is most certain on; that tick's argmax is the move it
-              commits.
-            </p>
+            </Show>
           </div>
         </div>
-      </div>
 
-      {/* ── model 2: the brain ────────────────────────── */}
-      <Show when={brainRef()}>
-        <div class="flex items-baseline gap-3 mt-12 mb-1">
-          <h2 class="text-[1.4rem] tracking-[-0.02em]">
-            <span class="text-mute font-mono text-base mr-1.5">2 ·</span> The{" "}
-            <span class="grad-text">brain</span>
-          </h2>
-          <span class="text-mute text-sm">8 regions — watches &amp; thinks</span>
-        </div>
-        <div class="card mt-4">
+        {/* RIGHT: the 3D brain (Model B), as the second column */}
+        <Show when={brainRef()}>
+        <div class="card">
           <div class="flex items-center justify-between mb-1 flex-wrap gap-2">
             <div class="eyebrow">
               live in 3D · <span class="grad-text">{brainRef()?.region_names.length ?? 8} regions</span>
@@ -1255,20 +1303,19 @@ export default function Play() {
                 </div>
               </Show>
               <span class="tag" classList={{ "tag-wip": runState() === "thinking" }}>
-                Model B
+                the solver
               </span>
             </div>
           </div>
 
-          <p class="text-dim text-sm max-w-[74ch] leading-relaxed mb-4">
-            This is a <span class="text-base">second, separate model</span>:
-            modgrad's full 8-region brain, running live in 3D as the solver works.
-            Every dot is one neuron, grouped and coloured by its region — a cortical
-            loop (input&nbsp;→&nbsp;attention&nbsp;→&nbsp;output&nbsp;→&nbsp;motor)
-            wired to a hippocampus with episodic memory, plus subcortical helpers —
-            all fed by a visual retina that looks at the maze. Neurons brighten as
-            they spike, so you watch the whole brain compute. It doesn't move the
-            agent; the single-CTM solver above does that. This is the look inside.
+          <p class="text-dim text-sm leading-relaxed mb-4">
+            This is the model thinking. Each dot is a neuron, coloured by region;
+            lines are the connectome, lit when two regions fire together. The cyan
+            grids are the visual cortex — the framed image is what it sees, then
+            retina → V1 → V2 → V4 feed the input region.{" "}
+            <A href="/docs/brain-composition" class="text-accent whitespace-nowrap">
+              how it works →
+            </A>
           </p>
 
           <div class="rounded-lg overflow-hidden relative" style={{ background: "#0a0912" }}>
@@ -1276,13 +1323,18 @@ export default function Play() {
               ref={(el) => {
                 brainCanvas = el;
                 el.addEventListener("wheel", brainWheel, { passive: false });
+                brainIO = new IntersectionObserver(
+                  (es) => (brainVisible = es[0]?.isIntersecting ?? true),
+                );
+                brainIO.observe(el);
               }}
-              class="w-full block"
-              style={{ "touch-action": "none", cursor: brainDragging ? "grabbing" : "grab" }}
+              class="w-full block cursor-grab active:cursor-grabbing"
+              style={{ "touch-action": "none" }}
               onPointerDown={brainPointerDown}
               onPointerMove={brainPointerMove}
               onPointerUp={brainPointerUp}
               onPointerCancel={brainPointerUp}
+              onLostPointerCapture={brainPointerUp}
               aria-label="the eight-region brain computing — drag to rotate, scroll to zoom"
             />
             <div class="absolute top-2 right-2 flex items-center gap-1.5">
@@ -1322,6 +1374,18 @@ export default function Play() {
 
           <div class="flex flex-wrap items-center gap-x-4 gap-y-1.5 mt-3 text-[.72rem] text-mute font-mono">
             <span class="opacity-80">each dot = 1 neuron · brighter = spiking</span>
+            <label class="inline-flex items-center gap-1.5" title="how long co-spike lines linger">
+              spike trail
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                value={spikeHold()}
+                onInput={(e) => setSpikeHold(parseFloat(e.currentTarget.value))}
+                class="w-20 align-middle"
+              />
+            </label>
             <For each={brainRef()?.region_names ?? []}>
               {(nm, i) => (
                 <span class="inline-flex items-center gap-1.5">
@@ -1333,20 +1397,24 @@ export default function Play() {
                 </span>
               )}
             </For>
+            <span class="inline-flex items-center gap-1.5" title="visual cortex: retina → V1 → V2 → V4">
+              <i class="w-2.5 h-2.5 rounded-full inline-block" style={{ background: "#62e6ff" }} />
+              vision
+            </span>
             <span class="ml-auto opacity-80">reimplemented from the SDK · bit-exact</span>
           </div>
         </div>
-      </Show>
+        </Show>
+      </div>
 
       {/* ── footnote ──────────────────────────────────── */}
       <p class="text-mute text-xs mt-8 max-w-[70ch] leading-relaxed font-mono">
-        Solver: single CTM, {ref()?.d_model ?? 256}-neuron pool, {ref()?.ticks ?? 8}{" "}
-        ticks, {((ref()?.move_acc ?? 0.8) * 100).toFixed(0)}% move accuracy on
-        held-out cells. Brain: 8-region modgrad architecture (~187k params) with a
-        visual retina. The browser engine is a faithful reimplementation of modgrad's
-        forward pass, validated bit-exact against the SDK that trained the weights —
-        not the SDK compiled to wasm (yet). Both load only on this page, after first
-        paint.
+        Solver: an 8-region brain (input · attention · output · motor · cerebellum
+        · basal-ganglia · insula · hippocampus) with a visual retina, computing over{" "}
+        {brainRef()?.ticks ?? 16} ticks.{" "}
+        {(((brainRef()?.heldout_first_move_acc ?? 0.845)) * 100).toFixed(1)}% per-move
+        on held-out 9×9 mazes. The browser engine reimplements modgrad's forward pass —
+        bit-exact against the SDK, not the SDK itself on wasm (yet). Loads only here.
       </p>
     </div>
   );

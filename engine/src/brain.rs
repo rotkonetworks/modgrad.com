@@ -156,6 +156,31 @@ impl VisualCortex {
         // per_token_ln_v4 defaults false for this brain — skip the LN.
         (tokens, n_tokens, channels)
     }
+
+    /// Per-layer feature maps (CHW), for visualisation: the same retina →
+    /// v1 → v2 → v4 cascade `spatial_tokens` runs, but returns every layer's
+    /// activation. Each entry: (name, data [ch×h×w], channels, h, w).
+    pub fn feature_maps(
+        &self,
+        raw: &[f32],
+    ) -> Vec<(&'static str, Vec<f32>, usize, usize, usize)> {
+        let h = self.input_h;
+        let w = self.input_w;
+        let (mut r, rh, rw) = self.retina.forward1(raw, h, w);
+        leaky_relu(&mut r);
+        let (mut v1, h1, w1) = self.v1.forward1(&r, rh, rw);
+        leaky_relu(&mut v1);
+        let (mut v2, h2, w2) = self.v2.forward1(&v1, h1, w1);
+        leaky_relu(&mut v2);
+        let (mut v4, h4, w4) = self.v4.forward1(&v2, h2, w2);
+        leaky_relu(&mut v4);
+        vec![
+            ("retina", r, self.retina.out_channels, rh, rw),
+            ("v1", v1, self.v1.out_channels, h1, w1),
+            ("v2", v2, self.v2.out_channels, h2, w2),
+            ("v4", v4, self.v4.out_channels, h4, w4),
+        ]
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -784,18 +809,24 @@ mod wasm_bindings {
         static BRAIN: RefCell<Option<RegionalWeights>> = const { RefCell::new(None) };
     }
 
-    /// Parse `brain_weights.json` (`{ cortex, regional }`) and stash both
-    /// the retina and the regional weights for subsequent `run_brain`s.
+    /// Parse `brain_weights.json` and stash the regional weights (and the
+    /// retina, if present) for subsequent `run_brain`s.
+    ///
+    /// `cortex` is OPTIONAL: the visual-retina brain ships `{ cortex, regional }`,
+    /// while the flat-encoding brain ships `{ regional }` with no retina at all.
+    /// When `cortex` is absent, CORTEX stays `None` and only `run_brain_obs`
+    /// (which takes a flat observation directly) is usable.
     #[wasm_bindgen]
     pub fn load_brain_weights(json: &str) -> Result<(), JsValue> {
         #[derive(Deserialize)]
         struct BrainWeights {
-            cortex: VisualCortex,
+            #[serde(default)]
+            cortex: Option<VisualCortex>,
             regional: RegionalWeights,
         }
         let bw: BrainWeights = serde_json::from_str(json)
             .map_err(|e| JsValue::from_str(&format!("load_brain_weights: {e}")))?;
-        CORTEX.with(|c| *c.borrow_mut() = Some(bw.cortex));
+        CORTEX.with(|c| *c.borrow_mut() = bw.cortex);
         BRAIN.with(|b| *b.borrow_mut() = Some(bw.regional));
         Ok(())
     }
@@ -809,7 +840,8 @@ mod wasm_bindings {
             let cortex_ref = c.borrow();
             let cortex = cortex_ref
                 .as_ref()
-                .ok_or_else(|| JsValue::from_str("run_brain: weights not loaded"))?;
+                .ok_or_else(|| JsValue::from_str(
+                    "run_brain_pixels: no visual cortex loaded (this brain has no retina — use run_brain_obs with a flat observation)"))?;
             let (obs, _n, _d) = cortex.spatial_tokens(pixels);
             BRAIN.with(|b| {
                 let brain_ref = b.borrow();
@@ -820,6 +852,40 @@ mod wasm_bindings {
                 serde_wasm_bindgen::to_value(&out)
                     .map_err(|e| JsValue::from_str(&format!("run_brain serialize: {e}")))
             })
+        })
+    }
+
+    /// Retina feature maps for the given pixels: retina → v1 → v2 → v4
+    /// activations (CHW), for the vision panel. Returns `[{name, channels,
+    /// h, w, data}]`. Requires `load_brain_weights` first.
+    #[wasm_bindgen]
+    pub fn retina_maps(pixels: &[f32]) -> Result<JsValue, JsValue> {
+        #[derive(serde::Serialize)]
+        struct Map {
+            name: String,
+            channels: usize,
+            h: usize,
+            w: usize,
+            data: Vec<f32>,
+        }
+        CORTEX.with(|c| {
+            let cortex_ref = c.borrow();
+            let cortex = cortex_ref
+                .as_ref()
+                .ok_or_else(|| JsValue::from_str("retina_maps: no visual cortex loaded"))?;
+            let maps: Vec<Map> = cortex
+                .feature_maps(pixels)
+                .into_iter()
+                .map(|(name, data, channels, h, w)| Map {
+                    name: name.to_string(),
+                    channels,
+                    h,
+                    w,
+                    data,
+                })
+                .collect();
+            serde_wasm_bindgen::to_value(&maps)
+                .map_err(|e| JsValue::from_str(&format!("retina_maps serialize: {e}")))
         })
     }
 

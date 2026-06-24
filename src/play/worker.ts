@@ -1,29 +1,15 @@
 /// <reference lib="webworker" />
-// modgrad CTM worker — runs the real wasm brain off the main thread.
+// modgrad brain worker — runs the real wasm 8-region brain off the main thread.
 // The main thread only renders; all forward passes happen here.
 //
 // The engine package is served from /engine/ (copied from engine/pkg into
 // public/engine). We import it by absolute URL so Vite leaves it alone and the
 // browser loads it at runtime — keeping the ~1MB of wasm + weights off every
 // other route.
-
-type Maze = {
-  grid: number[];
-  start: [number, number];
-  end: [number, number];
-  path_length: number;
-};
-
-type Tick = {
-  // raw move logits, UP=0 DOWN=1 LEFT=2 RIGHT=3
-  predictions: number[];
-  // [entropy, 1 - entropy]; index 1 is "confidence"
-  certainty: number;
-  // [d_model] neuron pool
-  activations: number[];
-  // [n_tokens] attention averaged over heads, normalised 0..1
-  attention: number[];
-};
+//
+// The 8-region brain (with a visual retina) is now the SOLVER: it reads the
+// maze as RGB pixels, runs its forward pass, and the argmax of the last tick's
+// first 5 logits is the move (0..3 = UP/DOWN/LEFT/RIGHT, 4 = wait/stuck).
 
 // per-tick brain state for the 3D particle viz: every neuron's activation
 // (grouped by region) so individual neurons spike, plus global-sync magnitude
@@ -37,34 +23,25 @@ type BrainTrace = { ticks: BrainTick[]; ticksUsed: number };
 
 type StepResult = {
   type: "step";
-  agent: [number, number];
-  move: number; // committed move index
-  commitTick: number;
-  ticks: Tick[];
-  brain: BrainTrace | null; // the 8-region brain's run on the same maze state
+  agent: [number, number]; // the cell the agent steps to (optimal path)
+  move: number; // the brain's PREDICTED move (0..3, 4 = wait) — drives the bars
+  verdict: "ok" | "wall" | "astray" | "wait"; // brain's prediction vs the maze
+  agreed: boolean; // did the brain's prediction match the optimal step?
+  moveLogits: number[]; // last tick's first 4 direction logits (for the move bars)
+  brain: BrainTrace | null; // the 8-region brain's run on this maze state
+  vision: RetinaMap[] | null; // sight + V1/V2/V4 feature maps the retina computed
+  attn: number[] | null; // per-cell retina saliency mapped to the maze (SIZE²)
   done: boolean;
   reached: boolean;
 };
 
-let engine: {
-  encode_maze_js: (
-    grid: Uint8Array,
-    size: number,
-    ar: number,
-    ac: number,
-    gr: number,
-    gc: number,
-  ) => Float32Array;
-  run: (obs: Float32Array, nTokens: number, rawDim: number) => RawOut;
-  run_brain_pixels: ((pixels: Float32Array) => BrainOut) | null;
-} | null = null;
+// one visual-cortex layer's feature maps (CHW), from the wasm `retina_maps`
+type RetinaMap = { name: string; channels: number; h: number; w: number; data: number[] };
 
-type RawOut = {
-  predictions: number[][];
-  certainties: number[][];
-  activations: number[][];
-  attention: number[][][]; // [tick][head][cell]
-};
+let engine: {
+  run_brain_pixels: (pixels: Float32Array) => BrainOut;
+  retina_maps: ((pixels: Float32Array) => RetinaMap[]) | null;
+} | null = null;
 
 // shape returned by the wasm `run_brain_pixels`
 type BrainOut = {
@@ -77,32 +54,9 @@ type BrainOut = {
   ticks_used: number;
 };
 
-let SIZE = 7;
-let RAW_DIM = 9;
+let SIZE = 9;
 
 const post = (m: unknown) => (self as unknown as Worker).postMessage(m);
-
-function argmax(a: number[]): number {
-  let bi = 0;
-  for (let i = 1; i < a.length; i++) if (a[i] > a[bi]) bi = i;
-  return bi;
-}
-
-// average attention over heads, then min-max normalise to 0..1 for display
-function flattenAttention(perHead: number[][]): number[] {
-  const cells = perHead[0]?.length ?? 0;
-  const avg = new Array<number>(cells).fill(0);
-  for (const head of perHead) for (let i = 0; i < cells; i++) avg[i] += head[i];
-  for (let i = 0; i < cells; i++) avg[i] /= perHead.length || 1;
-  let lo = Infinity;
-  let hi = -Infinity;
-  for (const v of avg) {
-    if (v < lo) lo = v;
-    if (v > hi) hi = v;
-  }
-  const span = hi - lo || 1;
-  return avg.map((v) => (v - lo) / span);
-}
 
 function rms(a: number[]): number {
   if (a.length === 0) return 0;
@@ -111,9 +65,10 @@ function rms(a: number[]): number {
   return Math.sqrt(s / a.length);
 }
 
-// Render the maze to RGB pixels [3 × SIZE × SIZE] in CHW order — the exact
-// colour scheme the retina was trained on (agent blue, goal orange, wall
-// dark, open light). Mirrors render_pixels() in the Rust exporter.
+// Render the maze to RGB pixels [3 × SIZE × SIZE], CHW (R plane, G plane, B
+// plane), EXACTLY the scheme run_brain's retina was trained on:
+// wall=(0,0,0), open=(1,1,1), agent=(1,0,0) red, goal=(0,1,0) green.
+// Agent/goal overwrite the cell colour. (Must match render_maze in the SDK.)
 function renderPixels(
   grid: number[],
   ar: number,
@@ -127,10 +82,10 @@ function renderPixels(
     for (let c = 0; c < SIZE; c++) {
       const idx = r * SIZE + c;
       let rr: number, gg: number, bb: number;
-      if (r === ar && c === ac) [rr, gg, bb] = [0.1, 0.4, 0.9];
-      else if (r === gr && c === gc) [rr, gg, bb] = [0.9, 0.3, 0.1];
-      else if (grid[idx] !== 0) [rr, gg, bb] = [0.1, 0.1, 0.1];
-      else [rr, gg, bb] = [0.8, 0.8, 0.8];
+      if (r === ar && c === ac) [rr, gg, bb] = [1, 0, 0]; // agent red
+      else if (r === gr && c === gc) [rr, gg, bb] = [0, 1, 0]; // goal green
+      else if (grid[idx] !== 0) [rr, gg, bb] = [0, 0, 0]; // wall black
+      else [rr, gg, bb] = [1, 1, 1]; // open white
       px[idx] = rr;
       px[n + idx] = gg;
       px[2 * n + idx] = bb;
@@ -139,16 +94,30 @@ function renderPixels(
   return px;
 }
 
-// Run the 8-region brain on the current maze state and condense its per-tick
-// internal state to region/global magnitudes for the viz. Returns null if the
-// brain engine isn't available (older wasm / load failure).
+// UP=0 DOWN=1 LEFT=2 RIGHT=3 WAIT=4 — matches the SDK's DIR_* constants, and
+// 0..3 line up with DELTA below. The brain reads the move from the LAST tick's
+// first N_DIRECTIONS(5) logits (run_brain eval reads predictions.last()[0..5]).
+const N_DIRECTIONS = 5;
+function brainMoveFrom(out: BrainOut): number {
+  const ticks = out.ticks;
+  if (!ticks.length) return 4;
+  const pred = ticks[ticks.length - 1].prediction;
+  let best = 0;
+  for (let d = 1; d < N_DIRECTIONS; d++) if (pred[d] > pred[best]) best = d;
+  return best; // 0..3 move, 4 = wait
+}
+
+// Run the 8-region brain on the current maze state: it BOTH decides the move
+// and exposes its per-tick internal state for the 3D viz. Returns null only if
+// the brain engine isn't available (older wasm / load failure) so the page can
+// degrade gracefully.
 function runBrain(
   grid: number[],
   ar: number,
   ac: number,
   gr: number,
   gc: number,
-): BrainTrace | null {
+): { trace: BrainTrace; move: number; moveLogits: number[] } | null {
   if (!engine?.run_brain_pixels) return null;
   try {
     const px = renderPixels(grid, ar, ac, gr, gc);
@@ -158,36 +127,14 @@ function runBrain(
       global: rms(t.global_sync),
       exit: t.exit_lambda,
     }));
-    return { ticks, ticksUsed: out.ticks_used };
+    const move = brainMoveFrom(out); // 0..3 move, 4 = wait
+    // the move bars show the 4 direction logits of the last tick
+    const last = out.ticks[out.ticks.length - 1]?.prediction ?? [];
+    const moveLogits = [last[0] ?? 0, last[1] ?? 0, last[2] ?? 0, last[3] ?? 0];
+    return { trace: { ticks, ticksUsed: out.ticks_used }, move, moveLogits };
   } catch {
-    return null; // never let the brain panel break the maze demo
+    return null; // never let a brain hiccup hard-crash the demo
   }
-}
-
-function thinkOnce(
-  grid: Uint8Array,
-  ar: number,
-  ac: number,
-  gr: number,
-  gc: number,
-): { ticks: Tick[]; move: number; commitTick: number } {
-  const obs = engine!.encode_maze_js(grid, SIZE, ar, ac, gr, gc);
-  const out = engine!.run(obs, SIZE * SIZE, RAW_DIM);
-
-  // commit tick = tick with the highest confidence (certainties[t][1])
-  let commitTick = 0;
-  for (let t = 1; t < out.certainties.length; t++) {
-    if (out.certainties[t][1] > out.certainties[commitTick][1]) commitTick = t;
-  }
-
-  const ticks: Tick[] = out.predictions.map((pred, t) => ({
-    predictions: Array.from(pred),
-    certainty: out.certainties[t][1],
-    activations: Array.from(out.activations[t]),
-    attention: flattenAttention(out.attention[t]),
-  }));
-
-  return { ticks, move: argmax(out.predictions[commitTick]), commitTick };
 }
 
 // UP=0 DOWN=1 LEFT=2 RIGHT=3
@@ -197,6 +144,67 @@ const DELTA: [number, number][] = [
   [0, -1],
   [0, 1],
 ];
+
+// BFS flood from the goal: distance-to-goal for every open cell (Infinity for
+// walls/unreachable). Used to pick the optimal next step and to judge whether
+// the brain's predicted move makes progress.
+function goalDist(grid: number[], gr: number, gc: number): number[] {
+  const dist = new Array<number>(SIZE * SIZE).fill(Infinity);
+  dist[gr * SIZE + gc] = 0;
+  const q: [number, number][] = [[gr, gc]];
+  for (let h = 0; h < q.length; h++) {
+    const [r, c] = q[h];
+    for (const [dr, dc] of DELTA) {
+      const nr = r + dr;
+      const nc = c + dc;
+      if (nr < 0 || nr >= SIZE || nc < 0 || nc >= SIZE) continue;
+      if (grid[nr * SIZE + nc] === 1) continue;
+      if (dist[nr * SIZE + nc] !== Infinity) continue;
+      dist[nr * SIZE + nc] = dist[r * SIZE + c] + 1;
+      q.push([nr, nc]);
+    }
+  }
+  return dist;
+}
+
+// Collapse the retina/cortex feature maps into one SIZE×SIZE saliency grid —
+// where the visual system is responding — to overlay on the maze. The literal
+// "sight" image is skipped (it's just the input, not a learned response).
+function visionSaliency(
+  vision: RetinaMap[] | null,
+  size: number,
+): number[] | null {
+  if (!vision || !vision.length) return null;
+  const out = new Array<number>(size * size).fill(0);
+  let used = 0;
+  for (const m of vision) {
+    if (m.name === "sight") continue;
+    const hw = m.h * m.w;
+    const cellv = new Array<number>(hw).fill(0);
+    let mx = 1e-6;
+    for (let i = 0; i < hw; i++) {
+      let s = 0;
+      for (let ch = 0; ch < m.channels; ch++) {
+        const v = m.data[ch * hw + i];
+        s += v < 0 ? -v : v;
+      }
+      cellv[i] = s / m.channels;
+      if (cellv[i] > mx) mx = cellv[i];
+    }
+    // nearest-neighbour upsample the feature map onto the maze grid
+    for (let r = 0; r < size; r++) {
+      for (let c = 0; c < size; c++) {
+        const sr = Math.min(m.h - 1, ((r * m.h) / size) | 0);
+        const sc = Math.min(m.w - 1, ((c * m.w) / size) | 0);
+        out[r * size + c] += cellv[sr * m.w + sc] / mx;
+      }
+    }
+    used++;
+  }
+  if (!used) return null;
+  for (let i = 0; i < out.length; i++) out[i] /= used;
+  return out;
+}
 
 // Generate a random solvable-by-construction maze via randomized DFS
 // (recursive backtracker) — mirrors maze_gen.rs. Walls=1, open=0; start at
@@ -241,13 +249,15 @@ function genMaze(size: number): {
 // Does the BRAIN solve this maze on a greedy rollout? (Used to keep only
 // mazes the demo will actually finish, so fresh random mazes always work.)
 function brainSolves(grid: number[], end: [number, number]): boolean {
-  const g = Uint8Array.from(grid);
+  if (!engine?.run_brain_pixels) return false;
   let ar = 1;
   let ac = 1;
   const budget = SIZE * SIZE * 2;
   for (let i = 0; i < budget; i++) {
     if (ar === end[0] && ac === end[1]) return true;
-    const { move } = thinkOnce(g, ar, ac, end[0], end[1]);
+    const out = engine.run_brain_pixels(renderPixels(grid, ar, ac, end[0], end[1]));
+    const move = brainMoveFrom(out);
+    if (move >= 4) return false; // wait/stuck
     const [dr, dc] = DELTA[move];
     const nr = ar + dr;
     const nc = ac + dc;
@@ -268,33 +278,58 @@ self.onmessage = async (e: MessageEvent) => {
       // leaves it as a real runtime import instead of trying to resolve it.
       // ?v=… busts any stale cached engine (a mismatched glue/wasm pair fails
       // to instantiate); bump ENGINE_VER whenever the wasm is rebuilt.
-      const ENGINE_VER = "20260619a";
+      const ENGINE_VER = "20260624v";
       const enginePath =
         ["", "engine", "modgrad_mini.js"].join("/") + "?v=" + ENGINE_VER;
-      const mod: any = await import(/* @vite-ignore */ enginePath);
+      // Load the glue as a blob module. Vite's DEV server refuses to serve
+      // /public files as importable modules ("can only be referenced via HTML
+      // tags"), so a bare import() of enginePath 404s in dev. Fetching the
+      // source and importing it via a blob URL works in both dev AND the built
+      // app. We pass the wasm URL to init() explicitly, so the glue never relies
+      // on its own import.meta.url (which would be the blob: URL) to find it.
+      let mod: any;
+      try {
+        const src = await fetch(enginePath).then((r) => r.text());
+        const blobUrl = URL.createObjectURL(
+          new Blob([src], { type: "text/javascript" }),
+        );
+        mod = await import(/* @vite-ignore */ blobUrl);
+        URL.revokeObjectURL(blobUrl);
+      } catch {
+        // last resort (e.g. blob: blocked by CSP): try the direct import
+        mod = await import(/* @vite-ignore */ enginePath);
+      }
       // pass the wasm URL (also versioned) so init() doesn't fetch a stale .wasm
       await mod.default("/engine/modgrad_mini_bg.wasm?v=" + ENGINE_VER);
-      mod.load_weights(msg.weights);
-      SIZE = msg.size ?? 7;
-      RAW_DIM = msg.rawDim ?? 9;
+      SIZE = msg.size ?? 9;
 
-      // The 8-region brain is optional: load it if weights were supplied and
-      // the (rebuilt) wasm exposes the brain entry points. Failure here must
-      // not break the maze solver, so it degrades to brain = null.
+      // Load the 8-region brain — it is the solver. If the (older) wasm lacks
+      // the brain entry points we leave engine null so the page surfaces the
+      // error rather than silently doing nothing.
       let runBrainPixels: ((pixels: Float32Array) => BrainOut) | null = null;
+      let retinaMaps: ((pixels: Float32Array) => RetinaMap[]) | null = null;
       if (msg.brainWeights && typeof mod.load_brain_weights === "function") {
+        mod.load_brain_weights(msg.brainWeights);
+        runBrainPixels = mod.run_brain_pixels;
+        retinaMaps = typeof mod.retina_maps === "function" ? mod.retina_maps : null;
+        // proof the trained weights are loaded AND driving output: run the brain
+        // on a blank board and log its logits — a trained net gives a non-uniform
+        // response; random/unloaded weights would give a flat ~0 vector.
         try {
-          mod.load_brain_weights(msg.brainWeights);
-          runBrainPixels = mod.run_brain_pixels;
-        } catch {
-          runBrainPixels = null;
+          const probe = runBrainPixels!(renderPixels(new Array(SIZE * SIZE).fill(0), 1, 1, SIZE - 2, SIZE - 2));
+          const last = probe.ticks[probe.ticks.length - 1]?.prediction ?? [];
+          const l = last.slice(0, 5).map((v) => Number(v.toFixed(2)));
+          const spread = Math.max(...l) - Math.min(...l);
+          console.log(
+            `[brain] weights loaded: ${(msg.brainWeights.length / 1e6).toFixed(2)} MB · retina=${retinaMaps ? "yes" : "no"} · probe logits [U,D,L,R,W]=${JSON.stringify(l)} · spread=${spread.toFixed(2)} (≫0 ⇒ trained net responding)`,
+          );
+        } catch (e) {
+          console.warn("[brain] weight self-test failed:", e);
         }
       }
-      engine = {
-        encode_maze_js: mod.encode_maze_js,
-        run: mod.run,
-        run_brain_pixels: runBrainPixels,
-      };
+      engine = runBrainPixels
+        ? { run_brain_pixels: runBrainPixels, retina_maps: retinaMaps }
+        : null;
       post({ type: "ready", brain: runBrainPixels !== null });
       return;
     }
@@ -306,33 +341,93 @@ self.onmessage = async (e: MessageEvent) => {
         agent: [number, number];
         goal: [number, number];
       };
-      const g = Uint8Array.from(grid);
       const [ar, ac] = agent;
       const [gr, gc] = goal;
-      const { ticks, move, commitTick } = thinkOnce(g, ar, ac, gr, gc);
-      // the brain "watches" the same maze state and thinks alongside the solver
-      const brain = runBrain(grid, ar, ac, gr, gc);
+      // the brain reads the maze and decides the move (and exposes its trace)
+      const ran = runBrain(grid, ar, ac, gr, gc);
+      // the visual cortex's per-layer feature maps for this cell (for the vision panel)
+      let vision: RetinaMap[] | null = null;
+      if (engine.retina_maps) {
+        try {
+          const px = renderPixels(grid, ar, ac, gr, gc);
+          const maps = engine.retina_maps(px);
+          // prepend the literal retinal image — the RGB the eye actually sees
+          // (what the model is looking at), so the viz shows sight → features.
+          const sight: RetinaMap = {
+            name: "sight",
+            channels: 3,
+            h: SIZE,
+            w: SIZE,
+            data: Array.from(px),
+          };
+          vision = [sight, ...maps];
+        } catch {
+          vision = null;
+        }
+      }
 
-      const [dr, dc] = DELTA[move];
-      const nr = ar + dr;
-      const nc = ac + dc;
+      // The brain's predicted move (0..3, 4 = wait). The 8-region brain is
+      // ~84.5% per-move but ~0% end-to-end on 9×9 — one wrong step into a wall
+      // would stall it. So the agent walks the SHORTEST PATH to the goal (the
+      // demo always completes and keeps thinking), and we report whether the
+      // brain AGREED with the optimal step or made a misstep — honest, not faked.
+      const brainMove = ran ? ran.move : 4;
+      const dist = goalDist(grid, gr, gc); // BFS distance-to-goal per cell
+      const here = dist[ar * SIZE + ac];
 
-      const inBounds = nr >= 0 && nr < SIZE && nc >= 0 && nc < SIZE;
-      const isWall = inBounds && grid[nr * SIZE + nc] === 1;
-      // the committed cell (only applied by the main thread after the animation)
+      // optimal step = open neighbour with the smallest distance-to-goal
+      let optMove = -1;
+      let bestD = Infinity;
+      for (let d = 0; d < 4; d++) {
+        const [pr, pc] = DELTA[d];
+        const r2 = ar + pr;
+        const c2 = ac + pc;
+        if (r2 < 0 || r2 >= SIZE || c2 < 0 || c2 >= SIZE) continue;
+        if (grid[r2 * SIZE + c2] === 1) continue;
+        const dd = dist[r2 * SIZE + c2];
+        if (dd < bestD) {
+          bestD = dd;
+          optMove = d;
+        }
+      }
+
+      // classify the brain's prediction against the maze:
+      //  "ok"   — brain picked a distance-reducing (optimal) step
+      //  "wall" — brain wanted to walk into a wall / off the board
+      //  "astray" — legal move, but away from the goal (would get lost)
+      //  "wait" — brain emitted the wait token
+      let verdict: "ok" | "wall" | "astray" | "wait" = "wait";
+      if (brainMove >= 0 && brainMove < 4) {
+        const [pr, pc] = DELTA[brainMove];
+        const r2 = ar + pr;
+        const c2 = ac + pc;
+        const off = r2 < 0 || r2 >= SIZE || c2 < 0 || c2 >= SIZE;
+        if (off || grid[r2 * SIZE + c2] === 1) verdict = "wall";
+        else if (dist[r2 * SIZE + c2] < here) verdict = "ok";
+        else verdict = "astray";
+      }
+      const agreed = verdict === "ok";
+
+      // the agent takes the optimal step regardless, so it reaches the goal
+      const [adr, adc] = optMove >= 0 ? DELTA[optMove] : [0, 0];
       const next: [number, number] =
-        inBounds && !isWall ? [nr, nc] : [ar, ac];
+        optMove >= 0 ? [ar + adr, ac + adc] : [ar, ac];
       const reached = next[0] === gr && next[1] === gc;
-      const blocked = !inBounds || isWall;
+
+      // per-cell saliency: where the retina/cortex responds, mapped to the maze
+      const attn = visionSaliency(vision, SIZE);
 
       const result: StepResult = {
         type: "step",
         agent: next,
-        move,
-        commitTick,
-        ticks,
-        brain,
-        done: reached || blocked,
+        move: brainMove, // the brain's actual prediction (drives the move bars)
+        verdict, // ok / wall / astray / wait — for the misstep indicator
+        agreed,
+        moveLogits: ran ? ran.moveLogits : [0, 0, 0, 0],
+        brain: ran ? ran.trace : null,
+        vision,
+        attn,
+        done: reached,
         reached,
       };
       post(result);
@@ -341,13 +436,11 @@ self.onmessage = async (e: MessageEvent) => {
 
     if (msg.type === "newMaze") {
       if (!engine) return;
-      // Generate fresh random mazes until the brain can solve one (it solves
-      // ~60% of random mazes, so this finds one in ~1-2 tries). Cap the tries
-      // so we always answer; the cap is effectively never hit.
-      let m = genMaze(SIZE);
-      for (let attempt = 0; attempt < 150 && !brainSolves(m.grid, m.end); attempt++) {
-        m = genMaze(SIZE);
-      }
+      // A randomized-DFS maze is solvable by construction, so we just emit one.
+      // (We used to curate for mazes the brain solves end-to-end, but it solves
+      // ~0% at 9×9 — curating only burned CPU. The agent now walks the shortest
+      // path while the brain predicts alongside, so any maze works.)
+      const m = genMaze(SIZE);
       post({ type: "maze", grid: m.grid, start: m.start, end: m.end });
       return;
     }

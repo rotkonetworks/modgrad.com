@@ -174,7 +174,7 @@ const DREAM_MAX_REPLAYS = 64; // bounded offline replays per sleep pass
 // move-head uses 0.05, the fallback apply_plasticity uses 0.02. Surfaced so the
 // Plasticity panel can show the lr next to the loss curve.
 const VIN_LR = 0.05;
-const PLASTIC_LR = 0.02;
+const ENGINE_PLASTIC_LR = 0.02; // engine apply_plasticity fallback θ (non-VIN path)
 
 const post = (m: unknown) => (self as unknown as Worker).postMessage(m);
 
@@ -354,6 +354,39 @@ function argmaxMove(logits: number[]): number {
   return best;
 }
 
+// ── escape-mechanism helpers (per-cell plastic bias + frustration sampling) ──
+// Temperature softmax over the first 4 entries: hotter temp (driven by
+// frustration) flattens the distribution so the agent explores out of a loop.
+function softmaxTemp(logits: number[], temp: number): number[] {
+  const t = Math.max(temp, 0.05);
+  const l = [logits[0] ?? 0, logits[1] ?? 0, logits[2] ?? 0, logits[3] ?? 0];
+  const mx = Math.max(l[0], l[1], l[2], l[3]);
+  let s = 0;
+  const e = l.map((v) => {
+    const x = Math.exp((v - mx) / t);
+    s += x;
+    return x;
+  });
+  return e.map((x) => x / (s || 1));
+}
+
+// argmax over the first 4 entries (the calm, plan-following choice).
+function argmax4(p: number[]): number {
+  let best = 0;
+  for (let d = 1; d < 4; d++) if ((p[d] ?? 0) > (p[best] ?? 0)) best = d;
+  return best;
+}
+
+// sample a direction 0..3 from a 4-entry probability vector (roll ∈ [0,1)).
+function sampleDir(p: number[], roll: number): number {
+  let cum = 0;
+  for (let d = 0; d < 4; d++) {
+    cum += p[d] ?? 0;
+    if (roll < cum) return d;
+  }
+  return 3; // fall through to the last legal slot
+}
+
 // ── DREAM / SLEEP REPLAY ────────────────────────────────────────────────────
 // Offline consolidation: replay a bounded sample of stored episodes through
 // vin_learn again — re-running vin_forward on each remembered maze to re-derive
@@ -495,12 +528,24 @@ type MazeEpisode = {
   steps: number; // committed/vetoed steps taken this episode
   visits: Map<number, number>; // cell-index → times visited
   startCell: number; // start cell index, for reference
+  // ── live "get-unstuck" plasticity (resets per maze) ──
+  // A per-cell 4-dir bias that adapts LIVE on top of the frozen VIN prior, and a
+  // frustration neuromodulator that heats up exploration when the agent makes no
+  // progress / loops. BOTH reset each maze — the escape mechanism is general, it
+  // never overfits a single board (the VIN prior is the general planner part).
+  plastic: Map<number, Float32Array>; // cell-index → [U,D,L,R] additive bias on the VIN logits
+  frustration: number; // neuromodulator: ↑ on no-progress/revisits, ↓ on progress/goal
 };
-const STEP_BUDGET_MULT = 3; // wander budget = ceil(shortest × MULT) before nudge/lost
+const STEP_BUDGET_MULT = 3; // wander budget = ceil(shortest × MULT) before fail
+const PLASTIC_LR = 0.5; // learning rate for the per-cell escape bias (three-factor rule)
+const FRUST_TEMP = 1.2; // how much frustration heats the softmax (explore to escape loops)
+const FRUST_MAX = 4; // cap on frustration's effect on temperature
+const FRUST_LOST = 8; // frustration this high = genuinely stuck → fail honestly, next maze
 let mazeEp: MazeEpisode | null = null; // current self-drive episode (null until a maze loads)
 
 function newMazeEpisode(shortest: number, startCell: number): MazeEpisode {
-  return { shortest, steps: 0, visits: new Map(), startCell };
+  // plastic + frustration start EMPTY each maze → generalization preserved.
+  return { shortest, steps: 0, visits: new Map(), startCell, plastic: new Map(), frustration: 0 };
 }
 
 // Decide whether to nudge the self-driven agent back onto the rails. We DELIBERATELY
@@ -1140,90 +1185,92 @@ self.onmessage = async (e: MessageEvent) => {
       // the learner's own pick — VIN move-head argmax, else the brain's move
       const headMove = vf ? argmaxMove(vf.move_logits) : brainMove;
 
-      // ── DRIVE-MODE: derive the committed move + neuromod tier (Part A) ──
-      // The mode is a single parameter gating BOTH the decided move and the
-      // completion behaviour. "optimal" drives the planner; "explore"/"honest"
-      // self-drive on the head's move with wall-veto + graded tiers.
-      const selfDrive = driveMode === "explore" || driveMode === "honest";
-      let decidedMove: number;
-      let vetoed = false; // the self-driven move hit a wall/edge → vetoed + PAIN
-      let nudged = false; // loop-break forced the value-greedy move (explore)
-      let lost = false; // honest: out of budget without solving
-
-      if (!selfDrive) {
-        // OPTIMAL: commit the planner's value-greedy step (fallback BFS). Always
-        // solves; the move-head still predicts + learns alongside (not driving).
-        decidedMove = greedy;
-      } else {
-        // SELF-DRIVE: the agent commits its OWN move-head argmax. A wall/off-board
-        // move is VETOED (agent stays put) and earns PAIN. A loop-break check can
-        // force the value-greedy move (explore) or signal "lost" (honest).
-        decidedMove = headMove;
-        // wall-veto: would the head's move leave the board / hit a wall?
-        if (headMove >= 0 && headMove < 4) {
-          const wr = ar + DELTA[headMove][0];
-          const wc = ac + DELTA[headMove][1];
-          const off = wr < 0 || wr >= SIZE || wc < 0 || wc >= SIZE;
-          if (off || grid[wr * SIZE + wc] === 1) vetoed = true;
-        } else {
-          vetoed = true; // wait token while self-driving → no progress → veto/pain
-        }
-        // loop-break nudge / lost signal (oscillation cap or step budget).
-        const nudge = loopBreak(headMove, greedy, optMove, ar, ac, grid, ep);
-        if (nudge >= 0) {
-          const budgetOut = ep.steps >= Math.ceil(ep.shortest * STEP_BUDGET_MULT);
-          if (driveMode === "honest" && budgetOut) {
-            lost = true; // honest: give up this maze (no nudge)
-          } else {
-            decidedMove = nudge; // explore (or honest oscillation): nudge onto rails
-            nudged = true;
-            vetoed = false; // a forced legal move isn't a wall-hit
-          }
-        }
+      // ── DECISION: frozen VIN prior + LIVE per-cell escape bias ─────────────
+      // The VIN logits are the general, frozen move prior. On top of them sits a
+      // per-cell plastic bias that adapts LIVE this maze (and resets next maze).
+      // Illegal moves (walls / off-board) are MASKED so the agent always moves
+      // legally — no wall-veto needed. Frustration heats the softmax: calm →
+      // follow the plan (argmax); frustrated → SAMPLE to break out of a loop.
+      const cellIdx = ar * SIZE + ac;
+      const vinLogits = vf ? vf.move_logits : [0, 0, 0, 0];
+      const bias = ep.plastic.get(cellIdx) ?? new Float32Array(4);
+      const comb: number[] = [0, 0, 0, 0];
+      for (let d = 0; d < 4; d++) {
+        const nr = ar + DELTA[d][0];
+        const nc = ac + DELTA[d][1];
+        const off = nr < 0 || nr >= SIZE || nc < 0 || nc >= SIZE;
+        if (off || grid[nr * SIZE + nc] === 1) comb[d] = -1e30; // mask illegal dir
+        else comb[d] = (vinLogits[d] ?? 0) + bias[d];
       }
+      const temp = 1 + FRUST_TEMP * Math.min(ep.frustration, FRUST_MAX);
+      const probs = softmaxTemp(comb, temp);
+      // calm → commit the plan; frustrated (≥1) → explore via sampling to escape.
+      const decidedMove =
+        ep.frustration >= 1 ? sampleDir(probs, Math.random()) : argmax4(probs);
+      const nudged = false; // (no oracle nudge — kept for the result shape)
+      const vetoed = false; // walls are masked out → the agent always moves legally
+      let lost = false; // genuinely stuck on this maze → fail honestly, next maze
 
-      // Verdict classifies the DRIVEN move now (Part A): ok / wall / astray / wait.
-      // For the self-driven veto we mark "wall" explicitly (the PAIN event).
-      const verdict: StepResult["verdict"] = vetoed
-        ? "wall"
-        : classifyMove(decidedMove, grid, ar, ac, here, dist);
-      // "agreed" = the driven move matched the value-greedy plan.
-      const agreed = decidedMove === greedy;
+      // Verdict classifies the DRIVEN move (ok / wall / astray / wait). Walls are
+      // masked so "wall" should never appear, but classifyMove stays the judge.
+      const verdict: StepResult["verdict"] = classifyMove(
+        decidedMove,
+        grid,
+        ar,
+        ac,
+        here,
+        dist,
+      );
+      // "agreed" = the driven move matched the HIDDEN BFS-optimal step (scoring).
+      const agreed = decidedMove === optMove;
 
-      // the agent steps along the DECIDED move — UNLESS it was vetoed (stay put).
+      // the agent steps along the DECIDED move. Masking makes an illegal landing
+      // rare, but keep the safety net: if it lands off-grid / on a wall, stay put.
       const [adr, adc] =
-        !vetoed && decidedMove >= 0 && decidedMove < 4 ? DELTA[decidedMove] : [0, 0];
+        decidedMove >= 0 && decidedMove < 4 ? DELTA[decidedMove] : [0, 0];
       let nr2 = ar + adr;
       let nc2 = ac + adc;
       if (nr2 < 0 || nr2 >= SIZE || nc2 < 0 || nc2 >= SIZE || grid[nr2 * SIZE + nc2] === 1) {
-        // safety net: never step into a wall (greedy shouldn't, but be safe)
+        // safety net: never step into a wall (masking should make this unreachable)
         nr2 = ar;
         nc2 = ac;
       }
       const next: [number, number] = [nr2, nc2];
       const reached = next[0] === gr && next[1] === gc;
 
-      // ── graded neuromodulator (Part A) ──
-      // reached → dopamine +1 ; progress (ok) → reward +0.3 ; veto (wall) → pain
-      // −1 ; astray/wait → disappointment −0.3. In optimal mode the agent always
-      // makes progress, so it's reward/dopamine throughout.
+      // ── frustration neuromodulator: PAIN from no-progress, dopamine as carrot ──
+      // The signal is grounded in PROGRESS, not in matching an oracle: getting
+      // closer to the goal rewards; revisiting a cell with no progress is pain
+      // (the frustration of a loop). Frustration cools on progress, heats on
+      // stalls — that heat is what flips the decision from argmax → sampling.
+      const nextCell = nr2 * SIZE + nc2;
+      const priorVisits = ep.visits.get(nextCell) ?? 0; // visits BEFORE this step's bookkeeping
+      const newDist = Number.isFinite(dist[nextCell]) ? dist[nextCell] : here;
+      const progressed = newDist < here;
       let neuromod: Neuromod;
       let modScalar: number;
       if (reached) {
         neuromod = "dopamine";
         modScalar = 1.0;
-      } else if (vetoed) {
-        neuromod = "pain";
-        modScalar = -1.0;
-      } else if (verdict === "ok") {
-        neuromod = "reward";
+      } else if (progressed) {
+        neuromod = "reward"; // carrot: closer to the goal
         modScalar = 0.3;
+      } else if (priorVisits >= 1) {
+        neuromod = "pain"; // been here before, still no progress = a loop
+        modScalar = -0.6;
       } else {
-        neuromod = "disappointment"; // astray / wait — legal but wasted
-        modScalar = -0.3;
+        neuromod = "disappointment"; // legal but not closer
+        modScalar = -0.15;
+      }
+      // frustration dynamics: progress/goal cools it; a stall heats it (a revisit
+      // heats it harder, since that's the ping-pong we want to escape).
+      if (reached || progressed) {
+        ep.frustration = Math.max(0, ep.frustration - 1.5);
+      } else {
+        ep.frustration += priorVisits >= 1 ? 1.0 : 0.4;
       }
 
-      // ── episode bookkeeping (Part A): one step counted (committed or vetoed) ──
+      // ── episode bookkeeping (Part A): count the step AFTER neuromod read priorVisits ──
       ep.steps += 1;
       const stepCell = next[0] * SIZE + next[1];
       ep.visits.set(stepCell, (ep.visits.get(stepCell) ?? 0) + 1);
@@ -1265,54 +1312,38 @@ self.onmessage = async (e: MessageEvent) => {
       // Per-region telemetry / exit-gate / certainty (undefined on old engine).
       const telemetry = readTelemetry();
 
-      // LEARNING GAIN this step. The engine computes reward_signal = teach − pain
-      // (teach = 1 when we pass an optMove target), and ΔW ∝ reward_signal. So we
-      // feed the SIGNED neuromod scalar as `pain`: reward_signal = 1 − modScalar.
-      //   wall          modScalar −1.0 → gain 2.0  (learn HARDEST from the mistake)
-      //   disappointment       −0.3 → gain 1.3
-      //   reward (progress)    +0.3 → gain 0.7
-      //   dopamine (goal)      +1.0 → gain 0.0  (terminal; nothing to correct)
-      // This is the fix for the death-spiral where wall steps (pain=1 → gain 0)
-      // produced ZERO learning, so a cold head that hits walls never improved.
-      // Pain now ACCELERATES correction toward the optimal move (and pushes the
-      // wall move's logit down), which is the real "inflict pain until correct".
-      const pain = modScalar;
-
+      // ── PLASTIC UPDATE: three-factor rule on the cell we just LEFT (cellIdx) ──
+      // Worker-side, no backprop. For each LEGAL dir the bias moves by
+      //   delta = PLASTIC_LR · modScalar · err,  err = (took? 1 : 0) − probs[d]
+      // SIGN CHECK — the escape: under PAIN modScalar < 0, the TAKEN move has
+      // err > 0, so delta < 0 → that move's bias DROPS. Next time the agent stands
+      // on this cell the looping move is less likely and a different dir wins →
+      // it breaks out of the A↔B ping-pong. Under reward (modScalar > 0) the taken
+      // move's bias RISES, reinforcing a step that made progress.
       let plasticDelta: number | undefined;
       let signal: number | undefined;
-      if (vinOn && vf && engine?.vin_learn) {
-        // VIN LEARNING: keep teaching the move-head toward the BFS-OPTIMAL move
-        // (NOT the move it just self-drove — that would entrench its own errors
-        // and make the loss meaningless). targetMove = optMove (teach), pain =
-        // the graded pain. The signal we surface is the signed neuromod scalar.
-        try {
-          const delta = engine.vin_learn(optMove, pain);
-          if (typeof delta === "number" && Number.isFinite(delta)) {
-            plasticDelta = delta;
-            signal = modScalar;
-          }
-        } catch {
-          /* never let learning crash a step */
+      {
+        const dP = ep.plastic.get(cellIdx) ?? new Float32Array(4);
+        let norm = 0;
+        for (let d = 0; d < 4; d++) {
+          if (comb[d] <= -1e29) continue; // skip illegal (masked) dirs
+          const err = (d === decidedMove ? 1 : 0) - probs[d];
+          const delta = PLASTIC_LR * modScalar * err;
+          const before = dP[d];
+          dP[d] = Math.max(-6, Math.min(6, dP[d] + delta)); // clamp the bias to [-6,6]
+          const applied = dP[d] - before; // the delta that actually landed (post-clamp)
+          norm += applied * applied;
         }
-      } else if (engine?.apply_plasticity && brainMove >= 0 && brainMove < N_DIRECTIONS) {
-        // Non-VIN fallback: the original outcome-driven plasticity on the brain.
-        // wall = pain (negative), reached goal = strong reward, optimal "ok" =
-        // small reward, otherwise (astray / wait) = mild negative.
-        let sig: number;
-        if (verdict === "wall") sig = -1.0;
-        else if (reached) sig = 1.0;
-        else if (verdict === "ok") sig = 0.2;
-        else sig = -0.2; // astray / wait
-        try {
-          const delta = engine.apply_plasticity(brainMove, sig);
-          if (typeof delta === "number" && Number.isFinite(delta)) {
-            plasticDelta = delta;
-            signal = sig;
-          }
-        } catch {
-          /* never let plasticity crash a step */
-        }
+        ep.plastic.set(cellIdx, dP);
+        plasticDelta = Math.sqrt(norm);
+        signal = modScalar;
       }
+
+      // LOST: give the plasticity a chance to escape; if it truly can't (budget
+      // blown OR frustration pinned high), fail honestly so the page advances to a
+      // fresh maze. The plastic state is per-maze, so nothing carries over.
+      const budgetOut = ep.steps >= Math.ceil(ep.shortest * STEP_BUDGET_MULT);
+      if (budgetOut || ep.frustration >= FRUST_LOST) lost = true;
 
       // TRAINING LOSS: cross-entropy of the move-head's softmax against the move
       // it should take (the VIN's value-greedy plan, else the BFS-optimal step).
@@ -1331,7 +1362,7 @@ self.onmessage = async (e: MessageEvent) => {
         const pTarget = Math.exp(lossLogits[lossTarget] - mx) / (sum || 1);
         loss = -Math.log(Math.max(pTarget, 1e-6));
       }
-      const lr = vinOn ? VIN_LR : plasticDelta != null ? PLASTIC_LR : undefined;
+      const lr = vinOn ? VIN_LR : plasticDelta != null ? ENGINE_PLASTIC_LR : undefined;
 
       // EPISODIC MEMORY: recall the nearest PAST situation (before storing the
       // current one, so it can't match itself), then store this decision. In VIN
@@ -1340,7 +1371,7 @@ self.onmessage = async (e: MessageEvent) => {
       const gs = ran?.gs ?? [];
       const episodic = episodicRecall(gs);
       const replay: Episode["replay"] | undefined = vinOn
-        ? { grid: grid.slice(), ar, ac, gr, gc, optMove, pain }
+        ? { grid: grid.slice(), ar, ac, gr, gc, optMove, pain: modScalar }
         : undefined;
       episodicStore(gs, decidedMove, verdict, reached, replay);
 
@@ -1356,12 +1387,9 @@ self.onmessage = async (e: MessageEvent) => {
         move: decidedMove,
         verdict, // ok / wall / astray / wait — for the misstep indicator
         agreed,
-        // move bars: VIN's move logits when active, else the brain's last tick.
-        moveLogits: vf
-          ? [vf.move_logits[0], vf.move_logits[1], vf.move_logits[2], vf.move_logits[3]]
-          : ran
-            ? ran.moveLogits
-            : [0, 0, 0, 0],
+        // move bars: the COMBINED logits the agent actually decided on (VIN prior
+        // + the live per-cell escape bias) — so the bars reflect both.
+        moveLogits: Array.from(comb),
         brain: ran ? ran.trace : null,
         vision,
         attn,

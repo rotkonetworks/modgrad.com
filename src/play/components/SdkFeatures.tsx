@@ -68,24 +68,31 @@ const FEATURES: Feature[] = [
     liveValue: () => "8 regions wired",
   },
   {
+    key: "vin",
+    name: "Value Iteration Network",
+    desc: "The learned planner: propagates value across the grid, reads the move ego-centrically.",
+    docHref: "/docs/brain-composition",
+    // The VIN drives every step the agent takes — active whenever it's running.
+    isActive: (s) => s.ticksUsed > 0,
+    liveValue: () => "planning",
+  },
+  {
     key: "plasticity",
     name: "Three-factor plasticity",
-    desc: "Synapses adapt at inference — learning while it solves, no backprop.",
+    desc: "A per-cell bias adapts live on the planner's prior — three-factor, no backprop.",
     docHref: "/docs/bio-inspired",
+    // Lit on any step the live escape bias actually moved (‖Δ‖ > 0).
     isActive: (s) => s.plasticDelta > 0,
-    liveValue: (s) =>
-      s.plasticDelta > 0 ? `Δw ${s.plasticDelta.toFixed(3)}` : "stable",
+    liveValue: (s) => `‖Δ‖ ${s.plasticDelta.toFixed(3)}`,
   },
   {
     key: "neuromod",
     name: "Pain / neuromodulators",
-    desc: "Wall-hits and reaching the goal release pain/reward signals.",
+    desc: "Pain from no progress / revisits, dopamine on progress and the goal.",
     docHref: "/docs/bio-inspired",
+    // Lit whenever a (signed) neuromodulator signal was emitted this step.
     isActive: (s) => Math.abs(s.signal) > 1e-4,
-    liveValue: (s) =>
-      Math.abs(s.signal) > 1e-4
-        ? `${s.signal > 0 ? "reward" : "pain"} ${Math.abs(s.signal).toFixed(2)}`
-        : "neutral",
+    liveValue: (s) => (s.signal >= 0 ? `+${s.signal.toFixed(2)}` : s.signal.toFixed(2)),
   },
   {
     key: "memory",

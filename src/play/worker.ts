@@ -42,17 +42,32 @@ type BrainTelemetry = {
 // live). Threaded through as a single parameter so it gates BOTH the decided
 // move and the completion behaviour — structured so it could later be an
 // endpoint. See the step handler for the per-mode derivation.
-//   "optimal" — commit the VIN value-greedy move; always solves (the perfect
-//               planner view). The move-head still predicts + learns alongside.
-//   "explore" — self-drive on the move-head's own argmax; ALWAYS finishes
-//               (wall-veto + loop-break nudge). Wanders early — that's the point.
-//   "honest"  — self-drive, same tiers, but NO nudge: over budget → "lost",
-//               next maze. Solve-rate climbs as it learns.
-type DriveMode = "optimal" | "explore" | "honest";
-let driveMode: DriveMode = "explore"; // default; set from init.mode / setMode
+// Difficulty LEVEL — how much bio-help the frozen VIN gets, not which model runs
+// (the learned VIN drives every level). Higher = less help, more honest failure.
+//   "easy"     — bio-escape ON, generous budget + readily explores out of loops.
+//                Effectively always finishes.
+//   "normal"   — bio-escape ON, standard budget. Mostly finishes.
+//   "hard"     — bio-escape ON but tight budget + mild exploration. Fails some.
+//   "hardcore" — bio-escape OFF: the raw frozen VIN, no plastic bias, no
+//                neuromodulator. It plans purely from the image and can get
+//                stuck / fail. The honest "how good is the planner, really".
+type DriveMode = "easy" | "normal" | "hard" | "hardcore";
+let driveMode: DriveMode = "normal"; // default; set from init.mode / setMode
 
-// Graded neuromodulator tier the agent earned this step (explore/honest). In
-// "optimal" mode it's effectively always reward/dopamine.
+// Per-level knobs derived from the active difficulty. escapeOn gates the whole
+// plastic/neuromod escape loop; budgetMul = wander budget before "lost"; heat =
+// how strongly frustration warms the softmax to explore out of a loop.
+function levelParams(m: DriveMode): { escapeOn: boolean; budgetMul: number; heat: number } {
+  switch (m) {
+    case "easy":     return { escapeOn: true,  budgetMul: 5, heat: 1.6 };
+    case "normal":   return { escapeOn: true,  budgetMul: 3, heat: 1.2 };
+    case "hard":     return { escapeOn: true,  budgetMul: 2, heat: 0.6 };
+    case "hardcore": return { escapeOn: false, budgetMul: 2, heat: 0.0 };
+  }
+}
+
+// Graded neuromodulator tier the agent earned this step. Drives the plastic
+// escape on easy/normal/hard; OFF on hardcore (raw planner, no neuromodulator).
 type Neuromod = "dopamine" | "reward" | "disappointment" | "pain";
 
 type StepResult = {
@@ -955,7 +970,7 @@ self.onmessage = async (e: MessageEvent) => {
       ensurePxBufs(); // size the reused pixel buffers for this board
 
       // ── drive-mode (Part A) — caller picks how the agent decides ──
-      if (msg.mode === "optimal" || msg.mode === "explore" || msg.mode === "honest") {
+      if (msg.mode === "easy" || msg.mode === "normal" || msg.mode === "hard" || msg.mode === "hardcore") {
         driveMode = msg.mode;
       }
       mazeEp = null; // fresh session → no episode until the first maze loads
@@ -1066,7 +1081,7 @@ self.onmessage = async (e: MessageEvent) => {
     // current episode keeps running under the new mode (no state reset needed:
     // the mode only gates the decided move + completion behaviour each step).
     if (msg.type === "setMode") {
-      if (msg.mode === "optimal" || msg.mode === "explore" || msg.mode === "honest") {
+      if (msg.mode === "easy" || msg.mode === "normal" || msg.mode === "hard" || msg.mode === "hardcore") {
         driveMode = msg.mode;
         post({ type: "mode", mode: driveMode });
       }
@@ -1191,9 +1206,14 @@ self.onmessage = async (e: MessageEvent) => {
       // Illegal moves (walls / off-board) are MASKED so the agent always moves
       // legally — no wall-veto needed. Frustration heats the softmax: calm →
       // follow the plan (argmax); frustrated → SAMPLE to break out of a loop.
+      // Difficulty knobs: hardcore turns the escape OFF (raw VIN, no plastic
+      // bias, no frustration heat) so the planner runs on its own and can fail.
+      const lvl = levelParams(driveMode);
       const cellIdx = ar * SIZE + ac;
       const vinLogits = vf ? vf.move_logits : [0, 0, 0, 0];
-      const bias = ep.plastic.get(cellIdx) ?? new Float32Array(4);
+      const bias = lvl.escapeOn
+        ? ep.plastic.get(cellIdx) ?? new Float32Array(4)
+        : new Float32Array(4); // hardcore: no plastic surround
       const comb: number[] = [0, 0, 0, 0];
       for (let d = 0; d < 4; d++) {
         const nr = ar + DELTA[d][0];
@@ -1202,11 +1222,17 @@ self.onmessage = async (e: MessageEvent) => {
         if (off || grid[nr * SIZE + nc] === 1) comb[d] = -1e30; // mask illegal dir
         else comb[d] = (vinLogits[d] ?? 0) + bias[d];
       }
-      const temp = 1 + FRUST_TEMP * Math.min(ep.frustration, FRUST_MAX);
+      // frustration only heats the softmax when the escape is on (easy/normal/hard).
+      const temp = lvl.escapeOn
+        ? 1 + lvl.heat * Math.min(ep.frustration, FRUST_MAX)
+        : 1;
       const probs = softmaxTemp(comb, temp);
       // calm → commit the plan; frustrated (≥1) → explore via sampling to escape.
+      // hardcore never samples: it commits the raw VIN argmax every step.
       const decidedMove =
-        ep.frustration >= 1 ? sampleDir(probs, Math.random()) : argmax4(probs);
+        lvl.escapeOn && ep.frustration >= 1
+          ? sampleDir(probs, Math.random())
+          : argmax4(probs);
       const nudged = false; // (no oracle nudge — kept for the result shape)
       const vetoed = false; // walls are masked out → the agent always moves legally
       let lost = false; // genuinely stuck on this maze → fail honestly, next maze
@@ -1320,9 +1346,11 @@ self.onmessage = async (e: MessageEvent) => {
       // on this cell the looping move is less likely and a different dir wins →
       // it breaks out of the A↔B ping-pong. Under reward (modScalar > 0) the taken
       // move's bias RISES, reinforcing a step that made progress.
+      // hardcore: the bio loop is OFF — no plastic surround, no neuromodulator
+      // emitted (the SDK panel honestly shows plasticity/neuromod idle).
       let plasticDelta: number | undefined;
       let signal: number | undefined;
-      {
+      if (lvl.escapeOn) {
         const dP = ep.plastic.get(cellIdx) ?? new Float32Array(4);
         let norm = 0;
         for (let d = 0; d < 4; d++) {
@@ -1342,8 +1370,10 @@ self.onmessage = async (e: MessageEvent) => {
       // LOST: give the plasticity a chance to escape; if it truly can't (budget
       // blown OR frustration pinned high), fail honestly so the page advances to a
       // fresh maze. The plastic state is per-maze, so nothing carries over.
-      const budgetOut = ep.steps >= Math.ceil(ep.shortest * STEP_BUDGET_MULT);
-      if (budgetOut || ep.frustration >= FRUST_LOST) lost = true;
+      const budgetOut = ep.steps >= Math.ceil(ep.shortest * lvl.budgetMul);
+      // frustration-stuck only fails the episode when the escape is live; hardcore
+      // fails purely on the wander budget (it has no frustration loop to pin).
+      if (budgetOut || (lvl.escapeOn && ep.frustration >= FRUST_LOST)) lost = true;
 
       // TRAINING LOSS: cross-entropy of the move-head's softmax against the move
       // it should take (the VIN's value-greedy plan, else the BFS-optimal step).

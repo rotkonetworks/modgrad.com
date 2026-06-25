@@ -79,7 +79,7 @@ type StepMsg = {
 };
 
 // the three modular drive-modes (a UI toggle switches them live).
-type DriveMode = "optimal" | "explore" | "honest";
+type DriveMode = "easy" | "normal" | "hard" | "hardcore";
 // structure of the 8-region brain, read from brain_solver_reference.json
 type BrainConn = { from: number[]; to: number; receives_observation: boolean };
 type BrainRef = {
@@ -227,7 +227,7 @@ export default function Play() {
   const [episodic, setEpisodic] = createSignal<StepMsg["episodic"] | null>(null);
 
   // ── drive-mode + graded neuromodulation + efficiency (Part A) ──
-  const [driveMode, setDriveMode] = createSignal<DriveMode>("explore");
+  const [driveMode, setDriveMode] = createSignal<DriveMode>("normal");
   // user-settable board size (odd). The retina is arbitrary-resolution + the VIN
   // is size-agnostic, so this needs no retrain — just a fresh maze at that size.
   const [mazeSize, setMazeSize] = createSignal<number>(PLAY_SIZE);
@@ -373,12 +373,14 @@ export default function Play() {
   // one-line description of the active mode, for the toggle caption.
   const modeDesc = (): string => {
     switch (driveMode()) {
-      case "optimal":
-        return "Commits the learned planner's move directly. It plans from the maze image, no solver in the loop.";
-      case "explore":
-        return "Follows the learned planner and always finishes; a wall-hit is vetoed and a nudge breaks loops.";
-      case "honest":
-        return "Follows the learned planner with no safety net — on a hard maze it can fail. That's the true solve-rate.";
+      case "easy":
+        return "The learned planner with a generous bio-escape: a frustration signal heats exploration and a per-cell bias adapts to break out of loops. Effectively always finishes.";
+      case "normal":
+        return "The learned planner with the standard bio-escape — plasticity + neuromodulator help it out of the occasional loop. Mostly finishes.";
+      case "hard":
+        return "Tighter budget and only a faint escape. On a tricky maze it can run out of moves and fail. Closer to the planner on its own.";
+      case "hardcore":
+        return "The raw frozen planner — no plastic bias, no neuromodulator. It plans purely from the maze image and can get stuck and fail. The honest \"how good is it really\".";
     }
   };
 
@@ -1248,7 +1250,7 @@ export default function Play() {
             {/* ── drive-mode toggle (Part A): segmented control ── */}
             <div class="mt-4 pt-4 border-t border-line">
               <div class="flex items-center justify-between mb-2">
-                <div class="eyebrow">Drive mode</div>
+                <div class="eyebrow">Difficulty</div>
                 <div class="font-mono text-xs text-mute tabular-nums">
                   maze #{Math.max(1, mazeNum())} · step {stepCount()}
                 </div>
@@ -1258,7 +1260,7 @@ export default function Play() {
                 role="group"
                 aria-label="how the agent decides its next move"
               >
-                <For each={["optimal", "explore", "honest"] as DriveMode[]}>
+                <For each={["easy", "normal", "hard", "hardcore"] as DriveMode[]}>
                   {(m) => {
                     const active = () => driveMode() === m;
                     return (
@@ -1744,7 +1746,7 @@ export default function Play() {
                 </div>
                 <div class="flex items-center justify-center gap-3 text-[.6rem] font-mono">
                   <div class="flex rounded overflow-hidden" style={{ border: "1px solid rgba(255,255,255,0.16)" }}>
-                    <For each={["optimal", "explore", "honest"] as DriveMode[]}>
+                    <For each={["easy", "normal", "hard", "hardcore"] as DriveMode[]}>
                       {(m) => {
                         const active = () => driveMode() === m;
                         return (
@@ -1894,11 +1896,14 @@ export default function Play() {
               convolutional, so any maze size runs zero-shot. Nothing is retrained.
             </div>
             <div>
-              <div class="eyebrow mb-1.5">Drive modes</div>
-              All three follow the learned planner. Optimal commits its move
-              directly. Explore vetoes a wall-hit and nudges out of loops so it
-              always finishes. Honest has no safety net, so on a hard maze it can
-              fail — that's the planner's true solve-rate.
+              <div class="eyebrow mb-1.5">Difficulty</div>
+              Every level runs the same learned planner — the dial is how much
+              bio-help it gets. Easy / Normal / Hard add a live escape: a
+              frustration neuromodulator heats exploration and a per-cell plastic
+              bias adapts to break out of loops, with a tightening budget as you
+              go up. Hardcore turns the escape off entirely — the raw frozen
+              planner, no plasticity, no neuromodulator. It can get stuck and
+              fail. That's the planner's true, unaided solve-rate.
             </div>
             <div>
               <div class="eyebrow mb-1.5">Generalization</div>

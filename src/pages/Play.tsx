@@ -10,11 +10,35 @@ import {
 import { A } from "@solidjs/router";
 import { useDocMeta } from "@/lib/meta";
 import { MOVES, softmax, cssVar } from "@/play/viz";
+import { createBrain3D } from "@/play/viz/brain3d";
+import type { Camera } from "@/play/viz/brain3d";
+import { drawMaze as drawMazeModule } from "@/play/viz/maze";
+import type { MazeRenderState, MazeTheme } from "@/play/viz/maze";
+// NOTE: "what it sees" (the retina image) is rendered inside the 3D brain by
+// brain3d.ts's built-in vision pathway, so we don't draw a standalone sight
+// screen here. drawSightScreen() from viz/retina.ts is available if a dedicated
+// spot is wanted later.
+import SdkFeatures from "@/play/components/SdkFeatures";
+import RegionTelemetry from "@/play/components/RegionTelemetry";
+import type { RegionTel } from "@/play/components/RegionTelemetry";
+import PlasticityPanel from "@/play/components/PlasticityPanel";
 
 // ── types mirrored from the worker ────────────────────────────────
 type BrainTick = { acts: number[][]; global: number; exit: number | null };
 type BrainTrace = { ticks: BrainTick[]; ticksUsed: number };
 type RetinaMap = { name: string; channels: number; h: number; w: number; data: number[] };
+// NEW engine telemetry, mirrored from the worker (all optional, feature-detected)
+type WorkerRegionTelemetry = {
+  name?: string;
+  activity?: number;
+  neuromod?: number;
+  certainty?: number;
+};
+type BrainTelemetry = {
+  regions: WorkerRegionTelemetry[];
+  exitGate?: number;
+  certainty?: number;
+};
 type StepMsg = {
   type: "step";
   agent: [number, number];
@@ -28,6 +52,22 @@ type StepMsg = {
   route: [number, number][]; // the brain's predicted route — its attention targets
   done: boolean;
   reached: boolean;
+  // NEW engine signals — present only when the engine exports them
+  telemetry?: BrainTelemetry;
+  plasticDelta?: number;
+  signal?: number;
+  loss?: number; // move-head cross-entropy vs the target move (the curve that drops)
+  lr?: number; // three-factor learning rate θ used this step
+  // episodic recall: nearest past situation by global-sync similarity
+  episodic?: {
+    recalled: boolean;
+    sim: number;
+    id: number;
+    size: number;
+    move: number;
+    verdict: string;
+    reached: boolean;
+  } | null;
 };
 // structure of the 8-region brain, read from brain_solver_reference.json
 type BrainConn = { from: number[]; to: number; receives_observation: boolean };
@@ -61,11 +101,64 @@ const DIR_DELTA: [number, number][] = [
   [0, 1],
 ];
 
+// ── camera helpers (build to brain3d.ts's documented free-fly interface) ──
+// brain3d's view transform is  view = Rx(-pitch)·Ry(-yaw)·(p − pos), so the
+// camera forward (the world dir that maps to view +z) is
+//   fwd = Ry(yaw)·Rx(pitch)·(0,0,1) = ( sin(yaw)cos(pitch), −sin(pitch),
+//                                       cos(yaw)cos(pitch) ).
+// Windowed orbit reuses the old rotX/rotY/zoom by deriving an equivalent
+// free-fly camera that looks at `center` from `dist` along those angles.
+//
+// NOTE: brain3d.ts is slated to export its own orbitToCamera(); when it does,
+// swap this local copy for the import. Until then this keeps Play.tsx
+// independently type-clean against the documented Camera contract.
+const BRAIN_CENTER: [number, number, number] = [0, 0, 0];
+const ORBIT_DIST = 13; // distance the orbit camera sits from the brain centre
+const BASE_FOV_PX = 720 * 0.72; // matches the old fov = W*0.72*zoom feel at W≈720
+
+function orbitToCamera(
+  rotX: number,
+  rotY: number,
+  zoom: number,
+  center: [number, number, number] = BRAIN_CENTER,
+  dist: number = ORBIT_DIST,
+): Camera {
+  // orbit angles → look direction. rotY = yaw (horizontal), rotX = pitch
+  // (vertical). The camera sits opposite its forward vector, `dist` out.
+  const yaw = rotY;
+  const pitch = rotX;
+  const cp = Math.cos(pitch);
+  const fwd: [number, number, number] = [
+    Math.sin(yaw) * cp,
+    -Math.sin(pitch),
+    Math.cos(yaw) * cp,
+  ];
+  const pos: [number, number, number] = [
+    center[0] - fwd[0] * dist,
+    center[1] - fwd[1] * dist,
+    center[2] - fwd[2] * dist,
+  ];
+  return { pos, yaw, pitch, fov: BASE_FOV_PX * zoom };
+}
+
+// camera forward / right / up basis from yaw+pitch (FPS movement frame).
+function cameraBasis(yaw: number, pitch: number) {
+  const cp = Math.cos(pitch);
+  const sp = Math.sin(pitch);
+  const cy = Math.cos(yaw);
+  const sy = Math.sin(yaw);
+  const forward: [number, number, number] = [sy * cp, -sp, cy * cp];
+  // right is yaw-only (so strafing stays level regardless of pitch)
+  const right: [number, number, number] = [cy, 0, -sy];
+  const up: [number, number, number] = [sy * sp, cp, cy * sp];
+  return { forward, right, up };
+}
+
 export default function Play() {
   useDocMeta(() => ({
     title: "Watch it think",
     description:
-      "Watch a real modgrad 8-region brain see and think in your browser. It reads each maze cell through a visual retina, eight regions compute across 16 ticks, and predicts the move — ~84.5% per-move on held-out 9×9. Run client-side by a bit-exact wasm reimplementation of the modgrad SDK.",
+      "Watch a real modgrad 8-region brain see, solve, and keep learning in your browser. It reads the raw 9×9 maze through a visual retina, floods value from the goal to walk the optimal path, and adapts its readout at inference with a three-factor rule — no backprop. Run client-side by a bit-exact wasm reimplementation of the modgrad SDK.",
     path: "/play",
   }));
 
@@ -107,6 +200,16 @@ export default function Play() {
   const [verdict, setVerdict] = createSignal<StepMsg["verdict"] | null>(null);
   const [agreeCount, setAgreeCount] = createSignal(0);
   const [moveCount, setMoveCount] = createSignal(0);
+  const [reachedNow, setReachedNow] = createSignal(false); // reached goal this step
+
+  // ── NEW SDK-feature signals (all optional / feature-detected) ──
+  const [plasticityAvailable, setPlasticityAvailable] = createSignal(false);
+  const [telemetry, setTelemetry] = createSignal<BrainTelemetry | null>(null);
+  const [plasticDelta, setPlasticDelta] = createSignal(0);
+  const [signal, setSignal] = createSignal(0);
+  const [loss, setLoss] = createSignal<number | undefined>(undefined);
+  const [lr, setLr] = createSignal<number | undefined>(undefined);
+  const [episodic, setEpisodic] = createSignal<StepMsg["episodic"] | null>(null);
 
   // dimensions from the reference; defaults avoid layout shift before load
   let SIZE = 9;
@@ -146,6 +249,7 @@ export default function Play() {
       const msg = ev.data;
       if (msg.type === "ready") {
         setBrainOn(!!msg.brain);
+        setPlasticityAvailable(!!msg.plastic);
         setStatus("ready");
         // start on a fresh, brain-solvable maze so every visit is different
         requestNewMaze();
@@ -190,6 +294,14 @@ export default function Play() {
     clearTimeout(playTimer);
     brainCanvas?.removeEventListener("wheel", brainWheel);
     brainIO?.disconnect();
+    // free-fly / fullscreen teardown (idempotent — safe if never entered)
+    document.removeEventListener("fullscreenchange", onFullscreenChange);
+    document.removeEventListener("pointerlockchange", onPointerLockChange);
+    window.removeEventListener("mousemove", flyMouseMove);
+    window.removeEventListener("keydown", flyKeyDown);
+    window.removeEventListener("keyup", flyKeyUp);
+    if (document.fullscreenElement === brainContainer) document.exitFullscreen?.();
+    if (document.pointerLockElement) document.exitPointerLock?.();
   });
 
   // ── solve loop ──────────────────────────────────────────────────
@@ -205,6 +317,13 @@ export default function Play() {
       setCommittedMove(-1);
       setMoveLogits([0, 0, 0, 0]);
       setRunState("idle");
+      // clear the per-step NEW signals on a fresh maze (keep plasticity stats —
+      // those live inside PlasticityPanel and survive Restart / New maze)
+      setReachedNow(false);
+      setTelemetry(null);
+      setPlasticDelta(0);
+      setSignal(0);
+      setEpisodic(null);
     });
   }
 
@@ -252,6 +371,14 @@ export default function Play() {
       setMoveCount((n) => n + 1);
       if (msg.agreed) setAgreeCount((n) => n + 1);
       setTickIdx(0);
+      // NEW engine signals — feature-detected, degrade gracefully when absent
+      setReachedNow(!!msg.reached);
+      setTelemetry(msg.telemetry ?? null);
+      setPlasticDelta(msg.plasticDelta ?? 0);
+      setSignal(msg.signal ?? 0);
+      setLoss(msg.loss);
+      setLr(msg.lr);
+      setEpisodic(msg.episodic ?? null);
     });
 
     if (reduced || nTicks === 0) {
@@ -331,6 +458,14 @@ export default function Play() {
   function newMaze() {
     requestNewMaze();
   }
+  // revert the live-plastic readout to the frozen weights (worker no-ops on old engine)
+  function resetPlasticity() {
+    worker?.postMessage({ type: "resetPlasticity" });
+    batch(() => {
+      setPlasticDelta(0);
+      setSignal(0);
+    });
+  }
 
   // ── derived display values ──────────────────────────────────────
   // the brain's move distribution over the 4 directions (last tick's logits)
@@ -360,184 +495,43 @@ export default function Play() {
     return ctx;
   }
 
-  // ── maze + agent + trail + attention overlay ──
+  // ── maze + agent + trail + attention overlay (delegated to viz/maze.ts) ──
+  // The caller owns DPR + clear (ctxOf); the maze module draws everything pure
+  // from the snapshot we hand it. Theme colours are resolved from CSS vars so it
+  // tracks the paper / dark theme.
   function drawMaze() {
     const m = maze();
     if (!m || !mazeCanvas) return;
     const W = mazeCanvas.clientWidth || 360;
     const H = W; // square
     const ctx = ctxOf(mazeCanvas, W, H);
-    const n = SIZE;
-    const gap = 3;
-    const cell = (W - gap * (n + 1)) / n;
 
-    const wall = cssVar("--text", "#1B1822");
-    const open = cssVar("--bg-card", "#fff");
-    const line = cssVar("--line-2", "#D8D2C3");
-    const accent = cssVar("--accent", "#6243D9");
-
-    const cx = (c: number) => gap + c * (cell + gap);
-    const cy = (r: number) => gap + r * (cell + gap);
-
-    // base cells
-    for (let r = 0; r < n; r++) {
-      for (let c = 0; c < n; c++) {
-        const isWall = m.grid[r * n + c] === 1;
-        ctx.fillStyle = isWall ? wall : open;
-        roundRect(ctx, cx(c), cy(r), cell, cell, 4);
-        ctx.fill();
-        if (!isWall) {
-          ctx.strokeStyle = line;
-          ctx.lineWidth = 1;
-          ctx.stroke();
-        }
-      }
-    }
-
-    // ── ATTENTION HEATMAP (occlusion attribution): blank each cell, re-run the
-    // brain, measure how much the move shifts. Brighter = the model relied on
-    // that cell for this decision. Real attribution, every cell (walls too). ──
-    const am = attnMap;
-    if (am) {
-      for (let r = 0; r < n; r++) {
-        for (let c = 0; c < n; c++) {
-          const a = Math.pow(Math.max(0, Math.min(1, am[r * n + c])), 1.25);
-          if (a < 0.06) continue;
-          // amber heat — distinct from the purple trail and teal route
-          ctx.fillStyle = `rgba(245, 158, 11, ${(0.12 + 0.6 * a).toFixed(3)})`;
-          roundRect(ctx, cx(c) + 1, cy(r) + 1, cell - 2, cell - 2, 4);
-          ctx.fill();
-        }
-      }
-    }
-
-    // visited trail
-    const path = visited();
-    ctx.fillStyle = `color-mix(in srgb, ${accent} 22%, transparent)`;
-    for (const [r, c] of path) {
-      roundRect(ctx, cx(c), cy(r), cell, cell, 4);
-      ctx.fill();
-    }
-    // trail line
-    if (path.length > 1) {
-      ctx.strokeStyle = accent;
-      ctx.globalAlpha = 0.55;
-      ctx.lineWidth = Math.max(2, cell * 0.12);
-      ctx.lineJoin = "round";
-      ctx.lineCap = "round";
-      ctx.beginPath();
-      path.forEach(([r, c], i) => {
-        const x = cx(c) + cell / 2;
-        const y = cy(r) + cell / 2;
-        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-      });
-      ctx.stroke();
-      ctx.globalAlpha = 1;
-    }
-
-    // start marker (ring)
-    marker(ctx, cx(m.start[1]), cy(m.start[0]), cell, "ring", line, accent);
-    // goal marker (filled accent diamond/star-ish)
-    goalMark(ctx, cx(m.end[1]) + cell / 2, cy(m.end[0]) + cell / 2, cell, accent);
-
-    // agent
-    const [ar, ac] = agent();
-
-    // ── attention targets: the brain's PREDICTED ROUTE, decoded from its
-    // multi-step prediction — the cells it's aiming for, several moves ahead.
-    // Teal crosshairs + a beam from the agent; fades into the future. This is
-    // the brain's plan (vs the purple trail = where the agent actually went). ──
-    const rc = routeCells;
-    if (rc.length) {
-      const TARGET = "#13b7a4";
-      ctx.lineJoin = "round";
-      ctx.lineCap = "round";
-      ctx.strokeStyle = `color-mix(in srgb, ${TARGET} 50%, transparent)`;
-      ctx.lineWidth = Math.max(2, cell * 0.09);
-      ctx.setLineDash([cell * 0.16, cell * 0.16]);
-      ctx.beginPath();
-      ctx.moveTo(cx(ac) + cell / 2, cy(ar) + cell / 2);
-      for (const [r, c] of rc) ctx.lineTo(cx(c) + cell / 2, cy(r) + cell / 2);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      rc.forEach(([r, c], i) => {
-        const fade = 1 - i / (rc.length + 1);
-        const px = cx(c) + cell / 2;
-        const py = cy(r) + cell / 2;
-        ctx.strokeStyle = `color-mix(in srgb, ${TARGET} ${Math.round(30 + 55 * fade)}%, transparent)`;
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(px, py, cell * 0.19, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.moveTo(px - cell * 0.1, py);
-        ctx.lineTo(px + cell * 0.1, py);
-        ctx.moveTo(px, py - cell * 0.1);
-        ctx.lineTo(px, py + cell * 0.1);
-        ctx.stroke();
-      });
-    }
-
-    const ax = cx(ac) + cell / 2;
-    const ay = cy(ar) + cell / 2;
-    ctx.beginPath();
-    ctx.fillStyle = accent;
-    ctx.arc(ax, ay, cell * 0.3, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.lineWidth = 2.5;
-    ctx.strokeStyle = cssVar("--bg-card", "#fff");
-    ctx.stroke();
-    // subtle pulse ring while thinking
-    if (runState() === "thinking") {
-      ctx.beginPath();
-      ctx.strokeStyle = `color-mix(in srgb, ${accent} 60%, transparent)`;
-      ctx.lineWidth = 2;
-      const pulse = 0.34 + (tickIdx() / Math.max(1, ticksTotal())) * 0.18;
-      ctx.arc(ax, ay, cell * pulse, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-
-    // ── brain misstep indicator: when the brain's PREDICTED move would walk
-    // into a wall (or away from the goal), flag it on the cell it wanted — the
-    // agent still steps optimally, but you see where the brain got it wrong. ──
-    const v = verdict();
-    const pm = committedMove();
-    if (v && v !== "ok" && pm >= 0 && pm < 4) {
-      const [pr, pc] = DIR_DELTA[pm];
-      const tr = ar + pr;
-      const tc = ac + pc;
-      const bad = "#e0564e";
-      // arrow from the agent toward the brain's (wrong) choice
-      const mx2 = ax + pc * cell * 0.5;
-      const my2 = ay + pr * cell * 0.5;
-      ctx.strokeStyle = bad;
-      ctx.lineWidth = 2.5;
-      ctx.lineCap = "round";
-      ctx.beginPath();
-      ctx.moveTo(ax, ay);
-      ctx.lineTo(mx2, my2);
-      ctx.stroke();
-      // mark the target cell it wanted (wall = ✕ box, astray = dashed ring)
-      if (tr >= 0 && tr < n && tc >= 0 && tc < n) {
-        ctx.strokeStyle = bad;
-        ctx.lineWidth = 2;
-        const ix = cx(tc);
-        const iy = cy(tr);
-        if (v === "wall" && m.grid[tr * n + tc] === 1) {
-          ctx.beginPath();
-          ctx.moveTo(ix + cell * 0.3, iy + cell * 0.3);
-          ctx.lineTo(ix + cell * 0.7, iy + cell * 0.7);
-          ctx.moveTo(ix + cell * 0.7, iy + cell * 0.3);
-          ctx.lineTo(ix + cell * 0.3, iy + cell * 0.7);
-          ctx.stroke();
-        } else {
-          ctx.setLineDash([4, 3]);
-          roundRect(ctx, ix + 2, iy + 2, cell - 4, cell - 4, 4);
-          ctx.stroke();
-          ctx.setLineDash([]);
-        }
-      }
-    }
+    const theme: MazeTheme = {
+      wall: cssVar("--text", "#1B1822"),
+      open: cssVar("--bg-card", "#fff"),
+      line: cssVar("--line-2", "#D8D2C3"),
+      accent: cssVar("--accent", "#6243D9"),
+    };
+    const state: MazeRenderState = {
+      agent: agent(),
+      visited: visited(),
+      attn: attnMap,
+      route: routeCells,
+      verdict: verdict(),
+      committedMove: committedMove(),
+      thinking: runState() === "thinking",
+      tick: tickIdx(),
+      ticksTotal: ticksTotal(),
+    };
+    drawMazeModule(
+      ctx,
+      W,
+      H,
+      { grid: m.grid, start: m.start, end: m.end },
+      SIZE,
+      state,
+      theme,
+    );
   }
 
   // ── the 8-region brain as a rotating 3D particle cloud (the solver) ──
@@ -560,64 +554,12 @@ export default function Play() {
       insula: "insula",
       hippocampus: "hippo",
     })[n] ?? n;
-  type NeuronPos = { x: number; y: number; z: number; region: number; index: number };
-  let neuronPos: NeuronPos[] = [];
-  let builtFor = -1; // total neuron count the layout was built for
 
-  // deterministic [-1,1) RNG (mulberry32) so the layout is stable across frames
-  function makeRand(seed: number) {
-    let s = seed >>> 0;
-    return () => {
-      s = (s + 0x6d2b79f5) >>> 0;
-      let t = s;
-      t = Math.imul(t ^ (t >>> 15), t | 1);
-      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-      return (((t ^ (t >>> 14)) >>> 0) / 4294967296) * 2 - 1;
-    };
-  }
-  // Anatomical-ish placement keyed by region name (robust to index order):
-  // a brain-shaped egg — cortical lobes around the outside (frontal→occipital,
-  // motor/parietal on top), subcortical structures deep in the centre, and the
-  // cerebellum tucked at the back-bottom. [x=front..back, y=down..up, z=depth].
-  const BRAIN_ANATOMY: Record<string, [number, number, number]> = {
-    input: [3.7, 1.2, 0.5], // frontal
-    attention: [0.6, 3.0, 0.7], // parietal (top)
-    output: [-3.9, 0.9, -0.5], // occipital (back)
-    motor: [1.4, 2.9, -0.7], // motor cortex (top)
-    basal_ganglia: [0.4, 0.1, 0.2], // deep centre
-    hippocampus: [-1.3, -0.5, 0.9], // deep, central-back
-    insula: [1.3, -0.3, -1.3], // lateral, deep
-    cerebellum: [-3.7, -2.7, 0.1], // back-bottom
-  };
-  let regionCenters: { x: number; y: number; z: number }[] = [];
-  function buildNeuronPositions(regions: { name: string; d_model: number }[]) {
-    neuronPos = [];
-    regionCenters = [];
-    const rand = makeRand(42);
-    for (let ri = 0; ri < regions.length; ri++) {
-      const neurons = regions[ri].d_model;
-      const [cx, cy, cz] = BRAIN_ANATOMY[regions[ri].name] ?? [
-        (ri % 4) * 3 - 4.5,
-        1.5 - Math.floor(ri / 4) * 3,
-        0,
-      ];
-      regionCenters[ri] = { x: cx, y: cy, z: cz };
-      const spread = Math.sqrt(neurons) * 0.36;
-      for (let ni = 0; ni < neurons; ni++) {
-        const theta = rand() * Math.PI;
-        const phi = rand() * Math.PI * 2;
-        const rr = spread * (0.3 + 0.7 * Math.abs(rand()));
-        neuronPos.push({
-          x: cx + rr * Math.sin(theta) * Math.cos(phi),
-          y: cy + rr * Math.cos(theta),
-          z: cz + rr * Math.sin(theta) * Math.sin(phi),
-          region: ri,
-          index: ni,
-        });
-      }
-    }
-    builtFor = neuronPos.length;
-  }
+  // The 3D particle brain renderer (viz/brain3d.ts) owns its neuron layout,
+  // connectome and vision pathway; we hand it the camera + current tick/vision
+  // each frame. setRef() installs the structure once brainRef() loads.
+  const brain3d = createBrain3D({ regionColors: REGION_COLORS });
+
   let brainRotY = 0.7;
   let brainRotX = -0.32;
   let brainZoom = 1; // wheel / pinch zoom
@@ -627,15 +569,31 @@ export default function Play() {
   const [brainAutoRotate, setBrainAutoRotate] = createSignal(true);
   // co-spike line persistence: 0 = instant, 1 = long trail (per-frame decay)
   const [spikeHold, setSpikeHold] = createSignal(0.55);
-  const edgeGlow = new Map<string, number>(); // decayed co-spike per edge
   let brainTime = 0; // seconds, advanced by the rAF loop for the idle shimmer
   let brainVisible = true; // gated by IntersectionObserver — skip drawing off-screen
   let brainIO: IntersectionObserver | undefined;
-  // "#rrggbb" + alpha → rgba() string, for additive glow gradients
-  const hexA = (hex: string, a: number): string => {
-    const n = parseInt(hex.slice(1), 16);
-    return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+
+  // ── free-fly camera (Half-Life style, active in fullscreen) ──
+  // A plain mutable, read in the rAF loop (like brainRot*). In windowed mode it
+  // is derived from the orbit params each frame; in fullscreen it is driven by
+  // pointer-lock mouse-look + WASD and advanced in the rAF loop.
+  let camera: Camera = orbitToCamera(brainRotX, brainRotY, brainZoom);
+  const [isFullscreen, setIsFullscreen] = createSignal(false);
+  let pointerLocked = false;
+  // held movement keys (FPS): forward/back/strafe/up/down + sprint
+  const keyHeld = {
+    fwd: false,
+    back: false,
+    left: false,
+    right: false,
+    up: false,
+    down: false,
+    fast: false,
   };
+  let lastFlyT = 0; // rAF timestamp of the last fly integration (for dt)
+  const PITCH_LIMIT = (85 * Math.PI) / 180;
+  const FLY_SPEED = 6; // world units / second (the brain spans ~10 units)
+  let brainContainer: HTMLDivElement | undefined; // fullscreen target (wraps canvas)
 
   // brain tick aligned to the current animation tick (held at the last brain
   // tick if the brain exited earlier than the solver's tick count).
@@ -645,304 +603,31 @@ export default function Play() {
     return bt.ticks[Math.min(tickIdx(), bt.ticks.length - 1)];
   };
 
-  // per-region live telemetry at the current tick: neuron count + activation RMS
-  // (bar is normalized to the loudest region so they're comparable).
-  const regionStats = () => {
-    const bref = brainRef();
-    if (!bref) return [];
-    const acts = curBrainTick()?.acts ?? [];
-    const stats = bref.regions.map((rg, i) => {
-      const a = acts[i] ?? [];
-      let s = 0;
-      for (const v of a) s += v * v;
-      const rms = a.length ? Math.sqrt(s / a.length) : 0;
-      let peak = 0;
-      for (const v of a) peak = Math.max(peak, Math.abs(v));
-      return { name: rg.name, d: rg.d_model, rms, peak };
-    });
-    const mx = Math.max(1e-6, ...stats.map((s) => s.rms));
-    return stats.map((s) => ({ ...s, level: Math.min(1, s.rms / mx) }));
-  };
-
+  // ── the 8-region brain as a rotating 3D particle cloud (delegated to
+  // viz/brain3d.ts). The module owns the neuron cloud / connectome / vision
+  // pathway; we own canvas sizing + DPR (ctxOf) and the camera state. ──
   function drawBrain3D() {
     const bref = brainRef();
     if (!brainCanvas || !bref) return;
-    const dmodels = bref.regions.map((r) => r.d_model);
-    const total = dmodels.reduce((a, b) => a + b, 0);
-    if (builtFor !== total) buildNeuronPositions(bref.regions);
-
-    const W = brainCanvas.clientWidth || 720;
-    const H = Math.round(Math.max(340, Math.min(520, W * 0.6)));
+    const fs = isFullscreen();
+    // fullscreen → fill the viewport; windowed → fluid width, capped height.
+    const W = fs
+      ? window.innerWidth
+      : brainCanvas.clientWidth || 720;
+    const H = fs
+      ? window.innerHeight
+      : Math.round(Math.max(340, Math.min(520, W * 0.6)));
     const ctx = ctxOf(brainCanvas, W, H);
-    const cxp = W / 2;
-    const cyp = H / 2;
-    const fov = W * 0.72 * brainZoom;
-
-    // dark "brain-scan" backdrop — bright region colours only read on dark.
-    const bg = ctx.createRadialGradient(cxp, cyp * 0.9, 8, cxp, cyp, Math.max(W, H) * 0.75);
-    bg.addColorStop(0, "#181527");
-    bg.addColorStop(1, "#0a0912");
-    ctx.fillStyle = bg;
-    ctx.fillRect(0, 0, W, H);
-
-    const tick = curBrainTick();
-    // per-step normaliser so spike brightness is stable in scale
-    const bt = brainTrace();
-    let amax = 1e-6;
-    if (bt)
-      for (const t of bt.ticks)
-        for (const ra of t.acts)
-          for (const v of ra) {
-            const a = v < 0 ? -v : v;
-            if (a > amax) amax = a;
-          }
-    const actOf = (region: number, index: number) => {
-      if (tick) {
-        const v = tick.acts[region]?.[index] ?? 0;
-        return Math.min(1, (v < 0 ? -v : v) / amax);
-      }
-      // idle: gentle per-neuron shimmer so the brain looks alive at rest
-      return 0.1 + 0.14 * (0.5 + 0.5 * Math.sin(brainTime * 1.7 + region * 1.3 + index * 0.7));
-    };
-
-    const sy = Math.sin(brainRotY);
-    const cy = Math.cos(brainRotY);
-    const sx = Math.sin(brainRotX);
-    const cx = Math.cos(brainRotX);
-    const pts: { x: number; y: number; depth: number; region: number; a: number }[] = [];
-    for (const np of neuronPos) {
-      const rx = np.x * cy + np.z * sy;
-      const ry = np.y * cx - (-np.x * sy + np.z * cy) * sx;
-      const rz = np.y * sx + (-np.x * sy + np.z * cy) * cx;
-      const depth = rz + 11;
-      if (!(depth >= 0.5)) continue; // also rejects NaN
-      const a = actOf(np.region, np.index);
-      pts.push({
-        x: cxp + (rx * fov) / depth,
-        y: cyp - (ry * fov) / depth,
-        depth,
-        region: np.region,
-        a: Number.isFinite(a) ? a : 0,
-      });
-    }
-    pts.sort((p, q) => q.depth - p.depth); // painter's algorithm: far first
-
-    // per-region activity (mean |act|) for the co-spike connections
-    const regionAct: number[] = [];
-    for (let r = 0; r < dmodels.length; r++) {
-      const ra = tick?.acts[r];
-      if (ra && ra.length) {
-        let s = 0;
-        for (const v of ra) s += v < 0 ? -v : v;
-        regionAct[r] = Math.min(1, s / ra.length / amax);
-      } else {
-        regionAct[r] = 0.06;
-      }
-    }
-    // project the region centres (same camera) for the connectome endpoints
-    const centerProj = regionCenters.map((p) => {
-      const rx = p.x * cy + p.z * sy;
-      const ry = p.y * cx - (-p.x * sy + p.z * cy) * sx;
-      const rz = p.y * sx + (-p.x * sy + p.z * cy) * cx;
-      const depth = rz + 11;
-      return { x: cxp + (rx * fov) / depth, y: cyp - (ry * fov) / depth };
+    // windowed = orbit-derived camera; fullscreen = the live free-fly camera.
+    if (!fs) camera = orbitToCamera(brainRotX, brainRotY, brainZoom, BRAIN_CENTER);
+    brain3d.draw(ctx, W, H, {
+      tick: curBrainTick(),
+      vision: visionMaps,
+      camera,
+      spikeHold: spikeHold(),
+      time: brainTime,
+      showLabels: fs, // tech tour: region/vision/architecture labels while flying
     });
-
-    ctx.globalCompositeOperation = "lighter";
-
-    // ── connectome edges: faint as structure, bright when both ends co-spike,
-    // then fading over a configurable trail (spikeHold → per-frame decay). ──
-    const decay = 0.86 + spikeHold() * 0.135; // 0.86 (brief) … ~0.995 (long)
-    ctx.lineCap = "round";
-    for (const conn of bref.connections) {
-      const tp = centerProj[conn.to];
-      if (!tp) continue;
-      const colT = REGION_COLORS[conn.to % REGION_COLORS.length];
-      for (const f of conn.from) {
-        const fp = centerProj[f];
-        if (!fp) continue;
-        const co = Math.min(1, regionAct[f] * regionAct[conn.to] * 2.4); // co-spike
-        const key = f + "_" + conn.to;
-        const g = Math.max(co, (edgeGlow.get(key) ?? 0) * decay); // persistence
-        edgeGlow.set(key, g);
-        const colF = REGION_COLORS[f % REGION_COLORS.length];
-        const grad = ctx.createLinearGradient(fp.x, fp.y, tp.x, tp.y);
-        grad.addColorStop(0, hexA(colF, 0.07 + 0.85 * g));
-        grad.addColorStop(1, hexA(colT, 0.07 + 0.85 * g));
-        ctx.strokeStyle = grad;
-        ctx.lineWidth = 0.7 + 4 * g;
-        ctx.beginPath();
-        ctx.moveTo(fp.x, fp.y);
-        ctx.lineTo(tp.x, tp.y);
-        ctx.stroke();
-        // a spark travelling source→destination while the link is hot
-        if (g > 0.1) {
-          const fr = (brainTime * 0.55 + f * 0.17) % 1;
-          ctx.fillStyle = hexA("#ffffff", Math.min(0.95, g));
-          ctx.beginPath();
-          ctx.arc(fp.x + (tp.x - fp.x) * fr, fp.y + (tp.y - fp.y) * fr, 1.4 + 2.6 * g, 0, Math.PI * 2);
-          ctx.fill();
-        }
-      }
-    }
-
-    // additive blending → overlapping neurons bloom, spikes pop
-    for (const p of pts) {
-      const col = REGION_COLORS[p.region % REGION_COLORS.length];
-      const fogv = Math.max(0.4, Math.min(1, 14 / p.depth - 0.25)); // nearer = brighter/bigger
-      const size = Math.max(1.6, (15 / p.depth) * (1.8 + 4 * p.a) * fogv);
-      // glow halo only for neurons bright enough to show one (skips ~all the
-      // dim/idle dots — avoids ~160 radial gradients/frame for invisible glow)
-      if (p.a > 0.18) {
-        const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, size * 3.4);
-        g.addColorStop(0, hexA(col, (0.12 + 0.6 * p.a) * fogv));
-        g.addColorStop(1, hexA(col, 0));
-        ctx.fillStyle = g;
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, size * 3.4, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      // bright core
-      ctx.fillStyle = hexA(col, Math.min(1, (0.5 + 0.5 * p.a) * fogv));
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    // ── visual cortex: retina → V1 → V2 → V4 layers feeding the input region.
-    // Each layer is a spatial plane (channels averaged), lit by what it sees,
-    // wired forward into the brain — the eyes-to-cognition pathway, connected. ──
-    if (visionMaps && visionMaps.length) {
-      const proj = (px: number, py: number, pz: number) => {
-        const rx = px * cy + pz * sy;
-        const ry = py * cx - (-px * sy + pz * cy) * sx;
-        const rz = py * sx + (-px * sy + pz * cy) * cx;
-        const depth = rz + 11;
-        return { x: cxp + (rx * fov) / depth, y: cyp - (ry * fov) / depth, depth };
-      };
-      const VIS = "#62e6ff"; // cyan — distinct from the region colours
-      const inIdx = bref.region_names.indexOf("input");
-      const ic = regionCenters[inIdx >= 0 ? inIdx : 0] ?? { x: 3.7, y: 1.2, z: 0.5 };
-      const nL = visionMaps.length;
-      const SPC = 0.6; // layer-to-layer spacing (was 1.05 — too spread out)
-      const centers: { x: number; y: number; act: number }[] = [];
-      for (let li = 0; li < nL; li++) {
-        const m = visionMaps[li];
-        const isSight = m.name === "sight";
-        // sight (the eye's image) farthest out; retina→V4 step in toward input
-        const lx = ic.x + 1.0 + (nL - 1 - li) * SPC;
-        const ly = ic.y + 0.4;
-        const lz = ic.z;
-        const hw = m.h * m.w;
-        const sp = isSight ? 0.28 : 0.2;
-
-        if (isSight) {
-          // ── the literal retinal image — what the model actually sees ──
-          ctx.globalCompositeOperation = "source-over";
-          // a faint frame so it reads as the eye's "screen"
-          const corner = (rr: number, cc: number) =>
-            proj(lx, ly + (rr - (m.h - 1) / 2) * sp, lz + (cc - (m.w - 1) / 2) * sp);
-          const c0 = corner(-0.6, -0.6), c1 = corner(-0.6, m.w - 0.4),
-            c2 = corner(m.h - 0.4, m.w - 0.4), c3 = corner(m.h - 0.4, -0.6);
-          ctx.fillStyle = "rgba(10,12,20,0.72)";
-          ctx.beginPath();
-          ctx.moveTo(c0.x, c0.y); ctx.lineTo(c1.x, c1.y);
-          ctx.lineTo(c2.x, c2.y); ctx.lineTo(c3.x, c3.y); ctx.closePath();
-          ctx.fill();
-          ctx.strokeStyle = hexA(VIS, 0.5);
-          ctx.lineWidth = 1.2;
-          ctx.stroke();
-          for (let r = 0; r < m.h; r++) {
-            for (let c = 0; c < m.w; c++) {
-              const i = r * m.w + c;
-              const R = m.data[i], G = m.data[hw + i], B = m.data[2 * hw + i];
-              let col: string;
-              if (R > 0.5 && G < 0.5 && B < 0.5) col = "#ff5b5b"; // agent
-              else if (G > 0.5 && R < 0.5) col = "#4fd17a"; // goal
-              else if (R > 0.5 && G > 0.5 && B > 0.5) col = "#e9edf6"; // open
-              else col = "#33384a"; // wall
-              const p = proj(lx, ly + (r - (m.h - 1) / 2) * sp, lz + (c - (m.w - 1) / 2) * sp);
-              if (!(p.depth >= 0.5)) continue;
-              const s = Math.max(1.5, (sp * fov) / p.depth) * 0.92;
-              ctx.fillStyle = col;
-              ctx.fillRect(p.x - s / 2, p.y - s / 2, s, s);
-            }
-          }
-          ctx.globalCompositeOperation = "lighter";
-          const cp = proj(lx, ly, lz);
-          centers.push({ x: cp.x, y: cp.y, act: 1 });
-          continue;
-        }
-
-        // ── learned feature map (retina/V1/V2/V4): cyan response field ──
-        ctx.globalCompositeOperation = "lighter";
-        const cell = new Array(hw).fill(0);
-        let mx = 1e-6;
-        for (let i = 0; i < hw; i++) {
-          let s = 0;
-          for (let ch = 0; ch < m.channels; ch++) {
-            const v = m.data[ch * hw + i];
-            s += v < 0 ? -v : v;
-          }
-          cell[i] = s / m.channels;
-          if (cell[i] > mx) mx = cell[i];
-        }
-        let lact = 0;
-        for (let r = 0; r < m.h; r++) {
-          for (let c = 0; c < m.w; c++) {
-            const a = Math.min(1, cell[r * m.w + c] / mx);
-            lact += a;
-            const p = proj(lx, ly + (r - (m.h - 1) / 2) * sp, lz + (c - (m.w - 1) / 2) * sp);
-            if (!(p.depth >= 0.5)) continue;
-            const size = Math.max(1, (8 / p.depth) * (0.9 + 2.0 * a));
-            if (a > 0.35) {
-              const gr = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, size * 2.6);
-              gr.addColorStop(0, hexA(VIS, 0.4 * a));
-              gr.addColorStop(1, hexA(VIS, 0));
-              ctx.fillStyle = gr;
-              ctx.beginPath();
-              ctx.arc(p.x, p.y, size * 2.6, 0, Math.PI * 2);
-              ctx.fill();
-            }
-            ctx.fillStyle = hexA(VIS, 0.22 + 0.72 * a);
-            ctx.beginPath();
-            ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
-            ctx.fill();
-          }
-        }
-        const cp = proj(lx, ly, lz);
-        centers.push({ x: cp.x, y: cp.y, act: Math.min(1, lact / hw) });
-      }
-      // feedforward pathway: retina → V1 → V2 → V4 → input region
-      const inP = proj(ic.x, ic.y, ic.z);
-      ctx.lineCap = "round";
-      for (let li = 0; li < centers.length; li++) {
-        const a = centers[li];
-        const b = li + 1 < centers.length ? centers[li + 1] : inP;
-        const g = 0.12 + 0.7 * a.act;
-        ctx.strokeStyle = hexA(VIS, g * 0.65);
-        ctx.lineWidth = 0.8 + 2.4 * a.act;
-        ctx.beginPath();
-        ctx.moveTo(a.x, a.y);
-        ctx.lineTo(b.x, b.y);
-        ctx.stroke();
-        const fr = (brainTime * 0.5 + li * 0.15) % 1; // info flowing inward
-        ctx.fillStyle = hexA("#ffffff", 0.45 * a.act);
-        ctx.beginPath();
-        ctx.arc(a.x + (b.x - a.x) * fr, a.y + (b.y - a.y) * fr, 1.1 + 1.8 * a.act, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      // label the pathway as the visual system (crisp, not additive)
-      if (centers.length) {
-        ctx.globalCompositeOperation = "source-over";
-        ctx.font = "600 9px ui-monospace, monospace";
-        ctx.textAlign = "center";
-        ctx.fillStyle = hexA(VIS, 0.85);
-        ctx.fillText("what it sees", centers[0].x, centers[0].y - 18);
-        ctx.textAlign = "left";
-      }
-    }
-    ctx.globalCompositeOperation = "source-over";
   }
 
   // global-sync magnitude at the current tick, for the header meter
@@ -954,6 +639,51 @@ export default function Play() {
     for (const x of bt.ticks) if (x.global > gmax) gmax = x.global;
     return Math.min(1, t.global / gmax);
   };
+
+  // ── NEW-engine telemetry → RegionTel[] adapter ──
+  // The worker emits per-region {name, activity, neuromod, certainty}; the
+  // RegionTelemetry / SdkFeatures components want {name, rms, peak, dopamine?,
+  // pain?}. We map what's present (activity→rms/peak, neuromod sign→dopamine /
+  // pain) and otherwise leave it absent so the component falls back to the tick
+  // acts it always has. Returns undefined when the engine emits no telemetry.
+  const regionTel = (): RegionTel[] | undefined => {
+    const tel = telemetry();
+    if (!tel || !tel.regions.length) return undefined;
+    return tel.regions.map((r, i) => {
+      const name = r.name ?? brainRef()?.regions[i]?.name ?? `r${i}`;
+      const act = r.activity ?? 0;
+      const out: RegionTel = { name, rms: act, peak: act };
+      if (typeof r.neuromod === "number") {
+        if (r.neuromod >= 0) out.dopamine = r.neuromod;
+        else out.pain = -r.neuromod;
+      }
+      return out;
+    });
+  };
+
+  // the brain's adaptive-compute exit gate λ for the current step (NEW engine's
+  // outer exit gate if present, else the per-tick CTM exit scalar).
+  const exitLambda = (): number | null => {
+    const eg = telemetry()?.exitGate;
+    if (typeof eg === "number") return eg;
+    const e = curBrainTick()?.exit;
+    return e ?? null;
+  };
+
+  // ticks the CTM actually ran this step (the trace length / ticksUsed).
+  const ticksUsed = (): number =>
+    brainTrace()?.ticksUsed ?? ticksTotal();
+
+  // assembled feature-state for <SdkFeatures> — every field a real signal.
+  const sdkFeatureState = () => ({
+    ticksUsed: ticksUsed(),
+    exitLambda: exitLambda(),
+    visionActive: !!(visionMaps && visionMaps.length),
+    plasticDelta: plasticDelta(),
+    signal: signal(),
+    telemetry: regionTel(),
+    episodic: episodic(),
+  });
 
   // ── mouse / touch orbit + zoom on the brain ──
   const brainPointerDown = (e: PointerEvent) => {
@@ -991,6 +721,153 @@ export default function Play() {
     brainZoom = Math.max(0.5, Math.min(2.6, brainZoom * (1 - e.deltaY * 0.0012)));
   };
 
+  // ── fullscreen + Half-Life free-fly camera ──────────────────────
+  // Mouse-look (while pointer-locked): yaw += dx, pitch += dy (clamped).
+  // (forward.y = −sin(pitch), so mouse-up must DECREASE pitch to look up →
+  // pitch += movementY, since movementY<0 on mouse-up.)
+  const flyMouseMove = (e: MouseEvent) => {
+    if (!pointerLocked) return;
+    const SENS = 0.0022;
+    camera.yaw += e.movementX * SENS;
+    camera.pitch = Math.max(
+      -PITCH_LIMIT,
+      Math.min(PITCH_LIMIT, camera.pitch + e.movementY * SENS),
+    );
+  };
+  // WASD + Q/E (or Space/Shift) movement; Shift = sprint.
+  const setKey = (code: string, down: boolean): boolean => {
+    switch (code) {
+      case "KeyW":
+      case "ArrowUp":
+        keyHeld.fwd = down;
+        return true;
+      case "KeyS":
+      case "ArrowDown":
+        keyHeld.back = down;
+        return true;
+      case "KeyA":
+      case "ArrowLeft":
+        keyHeld.left = down;
+        return true;
+      case "KeyD":
+      case "ArrowRight":
+        keyHeld.right = down;
+        return true;
+      case "KeyE":
+      case "Space":
+        keyHeld.up = down;
+        return true;
+      case "KeyQ":
+        keyHeld.down = down;
+        return true;
+      case "ShiftLeft":
+      case "ShiftRight":
+        keyHeld.fast = down;
+        return true;
+      default:
+        return false;
+    }
+  };
+  const flyKeyDown = (e: KeyboardEvent) => {
+    if (!isFullscreen()) return;
+    if (setKey(e.code, true)) e.preventDefault();
+  };
+  const flyKeyUp = (e: KeyboardEvent) => {
+    if (setKey(e.code, false)) e.preventDefault();
+  };
+  // integrate held keys into camera.pos for one frame (called from the rAF loop)
+  function advanceFly(now: number) {
+    if (!isFullscreen()) {
+      lastFlyT = now;
+      return;
+    }
+    const dt = lastFlyT ? Math.min(0.05, (now - lastFlyT) / 1000) : 0;
+    lastFlyT = now;
+    if (dt <= 0) return;
+    const { forward, right, up } = cameraBasis(camera.yaw, camera.pitch);
+    const speed = FLY_SPEED * (keyHeld.fast ? 2.6 : 1) * dt;
+    let fx = 0,
+      fy = 0,
+      fz = 0;
+    if (keyHeld.fwd) {
+      fx += forward[0];
+      fy += forward[1];
+      fz += forward[2];
+    }
+    if (keyHeld.back) {
+      fx -= forward[0];
+      fy -= forward[1];
+      fz -= forward[2];
+    }
+    if (keyHeld.right) {
+      fx += right[0];
+      fy += right[1];
+      fz += right[2];
+    }
+    if (keyHeld.left) {
+      fx -= right[0];
+      fy -= right[1];
+      fz -= right[2];
+    }
+    if (keyHeld.up) {
+      fx += up[0];
+      fy += up[1];
+      fz += up[2];
+    }
+    if (keyHeld.down) {
+      fx -= up[0];
+      fy -= up[1];
+      fz -= up[2];
+    }
+    const len = Math.hypot(fx, fy, fz);
+    if (len > 1e-6) {
+      camera.pos[0] += (fx / len) * speed;
+      camera.pos[1] += (fy / len) * speed;
+      camera.pos[2] += (fz / len) * speed;
+    }
+  }
+  const onPointerLockChange = () => {
+    pointerLocked = document.pointerLockElement === brainCanvas;
+  };
+  // click the canvas (in fullscreen) → grab the mouse for look control
+  const brainCanvasClick = () => {
+    if (isFullscreen() && !pointerLocked) brainCanvas?.requestPointerLock?.();
+  };
+  function clearFlyKeys() {
+    keyHeld.fwd = keyHeld.back = keyHeld.left = keyHeld.right = false;
+    keyHeld.up = keyHeld.down = keyHeld.fast = false;
+  }
+  const onFullscreenChange = () => {
+    const active = document.fullscreenElement === brainContainer;
+    setIsFullscreen(active);
+    if (active) {
+      // entering: seed the free-fly camera from the current orbit view so the
+      // transition is seamless, then arm look + move listeners.
+      camera = orbitToCamera(brainRotX, brainRotY, brainZoom, BRAIN_CENTER);
+      lastFlyT = 0;
+      window.addEventListener("mousemove", flyMouseMove);
+      window.addEventListener("keydown", flyKeyDown);
+      window.addEventListener("keyup", flyKeyUp);
+      drewOnce = false; // force an immediate redraw at the new (viewport) size
+    } else {
+      // exiting: tear everything down and restore the windowed canvas size.
+      window.removeEventListener("mousemove", flyMouseMove);
+      window.removeEventListener("keydown", flyKeyDown);
+      window.removeEventListener("keyup", flyKeyUp);
+      if (document.pointerLockElement) document.exitPointerLock?.();
+      pointerLocked = false;
+      clearFlyKeys();
+      drewOnce = false;
+    }
+  };
+  function toggleFullscreen() {
+    if (document.fullscreenElement) {
+      document.exitFullscreen?.();
+    } else {
+      brainContainer?.requestFullscreen?.();
+    }
+  }
+
   // redraw whenever the relevant signals change
   createEffect(() => {
     // dependencies: maze, agent, visited, tick, runState
@@ -1000,6 +877,11 @@ export default function Play() {
     tickIdx();
     runState();
     drawMaze();
+  });
+  // hand the brain structure to the 3D renderer whenever it loads/changes
+  createEffect(() => {
+    const bref = brainRef();
+    if (bref) brain3d.setRef(bref);
   });
   // The brain cloud is GPU-heavy (additive gradients, ~160 neurons + edges per
   // frame), so we only animate it while the brain is actively thinking — plus a
@@ -1015,26 +897,48 @@ export default function Play() {
     const MIN_FRAME_MS = 33; // ~30fps cap
     const spin = (now: number) => {
       raf = requestAnimationFrame(spin);
-      if (!brainVisible) return; // off-screen → don't burn frames
+      const fs = isFullscreen();
+      // fullscreen counts as visible — the IO gate must not pause free-fly.
+      if (!brainVisible && !fs) return; // off-screen → don't burn frames
       const thinking = runState() === "thinking";
       if (thinking) lastThinking = now;
-      // active = thinking, or within the settle window, or the user is orbiting,
-      // or we haven't drawn a single frame yet (so the idle cloud appears once).
+      // integrate WASD movement every frame while flying (independent of the
+      // draw cadence, so motion is smooth at the 30fps cap).
+      advanceFly(now);
+      const moving =
+        keyHeld.fwd ||
+        keyHeld.back ||
+        keyHeld.left ||
+        keyHeld.right ||
+        keyHeld.up ||
+        keyHeld.down;
+      // active = thinking, within settle, orbiting, flying (always-on in
+      // fullscreen so look/move stay live), or we haven't drawn once yet.
       const active =
         thinking ||
         now - lastThinking < SETTLE_MS ||
         brainDragging ||
+        fs ||
+        moving ||
         !drewOnce;
       if (!active) return; // idle → hold the last drawn frame
       if (drewOnce && now - lastDraw < MIN_FRAME_MS) return; // 30fps cap
       lastDraw = now;
       drewOnce = true;
       brainTime += 0.033;
-      if (!reduced && brainAutoRotate() && !brainDragging) brainRotY += 0.009;
+      // auto-spin only in windowed mode (fullscreen is user-driven free-fly).
+      if (!reduced && !fs && brainAutoRotate() && !brainDragging)
+        brainRotY += 0.009;
       drawBrain3D();
     };
     raf = requestAnimationFrame(spin);
-    onCleanup(() => cancelAnimationFrame(raf));
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    document.addEventListener("pointerlockchange", onPointerLockChange);
+    onCleanup(() => {
+      cancelAnimationFrame(raf);
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
+      document.removeEventListener("pointerlockchange", onPointerLockChange);
+    });
   });
 
   // when a fresh brain trace arrives, re-arm a one-shot redraw so the idle
@@ -1106,13 +1010,14 @@ export default function Play() {
         </h1>
         <p class="mt-5 text-dim text-[1.05rem] max-w-[60ch] leading-relaxed">
           A real modgrad{" "}
-          <span class="grad-text">8-region brain</span> sees and thinks, live in
-          your browser. It reads each cell through a visual retina, eight regions
-          compute across 16 ticks, and the motor region predicts the move —{" "}
-          ~84.5% right per move on held-out 9×9. The agent walks the goal path so
-          you can watch the brain see and decide at every step; the maze flags
-          where its call would miss. Forward pass: a bit-exact in-browser
-          reimplementation of the SDK.
+          <span class="grad-text">8-region brain</span> sees, solves, and{" "}
+          <span class="grad-text">keeps learning</span> — live in your browser.
+          It reads the raw 9×9 maze through a visual retina, floods value out
+          from the goal, and walks the optimal path. The motor region predicts
+          each step and adapts as it goes: a three-factor rule updates the
+          readout at inference — pain on wall-hits, reward at the goal, no
+          backprop. Forward pass: a bit-exact in-browser reimplementation of the
+          SDK.
         </p>
         <div class="mt-4 flex flex-wrap gap-x-5 gap-y-1 text-sm">
           <A href="/docs/brain-composition" class="text-accent">
@@ -1343,6 +1248,21 @@ export default function Play() {
               </div>
             </Show>
           </div>
+
+          {/* region telemetry: anchors the left column under the move bars,
+              expanded by default so the columns stay balanced. */}
+          <Show when={brainRef()}>
+            <RegionTelemetry
+              regions={brainRef()!.regions}
+              acts={curBrainTick()?.acts ?? null}
+              global={curBrainTick()?.global ?? 0}
+              exitLambda={exitLambda()}
+              ticksUsed={ticksUsed()}
+              ticksTotal={ticksTotal() || 16}
+              telemetry={regionTel()}
+              defaultOpen
+            />
+          </Show>
         </div>
 
         {/* RIGHT: the 3D brain (Model B), as the second column */}
@@ -1384,7 +1304,17 @@ export default function Play() {
             </A>
           </p>
 
-          <div class="rounded-lg overflow-hidden relative" style={{ background: "#0a0912" }}>
+          <div
+            ref={brainContainer}
+            class="rounded-lg overflow-hidden relative"
+            classList={{ "rounded-none": isFullscreen() }}
+            style={{
+              background: "#0a0912",
+              ...(isFullscreen()
+                ? { width: "100vw", height: "100vh" }
+                : {}),
+            }}
+          >
             <canvas
               ref={(el) => {
                 brainCanvas = el;
@@ -1394,28 +1324,51 @@ export default function Play() {
                 );
                 brainIO.observe(el);
               }}
-              class="w-full block cursor-grab active:cursor-grabbing"
+              class="block"
+              classList={{
+                "w-full cursor-grab active:cursor-grabbing": !isFullscreen(),
+                "w-full h-full cursor-none": isFullscreen(),
+              }}
               style={{ "touch-action": "none" }}
+              onClick={brainCanvasClick}
               onPointerDown={brainPointerDown}
               onPointerMove={brainPointerMove}
               onPointerUp={brainPointerUp}
               onPointerCancel={brainPointerUp}
               onLostPointerCapture={brainPointerUp}
-              aria-label="the eight-region brain computing — drag to rotate, scroll to zoom"
+              aria-label="the eight-region brain computing — drag to rotate, scroll to zoom; fullscreen for WASD free-fly"
             />
             <div class="absolute top-2 right-2 flex items-center gap-1.5">
-              <button
-                class="btn-icon text-[.68rem] font-mono px-2 py-1 rounded"
-                style={{
-                  background: "rgba(255,255,255,0.08)",
-                  color: "rgba(255,255,255,0.75)",
-                  "backdrop-filter": "blur(4px)",
-                }}
-                onClick={() => setBrainAutoRotate((v) => !v)}
-                title="toggle auto-rotation"
-              >
-                {brainAutoRotate() ? "❚❚ stop" : "⟳ spin"}
-              </button>
+              <Show when={!isFullscreen()}>
+                <button
+                  class="btn-icon text-[.68rem] font-mono px-2 py-1 rounded"
+                  style={{
+                    background: "rgba(255,255,255,0.08)",
+                    color: "rgba(255,255,255,0.75)",
+                    "backdrop-filter": "blur(4px)",
+                  }}
+                  onClick={() => setBrainAutoRotate((v) => !v)}
+                  title="toggle auto-rotation"
+                >
+                  {brainAutoRotate() ? "❚❚ stop" : "⟳ spin"}
+                </button>
+                <button
+                  class="text-[.68rem] font-mono px-2 py-1 rounded"
+                  style={{
+                    background: "rgba(255,255,255,0.08)",
+                    color: "rgba(255,255,255,0.75)",
+                    "backdrop-filter": "blur(4px)",
+                  }}
+                  onClick={() => {
+                    brainRotX = -0.32;
+                    brainRotY = 0.7;
+                    brainZoom = 1;
+                  }}
+                  title="reset view"
+                >
+                  reset
+                </button>
+              </Show>
               <button
                 class="text-[.68rem] font-mono px-2 py-1 rounded"
                 style={{
@@ -1423,19 +1376,53 @@ export default function Play() {
                   color: "rgba(255,255,255,0.75)",
                   "backdrop-filter": "blur(4px)",
                 }}
-                onClick={() => {
-                  brainRotX = -0.32;
-                  brainRotY = 0.7;
-                  brainZoom = 1;
-                }}
-                title="reset view"
+                onClick={toggleFullscreen}
+                title={isFullscreen() ? "exit fullscreen (Esc)" : "fly through the brain"}
               >
-                reset
+                {isFullscreen() ? "⛶ exit" : "⛶ fullscreen"}
               </button>
             </div>
-            <div class="absolute bottom-2 left-3 text-[.66rem] font-mono pointer-events-none" style={{ color: "rgba(255,255,255,0.4)" }}>
-              drag to rotate · scroll / pinch to zoom
-            </div>
+            {/* windowed hint */}
+            <Show when={!isFullscreen()}>
+              <div class="absolute bottom-2 left-3 text-[.66rem] font-mono pointer-events-none" style={{ color: "rgba(255,255,255,0.4)" }}>
+                drag to rotate · scroll / pinch to zoom · ⛶ to fly
+              </div>
+            </Show>
+            {/* fullscreen free-fly hint + live SDK-feature HUD */}
+            <Show when={isFullscreen()}>
+              <div
+                class="absolute bottom-3 left-4 text-[.7rem] font-mono pointer-events-none"
+                style={{ color: "rgba(255,255,255,0.6)" }}
+              >
+                <Show
+                  when={pointerLocked}
+                  fallback={<span>click to look · WASD move · Esc exit</span>}
+                >
+                  <span>WASD move · Q/E up·down · Shift sprint · mouse look · Esc exit</span>
+                </Show>
+              </div>
+              <div
+                class="absolute top-3 left-4 text-[.66rem] font-mono pointer-events-none flex flex-col gap-1"
+                style={{ color: "rgba(255,255,255,0.55)" }}
+              >
+                <span style={{ color: "rgba(255,255,255,0.8)" }}>SDK features live this step</span>
+                {(() => {
+                  const s = sdkFeatureState();
+                  return (
+                    <>
+                      <span>ticks used · {s.ticksUsed}</span>
+                      <Show when={s.exitLambda != null}>
+                        <span>exit gate λ · {(s.exitLambda ?? 0).toFixed(2)}</span>
+                      </Show>
+                      <span>vision pathway · {s.visionActive ? "on" : "—"}</span>
+                      <Show when={plasticityAvailable()}>
+                        <span>plastic Δ · {s.plasticDelta.toFixed(3)}</span>
+                      </Show>
+                    </>
+                  );
+                })()}
+              </div>
+            </Show>
           </div>
 
           <div class="flex flex-wrap items-center gap-x-4 gap-y-1.5 mt-3 text-[.72rem] text-mute font-mono">
@@ -1471,40 +1458,23 @@ export default function Play() {
           </div>
         </div>
 
-        {/* ── per-region telemetry: live numbers from all eight regions ── */}
-        <div class="card mt-5">
-          <div class="flex items-center justify-between mb-3">
-            <div class="eyebrow">Region telemetry</div>
-            <div class="font-mono text-[.7rem] text-mute tabular-nums">
-              tick {Math.min(tickIdx() + 1, ticksTotal() || 16)}/{ticksTotal() || 16}
-              <Show when={curBrainTick()?.exit != null}>
-                {" "}· exit λ {(curBrainTick()!.exit as number).toFixed(2)}
-              </Show>
-            </div>
-          </div>
-          <div class="flex flex-col gap-2">
-            <For each={regionStats()}>
-              {(s, i) => (
-                <div class="flex items-center gap-2.5 text-xs font-mono">
-                  <i class="w-2 h-2 rounded-full inline-block shrink-0" style={{ background: REGION_COLORS[i() % REGION_COLORS.length] }} />
-                  <span class="w-[4.5rem] shrink-0 text-dim">{shortRegion(s.name)}</span>
-                  <span class="w-9 shrink-0 text-mute tabular-nums text-right">{s.d}n</span>
-                  <div class="flex-1 h-2 rounded bg-panel overflow-hidden">
-                    <div
-                      class="h-full rounded transition-all duration-150"
-                      style={{ width: `${Math.max(2, s.level * 100)}%`, background: REGION_COLORS[i() % REGION_COLORS.length] }}
-                    />
-                  </div>
-                  <span class="w-12 text-right text-base tabular-nums shrink-0" title="activation RMS">{s.rms.toFixed(3)}</span>
-                </div>
-              )}
-            </For>
-          </div>
-          <div class="mt-3 pt-3 border-t border-line grid grid-cols-2 gap-x-4 gap-y-1 text-[.7rem] font-mono text-mute tabular-nums">
-            <span class="flex justify-between"><span>global sync</span><span class="text-dim">{(curBrainTick()?.global ?? 0).toFixed(3)}</span></span>
-            <span class="flex justify-between"><span>ticks used</span><span class="text-dim">{brainTrace()?.ticksUsed ?? 0}/{ticksTotal() || 16}</span></span>
-          </div>
-        </div>
+        {/* ── live three-factor plasticity: the headline "learns" panel, kept
+            open right under the brain ── */}
+        <Show when={plasticityAvailable()}>
+          <PlasticityPanel
+            enabled={plasticityAvailable()}
+            signal={signal()}
+            plasticDelta={plasticDelta()}
+            verdict={verdict()}
+            reached={reachedNow()}
+            loss={loss()}
+            lr={lr()}
+            onReset={resetPlasticity}
+          />
+        </Show>
+
+        {/* ── SDK features: collapsed by default; click the header to expand ── */}
+        <SdkFeatures state={sdkFeatureState()} />
         </div>
         </Show>
       </div>
@@ -1513,79 +1483,16 @@ export default function Play() {
       <p class="text-mute text-xs mt-8 max-w-[70ch] leading-relaxed font-mono">
         Solver: an 8-region brain (input · attention · output · motor · cerebellum
         · basal-ganglia · insula · hippocampus) with a visual retina, computing over{" "}
-        {brainRef()?.ticks ?? 16} ticks.{" "}
-        {(((brainRef()?.heldout_first_move_acc ?? 0.845)) * 100).toFixed(1)}% per-move
-        on held-out 9×9 mazes. The browser engine reimplements modgrad's forward pass —
-        bit-exact against the SDK, not the SDK itself on wasm (yet). Loads only here.
+        {brainRef()?.ticks ?? 16} ticks. It reads the raw 9×9 grid, runs value
+        iteration out from the goal to find the optimal path, and adapts its motor
+        readout at inference with a three-factor rule (no backprop). The browser
+        engine reimplements modgrad's forward pass — bit-exact against the SDK, not
+        the SDK itself on wasm (yet). Loads only here.
       </p>
     </div>
   );
 }
 
-// ── small subcomponents / helpers ──────────────────────────────────
-function Readout(props: { label: string; value: string; accent?: boolean }) {
-  return (
-    <div>
-      <div class="eyebrow mb-1">{props.label}</div>
-      <div
-        class="font-mono text-lg tabular-nums"
-        classList={{ "text-accent": props.accent, "text-base": !props.accent }}
-      >
-        {props.value}
-      </div>
-    </div>
-  );
-}
-
-function roundRect(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  r: number,
-) {
-  const rr = Math.min(r, w / 2, h / 2);
-  ctx.beginPath();
-  ctx.moveTo(x + rr, y);
-  ctx.arcTo(x + w, y, x + w, y + h, rr);
-  ctx.arcTo(x + w, y + h, x, y + h, rr);
-  ctx.arcTo(x, y + h, x, y, rr);
-  ctx.arcTo(x, y, x + w, y, rr);
-  ctx.closePath();
-}
-
-function marker(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  cell: number,
-  _kind: string,
-  _line: string,
-  accent: string,
-) {
-  // start: a small hollow ring in accent
-  ctx.beginPath();
-  ctx.strokeStyle = `color-mix(in srgb, ${accent} 70%, transparent)`;
-  ctx.lineWidth = 2;
-  ctx.arc(x + cell / 2, y + cell / 2, cell * 0.22, 0, Math.PI * 2);
-  ctx.stroke();
-}
-
-function goalMark(
-  ctx: CanvasRenderingContext2D,
-  cx: number,
-  cy: number,
-  cell: number,
-  accent: string,
-) {
-  // goal: filled rounded diamond in accent
-  const s = cell * 0.3;
-  ctx.save();
-  ctx.translate(cx, cy);
-  ctx.rotate(Math.PI / 4);
-  ctx.fillStyle = accent;
-  roundRect(ctx, -s, -s, s * 2, s * 2, 3);
-  ctx.fill();
-  ctx.restore();
-}
+// The maze + brain drawing primitives (roundRect, start/goal markers) now live
+// in their respective modules (viz/maze.ts, viz/brain3d.ts), so Play.tsx no
+// longer carries inlined canvas helpers.

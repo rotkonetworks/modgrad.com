@@ -1,3 +1,156 @@
+/* @ts-self-types="./modgrad_mini.d.ts" */
+
+/**
+ * Same as `adaptive_compute_pixels` but over a pre-computed flat
+ * observation `[n_tokens × token_dim]` (bypasses the retina).
+ * @param {Float32Array} obs
+ * @returns {any}
+ */
+export function adaptive_compute_obs(obs) {
+    const ptr0 = passArrayF32ToWasm0(obs, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.adaptive_compute_obs(ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * Per-tick adaptive-compute summary for raw RGB pixels `[3 × H × W]`
+ * CHW. The brain's outer exit gate is global (not per-region), so the
+ * honest unit of "adaptive compute" is the OUTER tick. Returns:
+ * `{ticks_used, lambda_trajectory[ticks_used], survival[ticks_used],
+ *   exit_cdf[ticks_used], certainty[ticks_used]}` where, per tick,
+ * `lambda` is the outer gate λ, `survival` is Π(1−λ) up to (excluding)
+ * that tick, `exit_cdf` is the cumulative exit probability Σ λ·survival,
+ * and `certainty` is `1 − normalized_entropy(prediction)`.
+ *
+ * No per-region exit λ is fabricated: the inner per-region gates are not
+ * exported by the forward, so this summarises what genuinely gates the
+ * brain's compute — the outer adaptive gate.
+ * @param {Float32Array} pixels
+ * @returns {any}
+ */
+export function adaptive_compute_pixels(pixels) {
+    const ptr0 = passArrayF32ToWasm0(pixels, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.adaptive_compute_pixels(ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * Apply ONE bounded three-factor local update to the readout's first-5
+ * (move) rows, using the LAST forward's stashed `(pre, logits)`:
+ *
+ *   ΔW[d,j] = θ · signal · (onehot(chosen)[d] − softmax(logits[0..5])[d]) · pre[j]
+ *
+ * with learning rate θ = 0.02, per-step `|ΔW| ≤ 0.25`, post-update
+ * `|W| ≤ 6.0`, and a NaN/Inf guard (non-finite ΔW elements are skipped).
+ * `chosen` is the move index in `0..5`. `signal` is the reward/error
+ * scalar; with `signal == 0` NOTHING changes (Δ is exactly 0), so the
+ * forward stays bit-exact between updates. The deltas are ADDED to
+ * `output_proj.weight` in place. Returns the L2 norm ‖ΔW‖ actually
+ * applied. The pristine readout is snapshotted lazily on first call so
+ * `reset_plasticity` can restore it.
+ *
+ * Requires `load_brain_weights` + at least one run/decision call first
+ * (so `pre`/`logits` are stashed).
+ * @param {number} chosen
+ * @param {number} signal
+ * @returns {number}
+ */
+export function apply_plasticity(chosen, signal) {
+    const ret = wasm.apply_plasticity(chosen, signal);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ret[0];
+}
+
+/**
+ * Same as `brain_telemetry_pixels` but over a pre-computed flat
+ * observation `[n_tokens × token_dim]` (bypasses the retina).
+ * @param {Float32Array} obs
+ * @returns {any}
+ */
+export function brain_telemetry_obs(obs) {
+    const ptr0 = passArrayF32ToWasm0(obs, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.brain_telemetry_obs(ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * Per-tick, per-region telemetry derived from a fresh forward over raw
+ * RGB pixels `[3 × H × W]` CHW. Returns `[TickTelemetry]`: for each
+ * outer tick, an array of per-region `{region, name, d_model,
+ * activation_rms, activation_peak, activation_mean}` plus
+ * `{global_sync_rms, global_sync_peak, exit_lambda}`.
+ *
+ * All values are computed from the forward's own outputs; no
+ * neuromodulator/homeostasis state exists in this reimplementation, so
+ * none is invented. Re-runs the forward (does not stash plasticity
+ * inputs — use `run_brain_pixels` if you also want to plasticise).
+ * @param {Float32Array} pixels
+ * @returns {any}
+ */
+export function brain_telemetry_pixels(pixels) {
+    const ptr0 = passArrayF32ToWasm0(pixels, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.brain_telemetry_pixels(ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * Same as `decision_drivers_pixels` but over a pre-computed flat
+ * observation `[n_tokens × token_dim]` (bypasses the retina).
+ * @param {Float32Array} obs
+ * @returns {any}
+ */
+export function decision_drivers_obs(obs) {
+    const ptr0 = passArrayF32ToWasm0(obs, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.decision_drivers_obs(ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * "What drives the decision" for raw RGB pixels `[3 × H × W]` CHW.
+ * Runs the forward, then decomposes the LAST tick's readout
+ * `pred = output_proj(global_sync)`. Returns `DecisionDrivers`:
+ * `{tick, pre[n_global_sync], logits[out_dims], move_softmax[n_moves],
+ *   move_contributions[n_moves][n_global_sync], move_bias[n_moves],
+ *   n_moves}` where `move_contributions[j][i] = W[j,i]·pre[i]`.
+ *
+ * This brain's outer forward exposes no attention/eligibility, so none
+ * is fabricated; `pre` and the per-channel readout contributions are the
+ * honest "drivers." Also stashes plasticity inputs (free).
+ * @param {Float32Array} pixels
+ * @returns {any}
+ */
+export function decision_drivers_pixels(pixels) {
+    const ptr0 = passArrayF32ToWasm0(pixels, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.decision_drivers_pixels(ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
 /**
  * Browser-facing maze encoder. `grid` is row-major (1 = wall), returns the
  * flat `[size*size * 9]` observation to pass straight into `run`.
@@ -46,6 +199,19 @@ export function load_weights(json) {
     const ptr0 = passStringToWasm0(json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len0 = WASM_VECTOR_LEN;
     const ret = wasm.load_weights(ptr0, len0);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * Restore `output_proj` to its pristine (as-loaded) state, undoing all
+ * `apply_plasticity` updates. No-op if plasticity was never applied
+ * (no snapshot taken yet). The snapshot itself is retained so repeated
+ * reset → plasticise → reset cycles all restore the same baseline.
+ */
+export function reset_plasticity() {
+    const ret = wasm.reset_plasticity();
     if (ret[1]) {
         throw takeFromExternrefTable0(ret[0]);
     }
@@ -119,6 +285,70 @@ export function run_brain_pixels(pixels) {
         throw takeFromExternrefTable0(ret[1]);
     }
     return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * Run the trainable VIN readout DIRECTLY over the raw maze pixels
+ * `[3 × SIZE × SIZE]` CHW (NOT the retina). Derives wall/goal/agent from
+ * the pixels (wall=black, goal=green, agent=red), runs EXACT value
+ * iteration on the SIZE×SIZE grid so goal-value floods backward around
+ * walls, then reads 5 move logits from the AGENT'S OWN cell (its value +
+ * gate + 4 neighbour values) — no global pooling, no learned geometry.
+ *
+ * `agent_row`/`agent_col` are the agent's TRUE maze coords, used only as a
+ * fallback if no red agent pixel is present. SIZE = round(sqrt(len/3)).
+ * The VIN move head is lazily seeded (deterministic) on first call.
+ *
+ * Returns `{ move_logits: [5], agent_cell: [r,c], grid: [SIZE,SIZE],
+ *            value_grid: [SIZE²], gate: [SIZE²] }`. The agent-cell
+ * readout and move logits are stashed for `vin_learn`. No cortex needed.
+ * @param {Float32Array} pixels
+ * @param {number} agent_row
+ * @param {number} agent_col
+ * @returns {any}
+ */
+export function vin_forward(pixels, agent_row, agent_col) {
+    const ptr0 = passArrayF32ToWasm0(pixels, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.vin_forward(ptr0, len0, agent_row, agent_col);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * Apply ONE three-factor local update to the VIN move head only, using
+ * the last `vin_forward`'s stashed `(pre, logits)`:
+ *
+ *   eligibility[d,j] = (onehot(target_move)[d] − softmax(logits)[d])·pre[j]
+ *   ΔW[d,j]          = θ · (teach − pain) · eligibility[d,j]
+ *
+ * `target_move` ∈ `0..5` teaches that move (teach = 1); `target_move < 0`
+ * applies only the `−pain` (wall-hit) penalty. θ = 0.05, bounded
+ * `|ΔW| ≤ 0.25`, `|W| ≤ 6.0`, NaN/Inf-guarded. Momentum-free, no backprop
+ * graph — only the move head changes (value-propagation weights are
+ * FIXED). Returns ‖ΔW‖ applied. Requires a prior `vin_forward`.
+ * @param {number} target_move
+ * @param {number} pain
+ * @returns {number}
+ */
+export function vin_learn(target_move, pain) {
+    const ret = wasm.vin_learn(target_move, pain);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ret[0];
+}
+
+/**
+ * Re-seed the VIN readout to its deterministic init (the "Reset learning"
+ * path), discarding all `vin_learn` updates. Rebuilt for the current
+ * per-cell width on the next `vin_forward` if the width changes; if a VIN
+ * already exists it is re-seeded in place for the same width.
+ */
+export function vin_reset() {
+    wasm.vin_reset();
 }
 
 function __wbg_get_imports() {

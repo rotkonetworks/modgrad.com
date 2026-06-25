@@ -959,7 +959,7 @@ self.onmessage = async (e: MessageEvent) => {
       // leaves it as a real runtime import instead of trying to resolve it.
       // ?v=… busts any stale cached engine (a mismatched glue/wasm pair fails
       // to instantiate); bump ENGINE_VER whenever the wasm is rebuilt.
-      const ENGINE_VER = "20260626v-learnedvin";
+      const ENGINE_VER = "20260626v2-compass";
       const enginePath =
         ["", "engine", "modgrad_mini.js"].join("/") + "?v=" + ENGINE_VER;
       // Load the glue as a blob module. Vite's DEV server refuses to serve

@@ -571,7 +571,8 @@ const STEP_BUDGET_MULT = 3; // wander budget = ceil(shortest × MULT) before fai
 const PLASTIC_LR = 0.5; // learning rate for the per-cell escape bias (three-factor rule)
 const FRUST_TEMP = 1.2; // how much frustration heats the softmax (explore to escape loops)
 const FRUST_MAX = 4; // cap on frustration's effect on temperature
-const FRUST_LOST = 8; // frustration this high = genuinely stuck → fail honestly, next maze
+const FRUST_LOST = 10; // frustration this high = genuinely stuck → fail honestly, next maze
+const NOVELTY_GAIN = 3.0; // per-frustration pull toward unvisited neighbours (frontier escape)
 let mazeEp: MazeEpisode | null = null; // current self-drive episode (null until a maze loads)
 
 function newMazeEpisode(shortest: number, startCell: number): MazeEpisode {
@@ -1240,23 +1241,39 @@ self.onmessage = async (e: MessageEvent) => {
       const bias = lvl.escapeOn
         ? ep.plastic.get(cellIdx) ?? new Float32Array(4)
         : new Float32Array(4); // hardcore: no plastic surround
+      // NOVELTY / FRONTIER drive: when frustrated, pull toward legal neighbours
+      // we have NOT visited yet — the honest "I'm looping, try new ground" signal
+      // (the agent's own visit memory, no solver). This is what lets it commit to
+      // a direction that leads AWAY from the goal when the shortest path requires
+      // detouring around a wall — the planner alone keeps aiming at the goal and
+      // ping-pongs; the novelty bonus breaks the tie toward the unexplored exit.
+      // ramp the novelty pull from frustration ≥ 1 (≈2 revisits) so a single
+      // stall on an otherwise-clean board doesn't yank the agent off the optimal
+      // line — only a genuine loop builds enough heat to trigger exploration.
+      const novelty = lvl.escapeOn
+        ? NOVELTY_GAIN * Math.max(0, Math.min(ep.frustration, FRUST_MAX) - 1)
+        : 0;
       const comb: number[] = [0, 0, 0, 0];
       for (let d = 0; d < 4; d++) {
         const nr = ar + DELTA[d][0];
         const nc = ac + DELTA[d][1];
         const off = nr < 0 || nr >= SIZE || nc < 0 || nc >= SIZE;
-        if (off || grid[nr * SIZE + nc] === 1) comb[d] = -1e30; // mask illegal dir
-        else comb[d] = (vinLogits[d] ?? 0) + bias[d];
+        if (off || grid[nr * SIZE + nc] === 1) {
+          comb[d] = -1e30; // mask illegal dir
+        } else {
+          const unvisited = (ep.visits.get(nr * SIZE + nc) ?? 0) === 0;
+          comb[d] = (vinLogits[d] ?? 0) + bias[d] + (unvisited ? novelty : 0);
+        }
       }
       // frustration only heats the softmax when the escape is on (easy/normal/hard).
       const temp = lvl.escapeOn
         ? 1 + lvl.heat * Math.min(ep.frustration, FRUST_MAX)
         : 1;
       const probs = softmaxTemp(comb, temp);
-      // calm → commit the plan; frustrated (≥1) → explore via sampling to escape.
-      // hardcore never samples: it commits the raw VIN argmax every step.
+      // calm → commit the plan; a sustained loop (frustration ≥ 2) → explore via
+      // sampling to escape. hardcore never samples: raw VIN argmax every step.
       const decidedMove =
-        lvl.escapeOn && ep.frustration >= 1
+        lvl.escapeOn && ep.frustration >= 2
           ? sampleDir(probs, Math.random())
           : argmax4(probs);
       const nudged = false; // (no oracle nudge — kept for the result shape)
@@ -1305,27 +1322,38 @@ self.onmessage = async (e: MessageEvent) => {
       const progressed = havePlannerValue
         ? vgrid[nextCell] > vgrid[cellIdx] // planner believes the next cell is closer
         : (Number.isFinite(dist[nextCell]) ? dist[nextCell] : here) < here;
+      // A REVISIT is the honest "I'm looping" signal — it OVERRIDES the planner's
+      // value verdict. Otherwise the toward-goal half of a ping-pong looks like
+      // "progress", earns reward, and cools the very frustration that should be
+      // building to break the loop (the exact corner-trap regression). So:
+      //   revisit            → pain   (loop; suppress this move, heat to escape)
+      //   new cell + closer  → reward (genuine forward progress per the planner)
+      //   new cell + not     → mild   (a legal detour onto fresh ground)
+      const isRevisit = priorVisits >= 1;
       let neuromod: Neuromod;
       let modScalar: number;
       if (reached) {
         neuromod = "dopamine";
         modScalar = 1.0;
-      } else if (progressed) {
-        neuromod = "reward"; // carrot: closer to the goal
-        modScalar = 0.3;
-      } else if (priorVisits >= 1) {
-        neuromod = "pain"; // been here before, still no progress = a loop
+      } else if (isRevisit) {
+        neuromod = "pain"; // looping — overrides any value "progress"
         modScalar = -0.6;
+      } else if (progressed) {
+        neuromod = "reward"; // new ground the planner judges closer to the goal
+        modScalar = 0.3;
       } else {
-        neuromod = "disappointment"; // legal but not closer
+        neuromod = "disappointment"; // new ground, not closer (a detour)
         modScalar = -0.15;
       }
-      // frustration dynamics: progress/goal cools it; a stall heats it (a revisit
-      // heats it harder, since that's the ping-pong we want to escape).
-      if (reached || progressed) {
-        ep.frustration = Math.max(0, ep.frustration - 1.5);
+      // frustration dynamics keyed on COVERING NEW GROUND, not on the planner's
+      // value: any fresh cell cools it (we're exploring); a revisit heats it hard
+      // (the ping-pong we must escape). This climbs monotonically inside a loop.
+      if (reached) {
+        ep.frustration = Math.max(0, ep.frustration - 2.0);
+      } else if (!isRevisit) {
+        ep.frustration = Math.max(0, ep.frustration - 0.5);
       } else {
-        ep.frustration += priorVisits >= 1 ? 1.0 : 0.4;
+        ep.frustration += 1.2;
       }
 
       // ── episode bookkeeping (Part A): count the step AFTER neuromod read priorVisits ──

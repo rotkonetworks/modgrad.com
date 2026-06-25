@@ -1093,10 +1093,11 @@ export default function Play() {
         <p class="mt-5 text-dim text-[1.05rem] max-w-[60ch] leading-relaxed">
           A real modgrad{" "}
           <span class="grad-text">8-region brain</span> solving mazes live in
-          your browser. It reads the grid through a visual retina, floods value
-          out from the goal, and walks the optimal path. Its motor readout starts
-          untrained and learns at inference from a local three-factor rule: no
-          backprop, no optimizer. The forward pass is a bit-exact in-browser
+          your browser. A visual retina reads the grid, and an exact planner
+          floods value out from the goal to find the optimal path. That planner
+          is what solves the maze; the motor readout starts untrained and learns,
+          at inference, to imitate its move from local cues (a local three-factor
+          rule, no backprop). The forward pass is a bit-exact in-browser
           reimplementation of the SDK.
         </p>
         <div class="mt-4 flex flex-wrap gap-x-5 gap-y-1 text-sm">
@@ -1658,11 +1659,13 @@ export default function Play() {
               with a local three-factor rule (no backprop).
             </div>
             <div>
-              <div class="eyebrow mb-1.5">Trained vs from-scratch</div>
-              The motor readout starts untrained and learns live (the loss curve).
-              Value iteration is exact: no training, any size. The 9 MB weights are
-              the perception and the visualization only; the solve-and-learn loop
-              does not need them.
+              <div class="eyebrow mb-1.5">What learns (and what doesn't)</div>
+              The maze is solved by the exact planner, not by learning. The only
+              thing that learns is the move-head: a 6→5 readout that starts
+              untrained and learns to imitate the planner's optimal move from the
+              agent's local neighbour values. It converges fast because the
+              planner has already done the hard part. The 9 MB weights are the
+              perception and the visualization only.
             </div>
             <div>
               <div class="eyebrow mb-1.5">Vision</div>

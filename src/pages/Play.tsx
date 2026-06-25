@@ -1549,26 +1549,244 @@ export default function Play() {
                   <span>WASD move · Q/E up·down · Shift sprint · mouse look · Esc exit</span>
                 </Show>
               </div>
+              {/* ── COCKPIT HUD: value-only live stats, overlaid on the 3D view ── */}
+              {/* TOP-LEFT: region telemetry + global-sync, exit-λ, ticks */}
               <div
-                class="absolute top-3 left-4 text-[.66rem] font-mono pointer-events-none flex flex-col gap-1"
-                style={{ color: "rgba(255,255,255,0.55)" }}
+                class="absolute top-3 left-3 text-[.64rem] font-mono tabular-nums rounded-lg flex flex-col gap-1.5"
+                style={{
+                  background: "rgba(10,9,18,0.72)",
+                  "backdrop-filter": "blur(4px)",
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  color: "rgba(255,255,255,0.82)",
+                  padding: "10px 12px",
+                  "min-width": "186px",
+                  "pointer-events": "auto",
+                }}
               >
-                <span style={{ color: "rgba(255,255,255,0.8)" }}>SDK features live this step</span>
+                <div class="flex items-center justify-between" style={{ color: "rgba(255,255,255,0.55)" }}>
+                  <span>regions</span>
+                  <span>rms</span>
+                </div>
                 {(() => {
-                  const s = sdkFeatureState();
+                  const tel = regionTel();
+                  const names = brainRef()?.region_names ?? [];
+                  // prefer live telemetry; fall back to the current tick's per-region acts
+                  const rows = tel
+                    ? tel.map((r, i) => ({ name: r.name, rms: r.rms ?? 0, idx: i }))
+                    : names.map((nm, i) => {
+                        const acts = curBrainTick()?.acts?.[i] ?? [];
+                        const rms = acts.length
+                          ? Math.sqrt(acts.reduce((a, v) => a + v * v, 0) / acts.length)
+                          : 0;
+                        return { name: nm, rms, idx: i };
+                      });
                   return (
-                    <>
-                      <span>ticks used · {s.ticksUsed}</span>
-                      <Show when={s.exitLambda != null}>
-                        <span>exit gate λ · {(s.exitLambda ?? 0).toFixed(2)}</span>
-                      </Show>
-                      <span>vision pathway · {s.visionActive ? "on" : "—"}</span>
-                      <Show when={plasticityAvailable()}>
-                        <span>plastic Δ · {s.plasticDelta.toFixed(3)}</span>
-                      </Show>
-                    </>
+                    <For each={rows}>
+                      {(r) => (
+                        <div class="flex items-center gap-2">
+                          <i
+                            class="w-2 h-2 rounded-full inline-block shrink-0"
+                            style={{ background: REGION_COLORS[r.idx % REGION_COLORS.length] }}
+                          />
+                          <span class="w-12 shrink-0" style={{ color: "rgba(255,255,255,0.7)" }}>
+                            {shortRegion(r.name)}
+                          </span>
+                          <span class="flex-1 h-1.5 rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.1)" }}>
+                            <span
+                              class="block h-full rounded-full"
+                              style={{
+                                width: `${Math.max(2, Math.min(1, r.rms) * 100)}%`,
+                                background: REGION_COLORS[r.idx % REGION_COLORS.length],
+                              }}
+                            />
+                          </span>
+                          <span class="w-8 text-right" style={{ color: "rgba(255,255,255,0.55)" }}>
+                            {r.rms.toFixed(2)}
+                          </span>
+                        </div>
+                      )}
+                    </For>
                   );
                 })()}
+                <div class="flex flex-wrap gap-x-3 gap-y-0.5 pt-1.5" style={{ "border-top": "1px solid rgba(255,255,255,0.1)", color: "rgba(255,255,255,0.6)" }}>
+                  <span>global {brainGlobal().toFixed(2)}</span>
+                  <Show when={exitLambda() != null}>
+                    <span>λ {(exitLambda() ?? 0).toFixed(2)}</span>
+                  </Show>
+                  <span>ticks {ticksUsed()}/{ticksTotal() || 16}</span>
+                  <span>vision {sdkFeatureState().visionActive ? "on" : "—"}</span>
+                  <Show when={plasticityAvailable()}>
+                    <span>Δ {plasticDelta().toFixed(3)}</span>
+                  </Show>
+                </div>
+              </div>
+
+              {/* TOP-RIGHT: move distribution + agreement + verdict + maze#/step.
+                  Offset down so it clears the canvas stop/reset/fullscreen buttons. */}
+              <div
+                class="absolute right-3 text-[.64rem] font-mono tabular-nums rounded-lg flex flex-col gap-1.5"
+                style={{
+                  top: "44px",
+                  background: "rgba(10,9,18,0.72)",
+                  "backdrop-filter": "blur(4px)",
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  color: "rgba(255,255,255,0.82)",
+                  padding: "10px 12px",
+                  "min-width": "176px",
+                  "pointer-events": "auto",
+                }}
+              >
+                <div class="flex items-center justify-between" style={{ color: "rgba(255,255,255,0.55)" }}>
+                  <span>move</span>
+                  <span>maze #{Math.max(1, mazeNum())} · step {stepCount()}</span>
+                </div>
+                <For each={MOVES}>
+                  {(label, i) => {
+                    const p = () => moveProbs()[i()] ?? 0;
+                    const chosen = () => committedMove() === i();
+                    return (
+                      <div class="flex items-center gap-2">
+                        <span
+                          class="w-9 shrink-0"
+                          style={{ color: chosen() ? "#fff" : "rgba(255,255,255,0.6)" }}
+                        >
+                          {label}
+                        </span>
+                        <span class="flex-1 h-2 rounded overflow-hidden" style={{ background: "rgba(255,255,255,0.1)" }}>
+                          <span
+                            class="block h-full rounded"
+                            style={{
+                              width: `${Math.max(2, p() * 100)}%`,
+                              background: chosen() ? "var(--accent)" : "rgba(255,255,255,0.32)",
+                            }}
+                          />
+                        </span>
+                        <span class="w-8 text-right" style={{ color: chosen() ? "#fff" : "rgba(255,255,255,0.55)" }}>
+                          {(p() * 100).toFixed(0)}%
+                        </span>
+                      </div>
+                    );
+                  }}
+                </For>
+                <div class="flex items-center justify-between pt-1.5" style={{ "border-top": "1px solid rgba(255,255,255,0.1)" }}>
+                  <span style={{ color: "rgba(255,255,255,0.6)" }}>
+                    agree {moveCount() ? Math.round((agreeCount() / moveCount()) * 100) : 0}% ({agreeCount()}/{moveCount()})
+                  </span>
+                  <Show when={verdict()}>
+                    <span
+                      class="px-1.5 py-0.5 rounded"
+                      style={{
+                        background:
+                          verdict() === "ok"
+                            ? "color-mix(in srgb, var(--accent) 30%, transparent)"
+                            : "rgba(224,86,78,0.3)",
+                        color: verdict() === "ok" ? "#fff" : "#ffb3ad",
+                      }}
+                    >
+                      {verdict() === "ok"
+                        ? "✓ path"
+                        : verdict() === "wall"
+                          ? "✕ wall"
+                          : verdict() === "astray"
+                            ? "→ astray"
+                            : "· wait"}
+                    </span>
+                  </Show>
+                </div>
+              </div>
+
+              {/* BOTTOM-CENTER: the control panel (transport + drive mode + size) */}
+              <div
+                class="absolute left-1/2 flex flex-col gap-2 rounded-lg"
+                style={{
+                  bottom: "16px",
+                  transform: "translateX(-50%)",
+                  background: "rgba(10,9,18,0.72)",
+                  "backdrop-filter": "blur(4px)",
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  padding: "10px 12px",
+                  "pointer-events": "auto",
+                }}
+              >
+                <div class="flex items-center gap-1.5 justify-center">
+                  <button
+                    class="text-[.66rem] font-mono px-2.5 py-1 rounded"
+                    style={{ background: "var(--accent)", color: "#fff" }}
+                    onClick={togglePlay}
+                    disabled={status() !== "ready"}
+                  >
+                    {playing() ? "❚❚ Pause" : "▶ Play"}
+                  </button>
+                  <button
+                    class="text-[.66rem] font-mono px-2.5 py-1 rounded"
+                    style={{ background: "rgba(255,255,255,0.1)", color: "rgba(255,255,255,0.85)" }}
+                    onClick={stepOnce}
+                    disabled={status() !== "ready" || playing()}
+                  >
+                    Step
+                  </button>
+                  <button
+                    class="text-[.66rem] font-mono px-2.5 py-1 rounded"
+                    style={{ background: "rgba(255,255,255,0.1)", color: "rgba(255,255,255,0.85)" }}
+                    onClick={restart}
+                    disabled={status() !== "ready"}
+                  >
+                    Restart
+                  </button>
+                  <button
+                    class="text-[.66rem] font-mono px-2.5 py-1 rounded"
+                    style={{ background: "rgba(255,255,255,0.1)", color: "rgba(255,255,255,0.85)" }}
+                    onClick={newMaze}
+                    disabled={status() !== "ready"}
+                  >
+                    New maze
+                  </button>
+                </div>
+                <div class="flex items-center justify-center gap-3 text-[.6rem] font-mono">
+                  <div class="flex rounded overflow-hidden" style={{ border: "1px solid rgba(255,255,255,0.16)" }}>
+                    <For each={["optimal", "explore", "honest"] as DriveMode[]}>
+                      {(m) => {
+                        const active = () => driveMode() === m;
+                        return (
+                          <button
+                            class="px-2 py-1 capitalize"
+                            style={{
+                              background: active() ? "var(--accent)" : "transparent",
+                              color: active() ? "#fff" : "rgba(255,255,255,0.6)",
+                            }}
+                            onClick={() => changeMode(m)}
+                            disabled={status() !== "ready"}
+                            aria-pressed={active()}
+                          >
+                            {m}
+                          </button>
+                        );
+                      }}
+                    </For>
+                  </div>
+                  <div class="flex rounded overflow-hidden tabular-nums" style={{ border: "1px solid rgba(255,255,255,0.16)" }}>
+                    <For each={MAZE_SIZES}>
+                      {(s) => {
+                        const active = () => mazeSize() === s;
+                        return (
+                          <button
+                            class="px-2 py-1"
+                            style={{
+                              background: active() ? "var(--accent)" : "transparent",
+                              color: active() ? "#fff" : "rgba(255,255,255,0.6)",
+                            }}
+                            onClick={() => changeSize(s)}
+                            disabled={status() !== "ready"}
+                            aria-pressed={active()}
+                            title={`${s}×${s}`}
+                          >
+                            {s}
+                          </button>
+                        );
+                      }}
+                    </For>
+                  </div>
+                </div>
               </div>
             </Show>
           </div>

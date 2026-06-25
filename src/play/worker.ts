@@ -119,6 +119,14 @@ type EngineExtras = {
   vin_forward: ((pixels: Float32Array, agentRow: number, agentCol: number) => unknown) | null;
   vin_learn: ((targetMove: number, pain: number) => number) | null;
   vin_reset: (() => void) | null;
+  // LEARNED VIN — the trained planner (replaces the hardcoded value-iteration
+  // cheat). load_learned_vin(json) loads the trained weights; learned_vin_forward
+  // runs the planner over per-cell [is_open, is_goal, bias] tokens and returns the
+  // 4 move logits (U,D,L,R). Trained offline; no solver at inference.
+  load_learned_vin: ((json: string) => void) | null;
+  learned_vin_forward:
+    | ((tokens: Float32Array, gridH: number, gridW: number, ar: number, ac: number) => Float32Array)
+    | null;
 };
 
 let engine:
@@ -276,33 +284,42 @@ function runBrain(
 // Run the engine's value-iteration readout on the maze + agent position and
 // coerce its raw return into a typed VinForward. Feature-detected: returns null
 // if the engine doesn't export vin_forward (old engine) or the call throws.
+// Honest per-cell tokens: [is_open, is_goal, bias=1.0] — ONLY what's visible in
+// the maze (walls + goal). No solved distances, no route, no agent position
+// (the agent cell is passed to the planner separately). Exactly the encoding the
+// VIN was trained on. Row-major over cells, raw_dim=3.
+function buildVinTokens(grid: number[], gr: number, gc: number): Float32Array {
+  const n = SIZE * SIZE;
+  const t = new Float32Array(n * 3);
+  for (let r = 0; r < SIZE; r++) {
+    for (let c = 0; c < SIZE; c++) {
+      const cell = r * SIZE + c;
+      t[cell * 3] = grid[cell] === 1 ? 0 : 1; // is_open
+      t[cell * 3 + 1] = r === gr && c === gc ? 1 : 0; // is_goal
+      t[cell * 3 + 2] = 1; // bias
+    }
+  }
+  return t;
+}
+
+// Run the LEARNED VIN planner (trained offline, no solver at inference). It reads
+// the honest tokens + the agent's own cell and returns 4 move logits (U,D,L,R).
 function vinForward(
   grid: number[],
   ar: number,
   ac: number,
-  gr: number,
-  gc: number,
+  _gr: number,
+  _gc: number,
 ): VinForward | null {
-  if (!engine?.vin_forward) return null;
+  if (!engine?.learned_vin_forward) return null;
   try {
-    const px = renderPixels(grid, ar, ac, gr, gc);
-    // The VIN now runs DIRECTLY on the raw SIZE×SIZE maze (no retina, no 5×5
-    // downsample), so the agent cell is the TRUE maze cell — pass it straight
-    // through (the engine also self-localizes from the red pixel as a fallback).
-    const raw = engine.vin_forward(px, ar, ac) as unknown;
-    if (!raw || typeof raw !== "object") return null;
-    const o = raw as Record<string, unknown>;
-    const logits = Array.isArray(o.move_logits) ? (o.move_logits as number[]) : [];
-    const ml: number[] = [];
-    for (let d = 0; d < N_DIRECTIONS; d++) ml.push(typeof logits[d] === "number" ? logits[d] : 0);
-    let cell: [number, number] = [ar, ac];
-    if (Array.isArray(o.agent_cell) && o.agent_cell.length >= 2) {
-      const a = o.agent_cell as unknown[];
-      if (typeof a[0] === "number" && typeof a[1] === "number") cell = [a[0], a[1]];
-    }
-    const value_grid = Array.isArray(o.value_grid) ? (o.value_grid as number[]).slice() : [];
-    const gate = Array.isArray(o.gate) ? (o.gate as number[]).slice() : [];
-    return { move_logits: ml, agent_cell: cell, value_grid, gate };
+    const tokens = buildVinTokens(grid, _gr, _gc);
+    const out = engine.learned_vin_forward(tokens, SIZE, SIZE, ar, ac);
+    if (!out || out.length < 4) return null;
+    // pad to N_DIRECTIONS: the 4 learned dirs + a never-chosen Wait slot.
+    const ml: number[] = [out[0], out[1], out[2], out[3]];
+    while (ml.length < N_DIRECTIONS) ml.push(-1e30);
+    return { move_logits: ml, agent_cell: [ar, ac], value_grid: [], gate: [] };
   } catch {
     return null;
   }
@@ -866,7 +883,7 @@ self.onmessage = async (e: MessageEvent) => {
       // leaves it as a real runtime import instead of trying to resolve it.
       // ?v=… busts any stale cached engine (a mismatched glue/wasm pair fails
       // to instantiate); bump ENGINE_VER whenever the wasm is rebuilt.
-      const ENGINE_VER = "20260626v-anysize";
+      const ENGINE_VER = "20260626v-learnedvin";
       const enginePath =
         ["", "engine", "modgrad_mini.js"].join("/") + "?v=" + ENGINE_VER;
       // Load the glue as a blob module. Vite's DEV server refuses to serve
@@ -959,15 +976,30 @@ self.onmessage = async (e: MessageEvent) => {
           fn<(pixels: Float32Array, agentRow: number, agentCol: number) => unknown>("vin_forward"),
         vin_learn: fn<(targetMove: number, pain: number) => number>("vin_learn"),
         vin_reset: fn<() => void>("vin_reset"),
+        load_learned_vin: fn<(json: string) => void>("load_learned_vin"),
+        learned_vin_forward:
+          fn<(t: Float32Array, h: number, w: number, ar: number, ac: number) => Float32Array>(
+            "learned_vin_forward",
+          ),
       };
       const plastic =
         extras.apply_plasticity !== null && extras.reset_plasticity !== null;
 
-      // ── VIN learning loop (feature-detected) ──
-      // The closed loop is available only when the engine exports vin_forward.
-      // vinMode is ON by default when available; the caller may force it off via
-      // an init flag. Against the old engine (no vin_forward) it stays inert.
-      vinAvailable = extras.vin_forward !== null;
+      // ── LEARNED VIN: load the trained planner weights. The agent drives on
+      // this at inference — no solver in the loop. (Trained offline on solved
+      // mazes; at inference it plans from the image alone.)
+      if (extras.load_learned_vin) {
+        try {
+          const vinJson = await fetch("/models/vin_solver_weights.json").then((r) => r.text());
+          extras.load_learned_vin(vinJson);
+          console.log("[vin] learned planner loaded");
+        } catch (e) {
+          console.warn("[vin] failed to load learned planner weights:", e);
+        }
+      }
+
+      // The closed loop drives on the LEARNED VIN when the engine exports it.
+      vinAvailable = extras.learned_vin_forward !== null;
       vinMode = vinAvailable && msg.vinMode !== false; // default ON when available
       mazeCounter = 0;
 
@@ -1100,10 +1132,11 @@ self.onmessage = async (e: MessageEvent) => {
       // The value-greedy step is the "perfect planner" move; the move-head's own
       // argmax is the LEARNER (what it would do self-driving). Which of these
       // DRIVES the agent depends on the drive-mode below.
-      const vinOn = vinMode && vinAvailable && engine?.vin_forward != null;
+      const vinOn = vinMode && vinAvailable && engine?.learned_vin_forward != null;
       const vf = vinOn ? vinForward(grid, ar, ac, gr, gc) : null;
-      const vinGreedy = vf ? greedyFromValue(vf, ar, ac, grid) : -1; // planner move
-      const greedy = vinGreedy >= 0 ? vinGreedy : optMove; // value-greedy w/ BFS fallback
+      // the learned planner's chosen move = argmax of its move logits.
+      const vinGreedy = vf ? argmaxMove(vf.move_logits) : -1;
+      const greedy = vinGreedy >= 0 ? vinGreedy : optMove; // learned VIN, BFS fallback
       // the learner's own pick — VIN move-head argmax, else the brain's move
       const headMove = vf ? argmaxMove(vf.move_logits) : brainMove;
 

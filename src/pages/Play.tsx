@@ -173,7 +173,7 @@ export default function Play() {
   useDocMeta(() => ({
     title: "Watch it think",
     description:
-      "A real modgrad 8-region brain solving mazes in your browser. It reads the grid through a visual retina, floods value from the goal to walk the optimal path, and learns its motor readout at inference with a local three-factor rule (no backprop). Runs client-side as a bit-exact wasm reimplementation of the modgrad SDK.",
+      "A modgrad learned planner (Value Iteration Network) solving mazes in your browser. Trained on solved mazes, it reads the maze image, learns the walls and goal, and plans its own route with no solver at inference — and generalizes to mazes bigger than it trained on. Runs client-side as a bit-exact wasm reimplementation of the modgrad SDK.",
     path: "/play",
   }));
 
@@ -374,11 +374,11 @@ export default function Play() {
   const modeDesc = (): string => {
     switch (driveMode()) {
       case "optimal":
-        return "Commits the value-greedy move. Always solves; the move-head predicts and learns alongside.";
+        return "Commits the learned planner's move directly. It plans from the maze image, no solver in the loop.";
       case "explore":
-        return "Self-drives on its own move-head and always finishes. Wall-hits are vetoed; a nudge breaks loops.";
+        return "Follows the learned planner and always finishes; a wall-hit is vetoed and a nudge breaks loops.";
       case "honest":
-        return "Self-drives with no safety net, so it can fail. Solve-rate climbs as it learns.";
+        return "Follows the learned planner with no safety net — on a hard maze it can fail. That's the true solve-rate.";
     }
   };
 
@@ -1092,13 +1092,13 @@ export default function Play() {
         </h1>
         <p class="mt-5 text-dim text-[1.05rem] max-w-[60ch] leading-relaxed">
           A real modgrad{" "}
-          <span class="grad-text">8-region brain</span> solving mazes live in
-          your browser. A visual retina reads the grid; an exact planner computes
-          the optimal path (an algorithm, not learned). In Explore and Honest
-          modes the agent walks on its own untrained move-head and can take wrong
-          steps, learning at inference to match the planner's move. In Optimal
-          mode it follows the planner directly. The forward pass is a bit-exact
-          in-browser reimplementation of the SDK.
+          <span class="grad-text">learned planner</span> solving mazes live in
+          your browser. A Value Iteration Network, trained on solved mazes, reads
+          the maze image and plans its own route — with{" "}
+          <span class="grad-text">no solver at inference</span>. It learns the
+          walls and the goal from the picture, then propagates value to navigate,
+          and it generalizes to mazes bigger than it ever trained on. The forward
+          pass is a bit-exact in-browser reimplementation of the SDK.
         </p>
         <div class="mt-4 flex flex-wrap gap-x-5 gap-y-1 text-sm">
           <A href="/docs/brain-composition" class="text-accent">
@@ -1310,8 +1310,9 @@ export default function Play() {
                 </div>
               </div>
               <div class="text-[.72rem] text-mute font-mono mt-1.5 leading-relaxed">
-                Same brain at any size. The retina is resolution-agnostic and the
-                planner is exact, so nothing is retrained.
+                Trained on 9×9, run at any size. The planner generalizes to bigger
+                boards by running more value-iteration rounds — nothing is retrained
+                (solve-rate drops with size, honestly).
               </div>
             </div>
           </div>
@@ -1650,24 +1651,22 @@ export default function Play() {
         <Show when={infoOpen()}>
           <div class="mt-4 grid gap-5 text-sm leading-relaxed text-dim md:grid-cols-2">
             <div>
-              <div class="eyebrow mb-1.5">The solver</div>
-              An 8-region brain (input, attention, output, motor, cerebellum,
-              basal-ganglia, insula, hippocampus) with a visual retina, computing
-              over {brainRef()?.ticks ?? 16} ticks. It reads the raw grid, runs
-              value iteration out from the goal (BFS / Dijkstra on unit costs) to
-              find the optimal path, and adapts its motor readout at inference
-              with a local three-factor rule (no backprop).
+              <div class="eyebrow mb-1.5">The planner</div>
+              A learned Value Iteration Network (Tamar et al., 2016). From the
+              maze image it learns a per-cell reward and a traversability gate
+              (the wall mask), runs K rounds of a learned 3×3 value backup to
+              propagate value across the grid, then reads the decision
+              ego-centrically at the agent's own cell. Nothing about the maze is
+              hand-coded — it figures out walls, goal, and routing itself.
             </div>
             <div>
-              <div class="eyebrow mb-1.5">What learns (and what doesn't)</div>
-              The optimal path is computed by the exact planner, not learned. The
-              only thing that learns is the move-head: a 6→5 readout that starts
-              untrained and learns to predict the optimal move from the agent's
-              local neighbour values. In Explore and Honest modes the agent walks
-              on this readout's own picks; Optimal mode follows the planner. It
-              converges fast because the planner did the hard part, so the readout
-              is mostly learning argmax over the values it is handed. The 9 MB
-              weights are the perception and the visualization only.
+              <div class="eyebrow mb-1.5">Trained, then on its own</div>
+              It was trained offline (supervised, on solver-labelled mazes, like
+              the Sakana CTM) — the answers live in training only. At inference
+              there is no solver: it plans from the picture alone. Because the
+              value propagation is iterative, it generalizes to mazes bigger than
+              it trained on by running more rounds — the VIN signature, and the
+              reason this is planning rather than memorizing.
             </div>
             <div>
               <div class="eyebrow mb-1.5">Vision</div>
@@ -1677,16 +1676,17 @@ export default function Play() {
             </div>
             <div>
               <div class="eyebrow mb-1.5">Drive modes</div>
-              Optimal commits the value-greedy move and always solves. Explore
-              self-drives on its own move-head, takes wrong legal steps, and learns
-              to shorten its path. Honest self-drives with no safety net and can
-              fail.
+              All three follow the learned planner. Optimal commits its move
+              directly. Explore vetoes a wall-hit and nudges out of loops so it
+              always finishes. Honest has no safety net, so on a hard maze it can
+              fail — that's the planner's true solve-rate.
             </div>
             <div>
-              <div class="eyebrow mb-1.5">Signal</div>
-              A scalar that scales each weight update: negative on wall-hits and
-              wasted steps, positive on progress and the goal. It is a learning-rate
-              modulator, not a feeling.
+              <div class="eyebrow mb-1.5">Generalization</div>
+              Trained on 9×9, it solves bigger boards (11×11, 13×13…) by running
+              more value-iteration rounds, no retraining. Solve-rate drops with
+              size, honestly, as the planning gets harder — but it does plan, not
+              memorize.
             </div>
             <div>
               <div class="eyebrow mb-1.5">Engine</div>

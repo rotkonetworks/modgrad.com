@@ -298,36 +298,14 @@ export default function PlasticityPanel(props: PlasticityPanelProps) {
       `}</style>
 
       <div class="flex items-center justify-between mb-3">
-        <div class="eyebrow">Plasticity</div>
-        <span
-          class="tag"
-          classList={{ "tag-live": props.enabled }}
-        >
-          {props.enabled ? "learning" : "frozen"}
-        </span>
+        <div class="eyebrow">Planner</div>
+        <span class="tag tag-live">trained · live</span>
       </div>
 
-      {/* ── live metrics: values, not prose ── */}
-      <div class="flex flex-wrap items-center gap-x-4 gap-y-1.5 mb-4 font-mono text-xs tabular-nums">
-        <span class="inline-flex items-center gap-1.5" title={pulse().label}>
-          <span
-            class="pp-live inline-block w-2 h-2 rounded-full shrink-0"
-            style={{ background: PULSE_STYLE[pulse().cls].fg }}
-          />
-          <span class="text-dim">signal</span>
-          <span style={{ color: PULSE_STYLE[pulse().cls].fg }}>
-            {props.signal >= 0 ? "+" : ""}
-            {props.signal.toFixed(2)}
-          </span>
-        </span>
-        <span>
-          <span class="text-dim">Δw</span> {props.plasticDelta.toFixed(3)}
-        </span>
-        <Show when={props.lr != null}>
-          <span title="three-factor learning rate θ">
-            <span class="text-dim">lr</span> {props.lr!.toFixed(3)}
-          </span>
-        </Show>
+      {/* ── one honest line: trained offline, planning live, no solver ── */}
+      <div class="text-[.72rem] text-mute font-mono mb-4 leading-relaxed">
+        Trained offline; planning live. No solver in the loop — these are its
+        live accuracy against the (hidden) optimal route.
       </div>
 
       {/* ── stat tiles ── */}
@@ -351,7 +329,7 @@ export default function PlasticityPanel(props: PlasticityPanelProps) {
       <Show when={lossHist().length > 0}>
         <div class="mb-3">
           <div class="flex items-center justify-between mb-1 font-mono text-[.72rem]">
-            <span class="text-dim">loss</span>
+            <span class="text-dim">gap from optimal</span>
             <span class="text-mute tabular-nums">{currentLoss().toFixed(3)}</span>
           </div>
           <div class="rounded-lg overflow-hidden" style={{ background: "var(--bg-2)", height: "40px" }}>
@@ -391,15 +369,6 @@ export default function PlasticityPanel(props: PlasticityPanelProps) {
       </div>
 
       {/* ── reset ── */}
-      <div class="pt-3 border-t border-line">
-        <button
-          class="btn"
-          onClick={handleReset}
-          title="revert the readout to the frozen weights (Restart / New maze keep what was learned)"
-        >
-          Reset learning
-        </button>
-      </div>
     </div>
   );
 }

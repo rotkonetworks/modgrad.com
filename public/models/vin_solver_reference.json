@@ -1,0 +1,13 @@
+{
+  "dir_order": "U,D,L,R",
+  "final_solve_9x9": 0.800000011920929,
+  "highway_gate": true,
+  "iters": 20,
+  "max_iters": 20,
+  "move_acc": 0.9869999885559082,
+  "n_dirs": 4,
+  "raw_dim": 3,
+  "softmax_temp": 0.5,
+  "token_encoding": "per-cell [is_open, is_goal, bias=1.0]",
+  "value_dim": 16
+}

@@ -1390,6 +1390,277 @@ fn vin_softmax(logits: &[f32]) -> Vec<f32> {
     exps.into_iter().map(|e| e / sum).collect()
 }
 
+// ════════════════════════════════════════════════════════════════════════
+//  LEARNED Value-Iteration-Network forward pass (ported VERBATIM from the
+//  SDK `crates/modgrad-ctm/src/vin.rs`). This replaces the hardcoded
+//  value-iteration "cheat" (`VinReadout` above) with the TRAINED planner:
+//  every cell's reward / traversability gate / value features are LEARNED
+//  projections of the per-cell token, and value propagates via the learned
+//  highway-gated soft Bellman backup. Deserialized from the SDK's serde JSON
+//  export of a `VinReadout` (field names match the SDK exactly). Forward only.
+//
+//  IMPORTANT: the f32 op order here mirrors the SDK so the forward is
+//  bit-identical (verified by `learned_vin_golden_matches_sdk`).
+// ════════════════════════════════════════════════════════════════════════
+
+/// Neighbour offsets in canonical direction order: Up, Down, Left, Right.
+const LEARNED_DIR_OFFSETS: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+
+#[inline]
+fn learned_sigmoid(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
+}
+
+/// Dense linear layer matching the SDK's serde shape. `in_dim`/`out_dim` are
+/// present in the JSON but unused here (derived from `weight`/`bias`); serde
+/// ignores them. `forward` is byte-for-byte the SDK's
+/// `y[o] = bias[o] + Σ_i weight[o*in+i] * x[i]`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LearnedLinear {
+    pub weight: Vec<f32>,
+    pub bias: Vec<f32>,
+}
+
+impl LearnedLinear {
+    #[inline]
+    fn out_dim(&self) -> usize {
+        self.bias.len()
+    }
+    #[inline]
+    fn in_dim(&self) -> usize {
+        if self.bias.is_empty() {
+            0
+        } else {
+            self.weight.len() / self.bias.len()
+        }
+    }
+    fn forward(&self, x: &[f32]) -> Vec<f32> {
+        let out_dim = self.out_dim();
+        let in_dim = self.in_dim();
+        let mut y = vec![0.0f32; out_dim];
+        for o in 0..out_dim {
+            let mut acc = self.bias[o];
+            let row = o * in_dim;
+            for i in 0..in_dim {
+                acc += self.weight[row + i] * x[i];
+            }
+            y[o] = acc;
+        }
+        y
+    }
+}
+
+/// VIN configuration. Field names match the SDK's `VinConfig` serde output.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LearnedVinConfig {
+    pub value_dim: usize,
+    pub iters: usize,
+    pub max_iters: usize,
+    pub softmax_temp: f32,
+    pub highway_gate: bool,
+    #[allow(dead_code)]
+    pub n_dirs: usize,
+}
+
+/// Learned VIN readout deserialized from the SDK's `VinReadout` JSON export.
+/// Field names (and order) match the SDK serde output exactly:
+/// `config, raw_dim, reward_proj, gate_proj, value_proj, agent_proj,
+///  highway_proj, move_head`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LearnedVin {
+    pub config: LearnedVinConfig,
+    pub raw_dim: usize,
+    pub reward_proj: LearnedLinear,
+    pub gate_proj: LearnedLinear,
+    pub value_proj: LearnedLinear,
+    pub agent_proj: LearnedLinear,
+    pub highway_proj: LearnedLinear,
+    pub move_head: LearnedLinear,
+}
+
+impl LearnedVin {
+    #[inline]
+    fn effective_iters(&self) -> usize {
+        self.config.iters.min(self.config.max_iters.max(1))
+    }
+
+    /// FORWARD ONLY — ported VERBATIM from SDK `VinReadout::forward`. Runs the
+    /// learned value propagation over the grid and returns the `n_dirs` move
+    /// logits read ego-centrically at `agent`. `tokens` is flat
+    /// `[n_cells × raw_dim]`, row-major; `agent` is an explicit `(row, col)`.
+    pub fn forward(
+        &self,
+        tokens: &[f32],
+        grid_h: usize,
+        grid_w: usize,
+        agent: (usize, usize),
+    ) -> Vec<f32> {
+        let n_cells = grid_h * grid_w;
+        let v = self.config.value_dim.max(1);
+
+        // ── 1. Per-cell projections: reward, traversability gate, value ──
+        let mut reward = vec![0.0f32; n_cells];
+        let mut gate = vec![0.0f32; n_cells];
+        let mut value = vec![0.0f32; n_cells * v];
+
+        for cell in 0..n_cells {
+            let tok = &tokens[cell * self.raw_dim..(cell + 1) * self.raw_dim];
+            reward[cell] = self.reward_proj.forward(tok)[0];
+            gate[cell] = learned_sigmoid(self.gate_proj.forward(tok)[0]);
+            let vproj = self.value_proj.forward(tok);
+            value[cell * v..(cell + 1) * v].copy_from_slice(&vproj);
+        }
+
+        let value_init = value.clone();
+
+        // ── 2. K capped Bellman backups over the 4-neighbour grid ────────
+        let iters = self.effective_iters();
+        let mut next = value.clone();
+        for _ in 0..iters {
+            for r in 0..grid_h {
+                for c in 0..grid_w {
+                    let cell = r * grid_w + c;
+                    let cand = self.backup_cell(
+                        r, c, grid_h, grid_w, &value, &gate, reward[cell], v,
+                    );
+                    let dst = &mut next[cell * v..(cell + 1) * v];
+                    if self.config.highway_gate {
+                        let prev = &value[cell * v..(cell + 1) * v];
+                        let mut hin = Vec::with_capacity(2 * v);
+                        hin.extend_from_slice(prev);
+                        hin.extend_from_slice(&cand);
+                        let g = self.highway_proj.forward(&hin);
+                        for k in 0..v {
+                            let gk = learned_sigmoid(g[k]);
+                            dst[k] = gk * cand[k] + (1.0 - gk) * prev[k];
+                        }
+                    } else {
+                        dst.copy_from_slice(&cand);
+                    }
+                }
+            }
+            std::mem::swap(&mut value, &mut next);
+        }
+
+        // ── 3. Ego-centric readout at the agent cell + move head ─────────
+        let (ar, ac) = agent;
+        let readout =
+            self.gather_agent_readout(ar, ac, grid_h, grid_w, &value, &value_init, &gate, v);
+        self.move_head.forward(&readout)
+    }
+
+    /// One cell's Bellman backup — ported VERBATIM from SDK.
+    #[allow(clippy::too_many_arguments)]
+    fn backup_cell(
+        &self,
+        r: usize,
+        c: usize,
+        grid_h: usize,
+        grid_w: usize,
+        value: &[f32],
+        gate: &[f32],
+        local_reward: f32,
+        v: usize,
+    ) -> Vec<f32> {
+        let mut nbr_idx: Vec<usize> = Vec::with_capacity(4);
+        let mut nbr_pref: Vec<f32> = Vec::with_capacity(4);
+        for (dr, dc) in LEARNED_DIR_OFFSETS {
+            let nr = r as i32 + dr;
+            let nc = c as i32 + dc;
+            if nr < 0 || nc < 0 || nr >= grid_h as i32 || nc >= grid_w as i32 {
+                continue;
+            }
+            let ncell = nr as usize * grid_w + nc as usize;
+            let g = gate[ncell];
+            let mag: f32 = value[ncell * v..(ncell + 1) * v]
+                .iter()
+                .map(|x| x.abs())
+                .sum::<f32>();
+            nbr_idx.push(ncell);
+            nbr_pref.push(g * mag);
+        }
+
+        let mut out = vec![0.0f32; v];
+        if nbr_idx.is_empty() {
+            for k in 0..v {
+                out[k] = local_reward;
+            }
+            return out;
+        }
+
+        if self.config.softmax_temp <= 0.0 {
+            let mut best = 0usize;
+            let mut best_p = f32::NEG_INFINITY;
+            for (i, &p) in nbr_pref.iter().enumerate() {
+                if p > best_p {
+                    best_p = p;
+                    best = i;
+                }
+            }
+            let ncell = nbr_idx[best];
+            let g = gate[ncell];
+            for k in 0..v {
+                out[k] = local_reward + g * value[ncell * v + k];
+            }
+        } else {
+            let t = self.config.softmax_temp;
+            let maxp = nbr_pref.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let mut wsum = 0.0f32;
+            let mut w = vec![0.0f32; nbr_idx.len()];
+            for (i, &p) in nbr_pref.iter().enumerate() {
+                let e = ((p - maxp) / t).exp();
+                w[i] = e;
+                wsum += e;
+            }
+            let inv = 1.0 / wsum.max(1e-8);
+            for k in 0..v {
+                let mut acc = 0.0f32;
+                for (i, &ncell) in nbr_idx.iter().enumerate() {
+                    let g = gate[ncell];
+                    acc += w[i] * inv * g * value[ncell * v + k];
+                }
+                out[k] = local_reward + acc;
+            }
+        }
+        out
+    }
+
+    /// Gather the agent-cell ego-centric readout — ported VERBATIM from SDK.
+    /// Layout: `[value_init[acell] | value[acell] | 4 nbrs gate*value]`,
+    /// zero block for off-grid neighbours. Length == `value_dim * 6`.
+    #[allow(clippy::too_many_arguments)]
+    fn gather_agent_readout(
+        &self,
+        ar: usize,
+        ac: usize,
+        grid_h: usize,
+        grid_w: usize,
+        value: &[f32],
+        value_init: &[f32],
+        gate: &[f32],
+        v: usize,
+    ) -> Vec<f32> {
+        let mut out = Vec::with_capacity(v * 6);
+        let acell = ar * grid_w + ac;
+        out.extend_from_slice(&value_init[acell * v..(acell + 1) * v]);
+        out.extend_from_slice(&value[acell * v..(acell + 1) * v]);
+        for (dr, dc) in LEARNED_DIR_OFFSETS {
+            let nr = ar as i32 + dr;
+            let nc = ac as i32 + dc;
+            if nr < 0 || nc < 0 || nr >= grid_h as i32 || nc >= grid_w as i32 {
+                out.extend(std::iter::repeat(0.0f32).take(v));
+                continue;
+            }
+            let ncell = nr as usize * grid_w + nc as usize;
+            let g = gate[ncell];
+            for k in 0..v {
+                out.push(g * value[ncell * v + k]);
+            }
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod vin_tests {
     use super::*;
@@ -1731,6 +2002,45 @@ mod vin_tests {
             "agreement should improve by >0.30 (first {first:.3} → last {last:.3})"
         );
     }
+
+    /// GOLDEN-VECTOR BIT-EXACT GATE. The JSON + tokens + move_logits below are
+    /// produced by the SDK's `vin::tests::print_golden_vector`
+    /// (`crates/modgrad-ctm/src/vin.rs`): a deterministic `VinReadout`
+    /// (value_dim=4, iters=5, temp=0.5, highway=true, n_dirs=4, raw_dim=3) on a
+    /// 3×3 grid, agent (1,1), with `weight[i]=((i*2654435761)%1000)/1000-0.5`
+    /// (bias likewise) and `tokens[i]=((i*40503)%100)/100`. We deserialize the
+    /// SAME JSON into `LearnedVin`, run the ported forward, and assert each move
+    /// logit matches the SDK golden to <1e-5. This proves the web port
+    /// reproduces the SDK learned forward exactly.
+    #[test]
+    fn learned_vin_golden_matches_sdk() {
+        const GOLDEN_JSON: &str = r#"{"config":{"value_dim":4,"iters":5,"max_iters":20,"softmax_temp":0.5,"highway_gate":true,"n_dirs":4},"raw_dim":3,"reward_proj":{"weight":[-0.5,0.26099998,0.022000015],"bias":[-0.5],"in_dim":3,"out_dim":1},"gate_proj":{"weight":[-0.5,0.26099998,0.022000015],"bias":[-0.5],"in_dim":3,"out_dim":1},"value_proj":{"weight":[-0.5,0.26099998,0.022000015,-0.21700001,-0.456,0.305,0.065999985,-0.17300001,-0.412,0.34899998,0.110000014,-0.12900001],"bias":[-0.5,0.26099998,0.022000015,-0.21700001],"in_dim":3,"out_dim":4},"agent_proj":{"weight":[-0.5,0.26099998,0.022000015],"bias":[-0.5],"in_dim":3,"out_dim":1},"highway_proj":{"weight":[-0.5,0.26099998,0.022000015,-0.21700001,-0.456,0.305,0.065999985,-0.17300001,-0.412,0.34899998,0.110000014,-0.12900001,-0.368,0.393,0.15399998,-0.08500001,-0.324,0.43699998,0.19800001,-0.04100001,-0.28,0.481,0.24199998,0.003000021,-0.236,-0.475,0.286,0.04699999,-0.192,-0.431,0.32999998,0.09100002],"bias":[-0.5,0.26099998,0.022000015,-0.21700001],"in_dim":8,"out_dim":4},"move_head":{"weight":[-0.5,0.26099998,0.022000015,-0.21700001,-0.456,0.305,0.065999985,-0.17300001,-0.412,0.34899998,0.110000014,-0.12900001,-0.368,0.393,0.15399998,-0.08500001,-0.324,0.43699998,0.19800001,-0.04100001,-0.28,0.481,0.24199998,0.003000021,-0.236,-0.475,0.286,0.04699999,-0.192,-0.431,0.32999998,0.09100002,-0.148,-0.387,0.374,0.13499999,-0.104,-0.343,0.41799998,0.17900002,-0.060000002,-0.299,0.462,0.22299999,-0.016000003,-0.255,-0.494,0.26700002,0.027999997,-0.211,-0.45,0.311,0.07200003,-0.167,-0.40600002,0.35500002,0.116,-0.122999996,-0.362,0.399,0.16000003,-0.078999996,-0.31800002,0.44300002,0.204,-0.034999996,-0.274,0.487,0.24800003,0.009000003,-0.22999999,-0.469,0.292,0.052999973,-0.18599999,-0.425,0.33600003,0.097,-0.14199999,-0.38099998,0.38,0.14099997,-0.09799999,-0.337,0.42400002,0.185,-0.05399999,-0.29299998,0.468,0.22899997,-0.00999999,-0.24900001,-0.488,0.273,0.03399998,-0.20500001],"bias":[-0.5,0.26099998,0.022000015,-0.21700001],"in_dim":24,"out_dim":4}}"#;
+
+        // tokens[i] = ((i*40503)%100)/100, 3x3 grid × raw_dim 3 = 27 elems.
+        let tokens: Vec<f32> = (0..27)
+            .map(|i| ((i as u64).wrapping_mul(40503) % 100) as f32 / 100.0)
+            .collect();
+
+        // SDK golden move_logits for grid 3×3, agent (1,1).
+        const GOLDEN_LOGITS: [f32; 4] = [-0.10739076, 0.49520034, 0.04578919, -0.38186702];
+
+        let vin: LearnedVin = serde_json::from_str(GOLDEN_JSON).expect("deserialize LearnedVin");
+        let logits = vin.forward(&tokens, 3, 3, (1, 1));
+        assert_eq!(logits.len(), 4);
+
+        let mut max_abs_diff = 0.0f32;
+        for (i, (&got, &want)) in logits.iter().zip(GOLDEN_LOGITS.iter()).enumerate() {
+            let d = (got - want).abs();
+            if d > max_abs_diff {
+                max_abs_diff = d;
+            }
+            assert!(
+                d < 1e-5,
+                "move_logit[{i}] web={got} sdk={want} diff={d:e} exceeds 1e-5"
+            );
+        }
+        println!("learned_vin golden: max abs diff = {max_abs_diff:e}");
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1769,6 +2079,12 @@ mod wasm_bindings {
         static VIN: RefCell<Option<VinReadout>> = const { RefCell::new(None) };
         static VIN_LAST_PRE: RefCell<Option<Vec<f32>>> = const { RefCell::new(None) };
         static VIN_LAST_LOGITS: RefCell<Option<Vec<f32>>> = const { RefCell::new(None) };
+
+        // ── LEARNED VIN (trained planner) ────────────────────────────────
+        // The bit-exact port of the SDK `VinReadout::forward`, deserialized
+        // from the SDK's serde JSON export via `load_learned_vin` and run by
+        // `learned_vin_forward`. Distinct from the hardcoded `VIN` above.
+        static LEARNED_VIN: RefCell<Option<super::LearnedVin>> = const { RefCell::new(None) };
     }
 
     /// Stash the readout pre/logits from a finished forward for plasticity.
@@ -2261,5 +2577,39 @@ mod wasm_bindings {
         });
         VIN_LAST_PRE.with(|p| *p.borrow_mut() = None);
         VIN_LAST_LOGITS.with(|l| *l.borrow_mut() = None);
+    }
+
+    /// Load the TRAINED VIN planner from the SDK's serde JSON export of a
+    /// `VinReadout` and stash it for `learned_vin_forward`. Field names match
+    /// the SDK exactly (`config, raw_dim, reward_proj, gate_proj, value_proj,
+    /// agent_proj, highway_proj, move_head`). This is the real learned forward
+    /// — distinct from the hardcoded `vin_forward` value-iteration path.
+    #[wasm_bindgen]
+    pub fn load_learned_vin(json: &str) -> Result<(), JsValue> {
+        let vin: super::LearnedVin = serde_json::from_str(json)
+            .map_err(|e| JsValue::from_str(&format!("load_learned_vin: {e}")))?;
+        LEARNED_VIN.with(|v| *v.borrow_mut() = Some(vin));
+        Ok(())
+    }
+
+    /// Run the loaded learned VIN forward over `tokens` (flat
+    /// `[grid_h*grid_w × raw_dim]`, row-major) with the agent at
+    /// `(agent_r, agent_c)`. Returns the `n_dirs` move logits. Errors if no
+    /// learned VIN has been loaded via `load_learned_vin`.
+    #[wasm_bindgen]
+    pub fn learned_vin_forward(
+        tokens: &[f32],
+        grid_h: usize,
+        grid_w: usize,
+        agent_r: usize,
+        agent_c: usize,
+    ) -> Result<Vec<f32>, JsValue> {
+        LEARNED_VIN.with(|v| {
+            let vref = v.borrow();
+            let vin = vref.as_ref().ok_or_else(|| {
+                JsValue::from_str("learned_vin_forward: no learned VIN loaded — call load_learned_vin first")
+            })?;
+            Ok(vin.forward(tokens, grid_h, grid_w, (agent_r, agent_c)))
+        })
     }
 }

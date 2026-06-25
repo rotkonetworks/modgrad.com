@@ -172,6 +172,30 @@ export function encode_maze_js(grid, size, agent_r, agent_c, goal_r, goal_c) {
 }
 
 /**
+ * Run the loaded learned VIN forward over `tokens` (flat
+ * `[grid_h*grid_w × raw_dim]`, row-major) with the agent at
+ * `(agent_r, agent_c)`. Returns the `n_dirs` move logits. Errors if no
+ * learned VIN has been loaded via `load_learned_vin`.
+ * @param {Float32Array} tokens
+ * @param {number} grid_h
+ * @param {number} grid_w
+ * @param {number} agent_r
+ * @param {number} agent_c
+ * @returns {Float32Array}
+ */
+export function learned_vin_forward(tokens, grid_h, grid_w, agent_r, agent_c) {
+    const ptr0 = passArrayF32ToWasm0(tokens, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.learned_vin_forward(ptr0, len0, grid_h, grid_w, agent_r, agent_c);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v2 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+    return v2;
+}
+
+/**
  * Parse `brain_weights.json` and stash the regional weights (and the
  * retina, if present) for subsequent `run_brain`s.
  *
@@ -185,6 +209,23 @@ export function load_brain_weights(json) {
     const ptr0 = passStringToWasm0(json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len0 = WASM_VECTOR_LEN;
     const ret = wasm.load_brain_weights(ptr0, len0);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * Load the TRAINED VIN planner from the SDK's serde JSON export of a
+ * `VinReadout` and stash it for `learned_vin_forward`. Field names match
+ * the SDK exactly (`config, raw_dim, reward_proj, gate_proj, value_proj,
+ * agent_proj, highway_proj, move_head`). This is the real learned forward
+ * — distinct from the hardcoded `vin_forward` value-iteration path.
+ * @param {string} json
+ */
+export function load_learned_vin(json) {
+    const ptr0 = passStringToWasm0(json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.load_learned_vin(ptr0, len0);
     if (ret[1]) {
         throw takeFromExternrefTable0(ret[0]);
     }

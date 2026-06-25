@@ -68,7 +68,18 @@ type StepMsg = {
     verdict: string;
     reached: boolean;
   } | null;
+  // ── drive-mode / graded neuromodulation (Part A) ──
+  neuromod?: "dopamine" | "reward" | "disappointment" | "pain";
+  efficiency?: number; // live steps ÷ shortest (→1.0 as it learns)
+  efficiencyFinal?: number; // per-solve efficiency point (only on reached)
+  shortest?: number; // BFS shortest-path length from the episode start
+  stepsTaken?: number; // steps taken in this episode so far
+  vetoed?: boolean; // the self-driven move hit a wall/edge → vetoed + PAIN
+  lost?: boolean; // honest mode: episode exceeded budget without solving
 };
+
+// the three modular drive-modes (a UI toggle switches them live).
+type DriveMode = "optimal" | "explore" | "honest";
 // structure of the 8-region brain, read from brain_solver_reference.json
 type BrainConn = { from: number[]; to: number; receives_observation: boolean };
 type BrainRef = {
@@ -92,7 +103,11 @@ type Status = "loading" | "ready" | "error";
 type RunState = "idle" | "thinking" | "solved" | "stuck";
 
 const TICK_MS = 95; // pace of the "thinking" animation
-const MAX_STEPS = 30; // safety cap
+const MAX_STEPS = 160; // safety backstop. 11×11 paths can be long, and self-drive
+// wanders up to ~3× shortest before the worker nudges/loses — so give it room.
+// the board the worker runs on. MUST stay ODD (recursive-backtracker mazes need
+// an odd side). reference.size (=9) is kept only for the "trained on 9×9" copy.
+const PLAY_SIZE = 11;
 // UP=0 DOWN=1 LEFT=2 RIGHT=3 — [dr, dc], matches the worker's DELTA
 const DIR_DELTA: [number, number][] = [
   [-1, 0],
@@ -158,7 +173,7 @@ export default function Play() {
   useDocMeta(() => ({
     title: "Watch it think",
     description:
-      "Watch a real modgrad 8-region brain see, solve, and keep learning in your browser. It reads the raw 9×9 maze through a visual retina, floods value from the goal to walk the optimal path, and adapts its readout at inference with a three-factor rule — no backprop. Run client-side by a bit-exact wasm reimplementation of the modgrad SDK.",
+      "A real modgrad 8-region brain solving mazes in your browser. It reads the grid through a visual retina, floods value from the goal to walk the optimal path, and learns its motor readout at inference with a local three-factor rule (no backprop). Runs client-side as a bit-exact wasm reimplementation of the modgrad SDK.",
     path: "/play",
   }));
 
@@ -211,8 +226,22 @@ export default function Play() {
   const [lr, setLr] = createSignal<number | undefined>(undefined);
   const [episodic, setEpisodic] = createSignal<StepMsg["episodic"] | null>(null);
 
-  // dimensions from the reference; defaults avoid layout shift before load
-  let SIZE = 9;
+  // ── drive-mode + graded neuromodulation + efficiency (Part A) ──
+  const [driveMode, setDriveMode] = createSignal<DriveMode>("explore");
+  // user-settable board size (odd). The retina is arbitrary-resolution + the VIN
+  // is size-agnostic, so this needs no retrain — just a fresh maze at that size.
+  const [mazeSize, setMazeSize] = createSignal<number>(PLAY_SIZE);
+  const MAZE_SIZES = [9, 11, 13, 15, 21] as const;
+  // the consolidated factual reference (opened from the 3D panel's "what am I
+  // seeing?" link). Keeps the live panels value-only; the prose lives here.
+  const [infoOpen, setInfoOpen] = createSignal(false);
+  const [neuromod, setNeuromod] = createSignal<StepMsg["neuromod"]>(undefined);
+  const [efficiency, setEfficiency] = createSignal<number | undefined>(undefined);
+  const [efficiencyFinal, setEfficiencyFinal] = createSignal<number | undefined>(undefined);
+
+  // the board the maze + agent are drawn at — the worker runs on PLAY_SIZE (11),
+  // so the page must render at the same resolution (NOT reference.size=9).
+  let SIZE = PLAY_SIZE;
 
   const maze = () => currentMaze();
 
@@ -232,7 +261,7 @@ export default function Play() {
       setErrMsg("Could not load the brain reference.");
       return;
     }
-    SIZE = reference.size;
+    SIZE = PLAY_SIZE; // the worker runs on the 11×11 board (reference.size=9 is copy-only)
     setBrainRef(reference); // also drives the 3D viz structure
 
     try {
@@ -280,7 +309,8 @@ export default function Play() {
       worker.postMessage({
         type: "init",
         brainWeights: br,
-        size: reference.size,
+        size: PLAY_SIZE, // run on the 11×11 board (the engine retina is arbitrary-res)
+        mode: driveMode(), // the starting drive-mode (switchable live via setMode)
       });
     } catch (e) {
       setStatus("error");
@@ -306,6 +336,9 @@ export default function Play() {
 
   // ── solve loop ──────────────────────────────────────────────────
   function loadMaze(m: Maze) {
+    // the worker may have changed the board size — follow it from the grid so the
+    // canvas always draws at the maze's true dimensions.
+    SIZE = Math.round(Math.sqrt(m.grid.length)) || SIZE;
     batch(() => {
       setCurrentMaze(m);
       setAgent([m.start[0], m.start[1]]);
@@ -324,7 +357,40 @@ export default function Play() {
       setPlasticDelta(0);
       setSignal(0);
       setEpisodic(null);
+      setNeuromod(undefined);
+      setEfficiency(undefined);
     });
+  }
+
+  // ── drive-mode (Part A) ──
+  // Switch how the agent decides its next move, live (no reload): tell the
+  // worker, which flips a single parameter gating the decided move + completion.
+  function changeMode(mode: DriveMode) {
+    if (mode === driveMode()) return;
+    setDriveMode(mode);
+    worker?.postMessage({ type: "setMode", mode });
+  }
+  // one-line description of the active mode, for the toggle caption.
+  const modeDesc = (): string => {
+    switch (driveMode()) {
+      case "optimal":
+        return "Commits the value-greedy move. Always solves; the move-head predicts and learns alongside.";
+      case "explore":
+        return "Self-drives on its own move-head and always finishes. Wall-hits are vetoed; a nudge breaks loops.";
+      case "honest":
+        return "Self-drives with no safety net, so it can fail. Solve-rate climbs as it learns.";
+    }
+  };
+
+  // ── board size (live) ──
+  // Resize the maze with no reload / no retrain — the worker resizes its buffers
+  // and hands back a fresh maze at the new size; loadMaze follows the dimensions.
+  function changeSize(size: number) {
+    if (size === mazeSize() || status() !== "ready") return;
+    setMazeSize(size);
+    pause();
+    setGenerating(true);
+    worker?.postMessage({ type: "setSize", size });
   }
 
   // ask the worker to invent a fresh maze the brain can actually solve
@@ -379,6 +445,10 @@ export default function Play() {
       setLoss(msg.loss);
       setLr(msg.lr);
       setEpisodic(msg.episodic ?? null);
+      // drive-mode signals (Part A) — graded tier + efficiency (live + per-solve)
+      setNeuromod(msg.neuromod);
+      setEfficiency(msg.efficiency);
+      if (msg.efficiencyFinal != null) setEfficiencyFinal(msg.efficiencyFinal);
     });
 
     if (reduced || nTicks === 0) {
@@ -414,6 +484,18 @@ export default function Play() {
       // perpetual demo: reached the goal → pause to celebrate, then a fresh maze
       if (looping) {
         playTimer = window.setTimeout(() => requestNewMaze(), TICK_MS * 14);
+      } else {
+        setPlaying(false);
+      }
+      return;
+    }
+    // honest mode: the episode gave up (over budget, no nudge) → mark it lost and
+    // move on to a fresh maze. Solve-rate climbs as the move-head learns.
+    if (msg.lost || msg.done) {
+      const looping = playing();
+      setRunState("stuck");
+      if (looping) {
+        playTimer = window.setTimeout(() => requestNewMaze(), TICK_MS * 8);
       } else {
         setPlaying(false);
       }
@@ -1010,14 +1092,12 @@ export default function Play() {
         </h1>
         <p class="mt-5 text-dim text-[1.05rem] max-w-[60ch] leading-relaxed">
           A real modgrad{" "}
-          <span class="grad-text">8-region brain</span> sees, solves, and{" "}
-          <span class="grad-text">keeps learning</span> — live in your browser.
-          It reads the raw 9×9 maze through a visual retina, floods value out
-          from the goal, and walks the optimal path. The motor region predicts
-          each step and adapts as it goes: a three-factor rule updates the
-          readout at inference — pain on wall-hits, reward at the goal, no
-          backprop. Forward pass: a bit-exact in-browser reimplementation of the
-          SDK.
+          <span class="grad-text">8-region brain</span> solving mazes live in
+          your browser. It reads the grid through a visual retina, floods value
+          out from the goal, and walks the optimal path. Its motor readout starts
+          untrained and learns at inference from a local three-factor rule: no
+          backprop, no optimizer. The forward pass is a bit-exact in-browser
+          reimplementation of the SDK.
         </p>
         <div class="mt-4 flex flex-wrap gap-x-5 gap-y-1 text-sm">
           <A href="/docs/brain-composition" class="text-accent">
@@ -1163,12 +1243,74 @@ export default function Play() {
               </button>
             </div>
 
-            <div class="flex items-center justify-between mt-4 pt-4 border-t border-line">
-              <div class="text-sm text-dim">
-                The agent walks the goal path; the brain predicts each step.
+            {/* ── drive-mode toggle (Part A): segmented control ── */}
+            <div class="mt-4 pt-4 border-t border-line">
+              <div class="flex items-center justify-between mb-2">
+                <div class="eyebrow">Drive mode</div>
+                <div class="font-mono text-xs text-mute tabular-nums">
+                  maze #{Math.max(1, mazeNum())} · step {stepCount()}
+                </div>
               </div>
-              <div class="font-mono text-xs text-mute tabular-nums">
-                maze #{Math.max(1, mazeNum())} · step {stepCount()}
+              <div
+                class="flex rounded-lg overflow-hidden border border-line"
+                role="group"
+                aria-label="how the agent decides its next move"
+              >
+                <For each={["optimal", "explore", "honest"] as DriveMode[]}>
+                  {(m) => {
+                    const active = () => driveMode() === m;
+                    return (
+                      <button
+                        class="flex-1 text-xs font-mono px-2 py-1.5 capitalize transition-colors"
+                        style={{
+                          background: active() ? "var(--accent)" : "transparent",
+                          color: active() ? "#fff" : "var(--text-mute)",
+                        }}
+                        onClick={() => changeMode(m)}
+                        disabled={status() !== "ready"}
+                        aria-pressed={active()}
+                      >
+                        {m}
+                      </button>
+                    );
+                  }}
+                </For>
+              </div>
+              <div class="text-sm text-dim mt-2 leading-relaxed">{modeDesc()}</div>
+
+              {/* ── board-size selector: arbitrary-resolution retina, no retrain ── */}
+              <div class="flex items-center justify-between mt-4">
+                <div class="eyebrow">Maze size</div>
+                <div
+                  class="flex rounded-lg overflow-hidden border border-line"
+                  role="group"
+                  aria-label="board size"
+                >
+                  <For each={MAZE_SIZES}>
+                    {(s) => {
+                      const active = () => mazeSize() === s;
+                      return (
+                        <button
+                          class="text-xs font-mono px-2.5 py-1 tabular-nums transition-colors"
+                          style={{
+                            background: active() ? "var(--accent)" : "transparent",
+                            color: active() ? "#fff" : "var(--text-mute)",
+                          }}
+                          onClick={() => changeSize(s)}
+                          disabled={status() !== "ready"}
+                          aria-pressed={active()}
+                          title={`${s}×${s} board`}
+                        >
+                          {s}
+                        </button>
+                      );
+                    }}
+                  </For>
+                </div>
+              </div>
+              <div class="text-[.72rem] text-mute font-mono mt-1.5 leading-relaxed">
+                Same brain at any size. The retina is resolution-agnostic and the
+                planner is exact, so nothing is retrained.
               </div>
             </div>
           </div>
@@ -1295,13 +1437,16 @@ export default function Play() {
           </div>
 
           <p class="text-dim text-sm leading-relaxed mb-4">
-            This is the model thinking. Each dot is a neuron, coloured by region;
-            lines are the connectome, lit when two regions fire together. The cyan
-            grids are the visual cortex — the framed image is what it sees, then
-            retina → V1 → V2 → V4 feed the input region.{" "}
-            <A href="/docs/brain-composition" class="text-accent whitespace-nowrap">
-              how it works →
-            </A>
+            Each dot is a neuron coloured by region; lines are connectome edges,
+            lit when two regions co-fire. The cyan grids are the retina → V1 → V2
+            → V4 feature maps.{" "}
+            <button
+              type="button"
+              class="text-accent whitespace-nowrap"
+              onClick={() => setInfoOpen(true)}
+            >
+              what am I seeing? →
+            </button>
           </p>
 
           <div
@@ -1464,11 +1609,14 @@ export default function Play() {
           <PlasticityPanel
             enabled={plasticityAvailable()}
             signal={signal()}
+            neuromod={neuromod()}
             plasticDelta={plasticDelta()}
             verdict={verdict()}
             reached={reachedNow()}
             loss={loss()}
             lr={lr()}
+            efficiency={efficiency()}
+            efficiencyFinal={efficiencyFinal()}
             onReset={resetPlasticity}
           />
         </Show>
@@ -1479,16 +1627,70 @@ export default function Play() {
         </Show>
       </div>
 
-      {/* ── footnote ──────────────────────────────────── */}
-      <p class="text-mute text-xs mt-8 max-w-[70ch] leading-relaxed font-mono">
-        Solver: an 8-region brain (input · attention · output · motor · cerebellum
-        · basal-ganglia · insula · hippocampus) with a visual retina, computing over{" "}
-        {brainRef()?.ticks ?? 16} ticks. It reads the raw 9×9 grid, runs value
-        iteration out from the goal to find the optimal path, and adapts its motor
-        readout at inference with a three-factor rule (no backprop). The browser
-        engine reimplements modgrad's forward pass — bit-exact against the SDK, not
-        the SDK itself on wasm (yet). Loads only here.
-      </p>
+      {/* ── info: the factual reference, consolidated (no marketing) ── */}
+      <div class="card mt-8">
+        <button
+          type="button"
+          class="flex items-center justify-between w-full text-left"
+          onClick={() => setInfoOpen((v) => !v)}
+          aria-expanded={infoOpen()}
+        >
+          <div class="eyebrow flex items-center gap-1.5">
+            <span
+              class="inline-block transition-transform"
+              style={{ transform: infoOpen() ? "rotate(90deg)" : "none" }}
+            >
+              ▸
+            </span>
+            Info
+          </div>
+          <span class="font-mono text-xs text-mute">how this works</span>
+        </button>
+        <Show when={infoOpen()}>
+          <div class="mt-4 grid gap-5 text-sm leading-relaxed text-dim md:grid-cols-2">
+            <div>
+              <div class="eyebrow mb-1.5">The solver</div>
+              An 8-region brain (input, attention, output, motor, cerebellum,
+              basal-ganglia, insula, hippocampus) with a visual retina, computing
+              over {brainRef()?.ticks ?? 16} ticks. It reads the raw grid, runs
+              value iteration out from the goal (BFS / Dijkstra on unit costs) to
+              find the optimal path, and adapts its motor readout at inference
+              with a local three-factor rule (no backprop).
+            </div>
+            <div>
+              <div class="eyebrow mb-1.5">Trained vs from-scratch</div>
+              The motor readout starts untrained and learns live (the loss curve).
+              Value iteration is exact: no training, any size. The 9 MB weights are
+              the perception and the visualization only; the solve-and-learn loop
+              does not need them.
+            </div>
+            <div>
+              <div class="eyebrow mb-1.5">Vision</div>
+              retina → V1 → V2 → V4 feed the input region; the cyan grids are those
+              feature maps, what the model actually sees. The retina is
+              convolutional, so any maze size runs zero-shot. Nothing is retrained.
+            </div>
+            <div>
+              <div class="eyebrow mb-1.5">Drive modes</div>
+              Optimal commits the value-greedy move and always solves. Explore
+              self-drives on its own move-head, takes wrong legal steps, and learns
+              to shorten its path. Honest self-drives with no safety net and can
+              fail.
+            </div>
+            <div>
+              <div class="eyebrow mb-1.5">Signal</div>
+              A scalar that scales each weight update: negative on wall-hits and
+              wasted steps, positive on progress and the goal. It is a learning-rate
+              modulator, not a feeling.
+            </div>
+            <div>
+              <div class="eyebrow mb-1.5">Engine</div>
+              The browser engine reimplements modgrad's forward pass, bit-exact
+              against the SDK (not the SDK itself on wasm yet). Loads only here.
+            </div>
+          </div>
+        </Show>
+      </div>
     </div>
   );
 }

@@ -37,6 +37,24 @@ type BrainTelemetry = {
   certainty?: number; // overall decision certainty
 };
 
+// ── drive-modes ────────────────────────────────────────────────────────────
+// Three modular ways the agent decides its next move (a UI toggle switches them
+// live). Threaded through as a single parameter so it gates BOTH the decided
+// move and the completion behaviour — structured so it could later be an
+// endpoint. See the step handler for the per-mode derivation.
+//   "optimal" — commit the VIN value-greedy move; always solves (the perfect
+//               planner view). The move-head still predicts + learns alongside.
+//   "explore" — self-drive on the move-head's own argmax; ALWAYS finishes
+//               (wall-veto + loop-break nudge). Wanders early — that's the point.
+//   "honest"  — self-drive, same tiers, but NO nudge: over budget → "lost",
+//               next maze. Solve-rate climbs as it learns.
+type DriveMode = "optimal" | "explore" | "honest";
+let driveMode: DriveMode = "explore"; // default; set from init.mode / setMode
+
+// Graded neuromodulator tier the agent earned this step (explore/honest). In
+// "optimal" mode it's effectively always reward/dopamine.
+type Neuromod = "dopamine" | "reward" | "disappointment" | "pain";
+
 type StepResult = {
   type: "step";
   agent: [number, number]; // the cell the agent steps to (optimal path)
@@ -62,6 +80,14 @@ type StepResult = {
   // these flag/annotate it so the UI can label the learning loop.
   vinActive?: boolean; // true when the VIN drove this step's prediction
   dreaming?: boolean; // true on the step a sleep/replay consolidation just ran
+  // ── drive-mode / graded neuromodulation (Part A) ──
+  neuromod?: Neuromod; // graded tier earned this step (explore/honest)
+  efficiency?: number; // live steps ÷ shortest (→1.0 as it learns; >1 = wandering)
+  efficiencyFinal?: number; // per-solve efficiency point (only on reached)
+  shortest?: number; // BFS shortest-path length from the episode start
+  stepsTaken?: number; // steps taken in this episode so far
+  vetoed?: boolean; // the self-driven move hit a wall/edge → vetoed + PAIN
+  lost?: boolean; // honest mode: episode exceeded budget without solving
 };
 
 // The VIN (value-iteration readout) forward result, feature-detected on the
@@ -331,12 +357,14 @@ function dreamReplay(maxReplays: number): number {
     try {
       // re-derive the current pain: does the VIN STILL want a wall move here?
       const vf = vinForward(r.grid, r.ar, r.ac, r.gr, r.gc);
-      let pain = r.pain; // fall back to the stored pain
+      let pain = r.pain; // fall back to the stored gain (signed: − tiers learn harder)
       if (vf) {
         const dist = goalDist(r.grid, r.gr, r.gc);
         const here = dist[r.ar * SIZE + r.ac];
         const v = classifyMove(argmaxMove(vf.move_logits), r.grid, r.ar, r.ac, here, dist);
-        pain = v === "wall" ? 1.0 : 0.0;
+        // signed-gain convention (reward_signal = 1 − pain): wall → −1.0 (gain 2.0),
+        // astray/wait → −0.3, progress → +0.3. Consolidates nightmares the hardest.
+        pain = v === "wall" ? -1.0 : v === "astray" || v === "wait" ? -0.3 : 0.3;
       }
       const delta = engine.vin_learn(r.optMove, pain);
       if (typeof delta === "number" && Number.isFinite(delta)) replays++;
@@ -439,6 +467,46 @@ const DELTA: [number, number][] = [
   [0, -1],
   [0, 1],
 ];
+
+// ── always-finish / fail machinery (Part A) ─────────────────────────────────
+// Per-episode self-drive state (reset on newMaze + resetPlasticity). Tracks the
+// BFS shortest path from the start, steps taken, and how often each cell has
+// been visited (oscillation detector). `loopBreak` returns a nudge move (the
+// value-greedy step) when the agent is looping or out of budget, else -1.
+type MazeEpisode = {
+  shortest: number; // BFS dist from the episode start to the goal
+  steps: number; // committed/vetoed steps taken this episode
+  visits: Map<number, number>; // cell-index → times visited
+  startCell: number; // start cell index, for reference
+};
+const STEP_BUDGET_MULT = 3; // wander budget = ceil(shortest × MULT) before nudge/lost
+let mazeEp: MazeEpisode | null = null; // current self-drive episode (null until a maze loads)
+
+function newMazeEpisode(shortest: number, startCell: number): MazeEpisode {
+  return { shortest, steps: 0, visits: new Map(), startCell };
+}
+
+// Decide whether to nudge the self-driven agent back onto the rails. We DELIBERATELY
+// let it take wrong (legal) steps and learn from them — so the ONLY trigger is the
+// hard step budget (ceil(shortest × MULT)); we no longer rescue it on oscillation.
+// Letting it wander is the point: each wrong step teaches the head toward optimal,
+// and the efficiency ratio (steps ÷ shortest) is what we watch fall toward 1.0.
+// Callers use the budget differently per mode: "explore" commits the nudge to always
+// finish; "honest" reads the budget-exceeded case as "lost" instead.
+function loopBreak(
+  _headMove: number,
+  greedy: number,
+  opt: number,
+  _ar: number,
+  _ac: number,
+  _grid: number[],
+  ep: MazeEpisode,
+): number {
+  const nudge = greedy >= 0 ? greedy : opt; // prefer the value-greedy step
+  // Only intervene once the agent has blown the wander budget — never sooner.
+  if (ep.steps >= Math.ceil(ep.shortest * STEP_BUDGET_MULT)) return nudge;
+  return -1;
+}
 
 // BFS flood from the goal: distance-to-goal for every open cell (Infinity for
 // walls/unreachable). Used to pick the optimal next step and to judge whether
@@ -798,7 +866,7 @@ self.onmessage = async (e: MessageEvent) => {
       // leaves it as a real runtime import instead of trying to resolve it.
       // ?v=… busts any stale cached engine (a mismatched glue/wasm pair fails
       // to instantiate); bump ENGINE_VER whenever the wasm is rebuilt.
-      const ENGINE_VER = "20260625v-vin2";
+      const ENGINE_VER = "20260626v-anysize";
       const enginePath =
         ["", "engine", "modgrad_mini.js"].join("/") + "?v=" + ENGINE_VER;
       // Load the glue as a blob module. Vite's DEV server refuses to serve
@@ -824,7 +892,19 @@ self.onmessage = async (e: MessageEvent) => {
       SIZE = msg.size ?? 9;
       ensurePxBufs(); // size the reused pixel buffers for this board
 
+      // ── drive-mode (Part A) — caller picks how the agent decides ──
+      if (msg.mode === "optimal" || msg.mode === "explore" || msg.mode === "honest") {
+        driveMode = msg.mode;
+      }
+      mazeEp = null; // fresh session → no episode until the first maze loads
+
       // ── attention config (Task 1) — caller may override mode / cadence ──
+      // PERF (Part B): occlusion is O(SIZE²) brain-forwards/step; on larger
+      // boards (SIZE>9) default to coarse + a slower cadence to stay cheap.
+      if (SIZE > 9) {
+        attnMode = "coarse";
+        attnEvery = Math.max(attnEvery, 4);
+      }
       if (msg.attnMode === "off" || msg.attnMode === "coarse" || msg.attnMode === "full") {
         attnMode = msg.attnMode;
       }
@@ -900,7 +980,51 @@ self.onmessage = async (e: MessageEvent) => {
         plastic,
         vin: vinAvailable, // engine exposes the VIN learning loop
         vinMode, // whether it's active for this session
+        mode: driveMode, // the active drive-mode
       });
+      return;
+    }
+
+    // live drive-mode switch — flip how the agent decides without a reload. The
+    // current episode keeps running under the new mode (no state reset needed:
+    // the mode only gates the decided move + completion behaviour each step).
+    if (msg.type === "setMode") {
+      if (msg.mode === "optimal" || msg.mode === "explore" || msg.mode === "honest") {
+        driveMode = msg.mode;
+        post({ type: "mode", mode: driveMode });
+      }
+      return;
+    }
+
+    // Change the BOARD SIZE live (no reload, no weight reload): the retina is
+    // arbitrary-resolution and the VIN/value-iteration are size-agnostic, so we
+    // just resize the buffers and hand out a fresh maze at the new size. Mazes
+    // must be ODD-sided (recursive backtracker). The pretrained 8-region brain
+    // sees larger boards zero-shot (it only drives the viz, not the solver).
+    if (msg.type === "setSize") {
+      if (!engine) return;
+      const s = typeof msg.size === "number" ? Math.floor(msg.size) : SIZE;
+      if (s >= 7 && s <= 31 && s % 2 === 1) {
+        SIZE = s;
+        ensurePxBufs();
+        attnStepCounter = 0;
+        attnCache = null;
+        // bigger boards: the O(SIZE²) occlusion pass gets expensive — throttle
+        // hard above 13, coarse above 9, so the demo stays smooth.
+        if (SIZE > 13) attnMode = "off";
+        else if (SIZE > 9) {
+          attnMode = "coarse";
+          attnEvery = Math.max(attnEvery, 4);
+        }
+        const m = genMaze(SIZE);
+        const d0 = goalDist(m.grid, m.end[0], m.end[1]);
+        const sd = d0[m.start[0] * SIZE + m.start[1]];
+        mazeEp = newMazeEpisode(
+          Number.isFinite(sd) ? sd : SIZE * SIZE,
+          m.start[0] * SIZE + m.start[1],
+        );
+        post({ type: "maze", grid: m.grid, start: m.start, end: m.end });
+      }
       return;
     }
 
@@ -945,6 +1069,16 @@ self.onmessage = async (e: MessageEvent) => {
       const dist = goalDist(grid, gr, gc); // BFS distance-to-goal per cell
       const here = dist[ar * SIZE + ac];
 
+      // ── self-drive episode (Part A) ──
+      // Lazily start an episode if one isn't live (e.g. first step on an
+      // externally-loaded maze): shortest = BFS dist from THIS cell to the goal,
+      // anchored to the current cell as the start.
+      if (!mazeEp) {
+        const sd = Number.isFinite(here) ? here : SIZE * SIZE;
+        mazeEp = newMazeEpisode(sd, ar * SIZE + ac);
+      }
+      const ep = mazeEp;
+
       // optimal step = open neighbour with the smallest distance-to-goal
       let optMove = -1;
       let bestD = Infinity;
@@ -961,31 +1095,71 @@ self.onmessage = async (e: MessageEvent) => {
         }
       }
 
-      // ── VIN closed loop (feature-detected) ──────────────────────────────
-      // When the VIN is active it DRIVES the predicted move + verdict + bars,
-      // and we teach it toward the BFS-optimal move (imitation) while penalizing
-      // wall moves (pain) via vin_learn's three-factor rule. The brain's own
-      // move still feeds the 3D viz, but the reported decision is the VIN's.
+      // ── VIN forward (feature-detected) ──────────────────────────────────
+      // The VIN reads the maze + agent and returns a value field + move logits.
+      // The value-greedy step is the "perfect planner" move; the move-head's own
+      // argmax is the LEARNER (what it would do self-driving). Which of these
+      // DRIVES the agent depends on the drive-mode below.
       const vinOn = vinMode && vinAvailable && engine?.vin_forward != null;
       const vf = vinOn ? vinForward(grid, ar, ac, gr, gc) : null;
-      // The VIN's plan: greedy on its (exact) value field → the correct move,
-      // every time. This is what the agent FOLLOWS, so it solves the maze and
-      // never walks into a wall. The move-head's own argmax is the LEARNER —
-      // it starts wrong and learns to predict this same move (shown in the bars).
-      const vinGreedy = vf ? greedyFromValue(vf, ar, ac, grid) : -1;
-      const headMove = vf ? argmaxMove(vf.move_logits) : -1; // the learner's guess
-      // the move the agent commits: the VIN's value-greedy step (fallback BFS)
-      const decidedMove = vf ? (vinGreedy >= 0 ? vinGreedy : optMove) : brainMove;
+      const vinGreedy = vf ? greedyFromValue(vf, ar, ac, grid) : -1; // planner move
+      const greedy = vinGreedy >= 0 ? vinGreedy : optMove; // value-greedy w/ BFS fallback
+      // the learner's own pick — VIN move-head argmax, else the brain's move
+      const headMove = vf ? argmaxMove(vf.move_logits) : brainMove;
 
-      // Verdict reflects the LEARNER (move-head) when the VIN drives — so the
-      // misstep ✕ and wall-hit sparkline show the move-head's mistakes dropping
-      // as it learns. (The agent itself follows the correct value-greedy move.)
-      const verdict = classifyMove(vf ? headMove : decidedMove, grid, ar, ac, here, dist);
-      // "agreed" = the learner caught up to the VIN's value-greedy plan
-      const agreed = vf ? headMove === decidedMove : verdict === "ok";
+      // ── DRIVE-MODE: derive the committed move + neuromod tier (Part A) ──
+      // The mode is a single parameter gating BOTH the decided move and the
+      // completion behaviour. "optimal" drives the planner; "explore"/"honest"
+      // self-drive on the head's move with wall-veto + graded tiers.
+      const selfDrive = driveMode === "explore" || driveMode === "honest";
+      let decidedMove: number;
+      let vetoed = false; // the self-driven move hit a wall/edge → vetoed + PAIN
+      let nudged = false; // loop-break forced the value-greedy move (explore)
+      let lost = false; // honest: out of budget without solving
 
-      // the agent steps along the DECIDED move (the VIN's plan), so it solves.
-      const [adr, adc] = decidedMove >= 0 && decidedMove < 4 ? DELTA[decidedMove] : [0, 0];
+      if (!selfDrive) {
+        // OPTIMAL: commit the planner's value-greedy step (fallback BFS). Always
+        // solves; the move-head still predicts + learns alongside (not driving).
+        decidedMove = greedy;
+      } else {
+        // SELF-DRIVE: the agent commits its OWN move-head argmax. A wall/off-board
+        // move is VETOED (agent stays put) and earns PAIN. A loop-break check can
+        // force the value-greedy move (explore) or signal "lost" (honest).
+        decidedMove = headMove;
+        // wall-veto: would the head's move leave the board / hit a wall?
+        if (headMove >= 0 && headMove < 4) {
+          const wr = ar + DELTA[headMove][0];
+          const wc = ac + DELTA[headMove][1];
+          const off = wr < 0 || wr >= SIZE || wc < 0 || wc >= SIZE;
+          if (off || grid[wr * SIZE + wc] === 1) vetoed = true;
+        } else {
+          vetoed = true; // wait token while self-driving → no progress → veto/pain
+        }
+        // loop-break nudge / lost signal (oscillation cap or step budget).
+        const nudge = loopBreak(headMove, greedy, optMove, ar, ac, grid, ep);
+        if (nudge >= 0) {
+          const budgetOut = ep.steps >= Math.ceil(ep.shortest * STEP_BUDGET_MULT);
+          if (driveMode === "honest" && budgetOut) {
+            lost = true; // honest: give up this maze (no nudge)
+          } else {
+            decidedMove = nudge; // explore (or honest oscillation): nudge onto rails
+            nudged = true;
+            vetoed = false; // a forced legal move isn't a wall-hit
+          }
+        }
+      }
+
+      // Verdict classifies the DRIVEN move now (Part A): ok / wall / astray / wait.
+      // For the self-driven veto we mark "wall" explicitly (the PAIN event).
+      const verdict: StepResult["verdict"] = vetoed
+        ? "wall"
+        : classifyMove(decidedMove, grid, ar, ac, here, dist);
+      // "agreed" = the driven move matched the value-greedy plan.
+      const agreed = decidedMove === greedy;
+
+      // the agent steps along the DECIDED move — UNLESS it was vetoed (stay put).
+      const [adr, adc] =
+        !vetoed && decidedMove >= 0 && decidedMove < 4 ? DELTA[decidedMove] : [0, 0];
       let nr2 = ar + adr;
       let nc2 = ac + adc;
       if (nr2 < 0 || nr2 >= SIZE || nc2 < 0 || nc2 >= SIZE || grid[nr2 * SIZE + nc2] === 1) {
@@ -995,6 +1169,36 @@ self.onmessage = async (e: MessageEvent) => {
       }
       const next: [number, number] = [nr2, nc2];
       const reached = next[0] === gr && next[1] === gc;
+
+      // ── graded neuromodulator (Part A) ──
+      // reached → dopamine +1 ; progress (ok) → reward +0.3 ; veto (wall) → pain
+      // −1 ; astray/wait → disappointment −0.3. In optimal mode the agent always
+      // makes progress, so it's reward/dopamine throughout.
+      let neuromod: Neuromod;
+      let modScalar: number;
+      if (reached) {
+        neuromod = "dopamine";
+        modScalar = 1.0;
+      } else if (vetoed) {
+        neuromod = "pain";
+        modScalar = -1.0;
+      } else if (verdict === "ok") {
+        neuromod = "reward";
+        modScalar = 0.3;
+      } else {
+        neuromod = "disappointment"; // astray / wait — legal but wasted
+        modScalar = -0.3;
+      }
+
+      // ── episode bookkeeping (Part A): one step counted (committed or vetoed) ──
+      ep.steps += 1;
+      const stepCell = next[0] * SIZE + next[1];
+      ep.visits.set(stepCell, (ep.visits.get(stepCell) ?? 0) + 1);
+      const stepsTaken = ep.steps;
+      const shortest = ep.shortest;
+      // efficiency = steps ÷ shortest (→1.0 as it learns; >1 = wandering).
+      const efficiency = shortest > 0 ? stepsTaken / shortest : stepsTaken;
+      const efficiencyFinal = reached ? efficiency : undefined;
 
       // OCCLUSION ATTENTION: blank each cell, re-run, measure how much the move
       // shifts — where the model actually pays attention for THIS decision.
@@ -1028,26 +1232,31 @@ self.onmessage = async (e: MessageEvent) => {
       // Per-region telemetry / exit-gate / certainty (undefined on old engine).
       const telemetry = readTelemetry();
 
-      // pain THIS step: the VIN earns pain (1.0) whenever its own chosen move
-      // would hit a wall / leave the board — the verdict above already measures
-      // exactly that for the decided move. (Used by vin_learn + dream replay.)
-      const pain = verdict === "wall" ? 1.0 : 0.0;
+      // LEARNING GAIN this step. The engine computes reward_signal = teach − pain
+      // (teach = 1 when we pass an optMove target), and ΔW ∝ reward_signal. So we
+      // feed the SIGNED neuromod scalar as `pain`: reward_signal = 1 − modScalar.
+      //   wall          modScalar −1.0 → gain 2.0  (learn HARDEST from the mistake)
+      //   disappointment       −0.3 → gain 1.3
+      //   reward (progress)    +0.3 → gain 0.7
+      //   dopamine (goal)      +1.0 → gain 0.0  (terminal; nothing to correct)
+      // This is the fix for the death-spiral where wall steps (pain=1 → gain 0)
+      // produced ZERO learning, so a cold head that hits walls never improved.
+      // Pain now ACCELERATES correction toward the optimal move (and pushes the
+      // wall move's logit down), which is the real "inflict pain until correct".
+      const pain = modScalar;
 
       let plasticDelta: number | undefined;
       let signal: number | undefined;
       if (vinOn && vf && engine?.vin_learn) {
-        // VIN LEARNING: imitate the BFS-optimal move AND penalize wall moves in
-        // one three-factor update. targetMove = optMove (teach), pain = wall
-        // penalty. signal we surface = +teach when learning a real move, -pain
-        // dominated when it just walked into a wall (so the panel shows the
-        // pain). ‖ΔW‖ drives the Plasticity panel / wall-hit sparkline.
+        // VIN LEARNING: keep teaching the move-head toward the BFS-OPTIMAL move
+        // (NOT the move it just self-drove — that would entrench its own errors
+        // and make the loss meaningless). targetMove = optMove (teach), pain =
+        // the graded pain. The signal we surface is the signed neuromod scalar.
         try {
-          // teach toward the VIN's OWN value-greedy plan (not an external
-          // oracle) and penalize the learner's wall-hits (pain).
-          const delta = engine.vin_learn(decidedMove, pain);
+          const delta = engine.vin_learn(optMove, pain);
           if (typeof delta === "number" && Number.isFinite(delta)) {
             plasticDelta = delta;
-            signal = pain > 0 ? -pain : decidedMove >= 0 ? 1.0 : 0.0;
+            signal = modScalar;
           }
         } catch {
           /* never let learning crash a step */
@@ -1078,7 +1287,9 @@ self.onmessage = async (e: MessageEvent) => {
       // ~0 once it predicts the right move with confidence. lr = the θ used by the
       // three-factor rule (constant; surfaced so the panel can show it).
       let loss: number | undefined;
-      const lossTarget = vf ? decidedMove : optMove;
+      // teach/measure against the BFS-OPTIMAL move (the target, not the
+      // self-driven move) so the loss curve stays meaningful.
+      const lossTarget = optMove;
       const lossLogits = vf ? vf.move_logits : ran?.moveLogits;
       if (lossLogits && lossTarget >= 0 && lossTarget < lossLogits.length) {
         const mx = Math.max(...lossLogits);
@@ -1100,12 +1311,16 @@ self.onmessage = async (e: MessageEvent) => {
         : undefined;
       episodicStore(gs, decidedMove, verdict, reached, replay);
 
+      // honest mode: a lost episode ends here (no nudge) — surface it so the UI
+      // marks it and moves to a fresh maze (done, but not reached).
+      const done = reached || lost;
+
       const result: StepResult = {
         type: "step",
         agent: next,
-        // bars highlight the LEARNER's pick (move-head) when the VIN drives, so
-        // you watch it converge to the plan; else the brain's predicted move.
-        move: vf ? headMove : decidedMove,
+        // the reported move is the DRIVEN move now (Part A); the bars use the
+        // head logits (the driver's distribution).
+        move: decidedMove,
         verdict, // ok / wall / astray / wait — for the misstep indicator
         agreed,
         // move bars: VIN's move logits when active, else the brain's last tick.
@@ -1118,7 +1333,7 @@ self.onmessage = async (e: MessageEvent) => {
         vision,
         attn,
         route,
-        done: reached,
+        done,
         reached,
         telemetry,
         plasticDelta,
@@ -1127,7 +1342,19 @@ self.onmessage = async (e: MessageEvent) => {
         lr,
         episodic,
         vinActive: vinOn && vf != null,
+        // ── drive-mode / graded neuromodulation (Part A) ──
+        neuromod,
+        efficiency,
+        efficiencyFinal,
+        shortest,
+        stepsTaken,
+        vetoed,
+        lost,
       };
+      // a finished episode (solved or lost) clears the episode state so the next
+      // maze starts fresh. `nudged` is referenced for clarity / future telemetry.
+      void nudged;
+      if (done) mazeEp = null;
       post(result);
       return;
     }
@@ -1139,6 +1366,7 @@ self.onmessage = async (e: MessageEvent) => {
       episodicMem = []; // forget recalled situations too — a clean slate
       episodeCounter = 0;
       mazeCounter = 0; // restart the dream/sleep cadence
+      mazeEp = null; // drop the self-drive episode (efficiency/budget reset)
       if (engine?.reset_plasticity) {
         try {
           engine.reset_plasticity();
@@ -1170,6 +1398,12 @@ self.onmessage = async (e: MessageEvent) => {
       // fresh maze → drop stale attention so the next step recomputes promptly
       attnStepCounter = 0;
       attnCache = null;
+      // fresh self-drive episode: shortest = BFS dist from start to goal.
+      {
+        const d0 = goalDist(m.grid, m.end[0], m.end[1]);
+        const sd = d0[m.start[0] * SIZE + m.start[1]];
+        mazeEp = newMazeEpisode(Number.isFinite(sd) ? sd : SIZE * SIZE, m.start[0] * SIZE + m.start[1]);
+      }
 
       // ── DREAM / SLEEP REPLAY (VIN) ──
       // Every DREAM_EVERY mazes, run a short offline consolidation pass over

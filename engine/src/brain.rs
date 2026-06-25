@@ -126,12 +126,27 @@ pub struct VisualCortex {
 }
 
 impl VisualCortex {
+    /// Infer the square input dims from a raw CHW `[3 × s × s]` buffer.
+    /// If the buffer is exactly a 3-channel square (3·s·s == len) we use that
+    /// `s` (arbitrary-resolution, zero-shot); otherwise fall back to the stored
+    /// `input_h/input_w`. A 9×9 buffer is 243 floats → n=81 → s=9 → 3·81==243,
+    /// so this is BIT-EXACT for the trained 9×9 brain.
+    #[inline]
+    fn dims_for(&self, raw: &[f32]) -> (usize, usize) {
+        let n = raw.len() / 3;
+        let s = (n as f64).sqrt().round() as usize;
+        if s >= 1 && 3 * s * s == raw.len() {
+            (s, s)
+        } else {
+            (self.input_h, self.input_w)
+        }
+    }
+
     /// Faithful to `VisualCortex::spatial_tokens`: retina → v1 → v2 → v4,
     /// leaky_relu between, then CHW → tokens `[n_tokens × channels]`.
     /// `raw`: `[3 × input_h × input_w]` CHW. (per_token_ln_v4 = false here.)
     pub fn spatial_tokens(&self, raw: &[f32]) -> (Vec<f32>, usize, usize) {
-        let h = self.input_h;
-        let w = self.input_w;
+        let (h, w) = self.dims_for(raw);
 
         let (mut r_out, rh, rw) = self.retina.forward1(raw, h, w);
         leaky_relu(&mut r_out);
@@ -164,8 +179,7 @@ impl VisualCortex {
         &self,
         raw: &[f32],
     ) -> Vec<(&'static str, Vec<f32>, usize, usize, usize)> {
-        let h = self.input_h;
-        let w = self.input_w;
+        let (h, w) = self.dims_for(raw);
         let (mut r, rh, rw) = self.retina.forward1(raw, h, w);
         leaky_relu(&mut r);
         let (mut v1, h1, w1) = self.v1.forward1(&r, rh, rw);
@@ -1062,7 +1076,18 @@ pub const VIN_N_DIRECTIONS: usize = 5;
 const VIN_GAMMA: f32 = 0.9;
 /// Very-negative sentinel for an off-grid / wall neighbour in the ego readout
 /// (so the move head sees "you cannot/should not go there").
+/// Superseded by the scale-stable advantage readout (kept for back-compat).
+#[allow(dead_code)]
 const VIN_BLOCKED_VALUE: f32 = -1.0;
+/// Wall / off-grid neighbour feature in the scale-stable advantage readout.
+const VIN_WALL_FEAT: f32 = -1.0;
+/// Floor for the L∞ advantage scale (avoid divide-by-zero on flat values).
+const VIN_NORM_EPS: f32 = 1e-3;
+/// Constant bias channel value in the readout (open-gate marker).
+const VIN_OPEN_GATE: f32 = 1.0;
+/// Fixed sharpening temperature applied when forming move logits. Smaller =
+/// sharper; logits = raw / VIN_TEMP. Stashed so forward/argmax/learn agree.
+const VIN_TEMP: f32 = 0.5;
 /// Deterministic seed for the VIN move-head init.
 const VIN_SEED: u64 = 0x5144_4956_4e5f_3031; // "VIN_01"-ish, fixed.
 
@@ -1234,28 +1259,47 @@ impl VinReadout {
         let (ar, ac) = (ar.min(size - 1), ac.min(size - 1));
         let acell = ar * size + ac;
 
-        // ── Ego-centric readout: agent value, agent gate, 4 neighbour values.
-        // Off-grid / wall neighbours read as VIN_BLOCKED_VALUE so the move head
-        // sees "do not go there." Neighbour order is U,D,L,R == move index d.
-        let mut readout = Vec::with_capacity(VIN_READOUT_DIM);
-        readout.push(value[acell]);
-        readout.push(maze.gate[acell]);
-        for (dr, dc) in VIN_DIR_OFFSETS {
+        // ── Scale-stable ADVANTAGE readout (layout [agent_slot, gate, U,D,L,R]).
+        // The move head's input is the per-neighbour advantage value[nbr]−value[acell]
+        // normalised by the L∞ scale over OPEN advantages, so the inter-neighbour
+        // gap stays distance-invariant (≈ constant magnitude near/far from goal)
+        // instead of shrinking with the raw 0.9^dist values. Wall / off-grid
+        // neighbours read VIN_WALL_FEAT. Neighbour order is U,D,L,R == move idx d.
+        let av = value[acell];
+        // pass 1: raw advantage for OPEN neighbours; track openness.
+        let mut adv = [0.0f32; 4];
+        let mut open = [false; 4];
+        for (k, (dr, dc)) in VIN_DIR_OFFSETS.iter().enumerate() {
             let nr = ar as i32 + dr;
             let nc = ac as i32 + dc;
             if nr < 0 || nc < 0 || nr >= size as i32 || nc >= size as i32 {
-                readout.push(VIN_BLOCKED_VALUE);
                 continue;
             }
             let ncell = nr as usize * size + nc as usize;
             if maze.gate[ncell] < 0.5 {
-                readout.push(VIN_BLOCKED_VALUE); // wall neighbour.
-            } else {
-                readout.push(value[ncell]);
+                continue;
+            }
+            adv[k] = value[ncell] - av;
+            open[k] = true;
+        }
+        // pass 2: L∞ scale over OPEN advantages → distance-invariant gap.
+        let mut scale = VIN_NORM_EPS;
+        for k in 0..4 {
+            if open[k] {
+                scale = scale.max(adv[k].abs());
             }
         }
+        let mut readout = Vec::with_capacity(VIN_READOUT_DIM);
+        readout.push(0.0); // agent-value slot carries no scale info → constant 0.
+        readout.push(VIN_OPEN_GATE); // bias channel.
+        for k in 0..4 {
+            readout.push(if open[k] { adv[k] / scale } else { VIN_WALL_FEAT });
+        }
 
-        let move_logits = self.move_head.forward(&readout);
+        // Fixed sharpening temperature; STASH the tempered logits so the worker's
+        // argmax and `learn`'s softmax operate on the same policy.
+        let raw = self.move_head.forward(&readout);
+        let move_logits: Vec<f32> = raw.iter().map(|z| z / VIN_TEMP).collect();
 
         VinOutput {
             move_logits,
@@ -1279,7 +1323,7 @@ impl VinReadout {
     /// `|ΔW| ≤ DW_CLAMP`, post-update `|W| ≤ W_CLAMP`, NaN/Inf guard.
     /// Returns ‖ΔW‖ actually applied.
     fn learn(&mut self, pre: &[f32], logits: &[f32], target_move: i32, pain: f32) -> f32 {
-        const THETA: f32 = 0.05;
+        const THETA: f32 = 0.1;
         const DW_CLAMP: f32 = 0.25;
         const W_CLAMP: f32 = 6.0;
 
@@ -1491,6 +1535,201 @@ mod vin_tests {
         assert!(norm > 0.0);
         assert_ne!(before, vin.move_head.weight);
         assert!(vin.move_head.weight.iter().all(|w| w.is_finite()));
+    }
+
+    /// Deterministic LCG (Numerical Recipes constants), no extra deps.
+    struct Lcg(u64);
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Lcg(seed)
+        }
+        fn next_u32(&mut self) -> u32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 33) as u32
+        }
+        fn below(&mut self, n: u32) -> u32 {
+            self.next_u32() % n
+        }
+        fn chance(&mut self, num: u32, den: u32) -> bool {
+            self.below(den) < num
+        }
+    }
+
+    /// Build a random SOLVABLE maze of the given size with a single agent (red)
+    /// and a single goal (green), guaranteeing a path agent→goal exists. Returns
+    /// the CHW pixels. Walls are sprinkled but never on the agent/goal cells, and
+    /// a flood-fill check ensures reachability (retries until solvable).
+    fn random_solvable_maze(size: usize, rng: &mut Lcg) -> (Vec<f32>, usize) {
+        loop {
+            let n = size * size;
+            let mut wall = vec![false; n];
+            for w in wall.iter_mut() {
+                *w = rng.chance(1, 4); // ~25% walls.
+            }
+            let acell = rng.below(n as u32) as usize;
+            let mut gcell = rng.below(n as u32) as usize;
+            if gcell == acell {
+                gcell = (gcell + 1) % n;
+            }
+            wall[acell] = false;
+            wall[gcell] = false;
+            // BFS reachability agent→goal.
+            let mut seen = vec![false; n];
+            let mut stack = vec![acell];
+            seen[acell] = true;
+            while let Some(cell) = stack.pop() {
+                let r = cell / size;
+                let c = cell % size;
+                for (dr, dc) in VIN_DIR_OFFSETS {
+                    let nr = r as i32 + dr;
+                    let nc = c as i32 + dc;
+                    if nr < 0 || nc < 0 || nr >= size as i32 || nc >= size as i32 {
+                        continue;
+                    }
+                    let ncell = nr as usize * size + nc as usize;
+                    if !seen[ncell] && !wall[ncell] {
+                        seen[ncell] = true;
+                        stack.push(ncell);
+                    }
+                }
+            }
+            if !seen[gcell] {
+                continue; // unsolvable — retry.
+            }
+            // Render pixels.
+            let mut px = vec![0.0f32; 3 * n];
+            for cell in 0..n {
+                let (rr, gg, bb) = if cell == acell {
+                    (1.0, 0.0, 0.0)
+                } else if cell == gcell {
+                    (0.0, 1.0, 0.0)
+                } else if wall[cell] {
+                    (0.0, 0.0, 0.0)
+                } else {
+                    (1.0, 1.0, 1.0)
+                };
+                px[cell] = rr;
+                px[n + cell] = gg;
+                px[2 * n + cell] = bb;
+            }
+            return (px, size);
+        }
+    }
+
+    /// The value-greedy OPTIMAL move at the agent cell: argmax over OPEN
+    /// neighbours of the value grid. Returns None if the agent has no open
+    /// neighbour (shouldn't happen on a solvable maze with the agent != goal).
+    fn optimal_move(out: &VinOutput, size: usize) -> Option<i32> {
+        let (ar, ac) = out.agent_cell;
+        let mut best_dir: Option<i32> = None;
+        let mut best_val = f32::NEG_INFINITY;
+        for (d, (dr, dc)) in VIN_DIR_OFFSETS.iter().enumerate() {
+            let nr = ar as i32 + dr;
+            let nc = ac as i32 + dc;
+            if nr < 0 || nc < 0 || nr >= size as i32 || nc >= size as i32 {
+                continue;
+            }
+            let ncell = nr as usize * size + nc as usize;
+            if out.gate[ncell] < 0.5 {
+                continue;
+            }
+            let v = out.value_grid[ncell];
+            if v > best_val {
+                best_val = v;
+                best_dir = Some(d as i32);
+            }
+        }
+        best_dir
+    }
+
+    /// CHANGE-1 regression: with the scale-stable advantage readout + tempered
+    /// logits + θ=0.1, the move head's argmax must LEARN the value-greedy optimal
+    /// move online via `learn` (pain=0), climbing from chance to ≥85% agreement.
+    #[test]
+    fn move_head_agreement_climbs_to_85pct() {
+        let size = 9;
+        let window = 200usize;
+
+        // Argmax of the (tempered) move logits = the head's chosen move.
+        let argmax = |logits: &[f32]| -> i32 {
+            logits
+                .iter()
+                .enumerate()
+                .fold((0usize, f32::NEG_INFINITY), |(bi, bv), (i, &v)| {
+                    if v > bv {
+                        (i, v)
+                    } else {
+                        (bi, bv)
+                    }
+                })
+                .0 as i32
+        };
+
+        // Measure argmax-vs-optimal agreement over `n` fresh solvable mazes,
+        // WITHOUT learning (frozen head). The maze stream is deterministic.
+        let measure = |vin: &VinReadout, rng: &mut Lcg, n: usize| -> f32 {
+            let mut correct = 0usize;
+            let mut count = 0usize;
+            for _ in 0..n {
+                let (px, sz) = random_solvable_maze(size, rng);
+                let out = vin.forward_pixels(&px, sz, (0, 0));
+                let target = match optimal_move(&out, sz) {
+                    Some(t) => t,
+                    None => continue,
+                };
+                count += 1;
+                if argmax(&out.move_logits) == target {
+                    correct += 1;
+                }
+            }
+            correct as f32 / count.max(1) as f32
+        };
+
+        let mut vin = VinReadout::seeded(3);
+        // Start from a BLANK slate so agreement begins at chance and must be
+        // LEARNED — the lucky seed already aligns with the advantage features.
+        for w in vin.move_head.weight.iter_mut() {
+            *w = 0.0;
+        }
+        for b in vin.move_head.bias.iter_mut() {
+            *b = 0.0;
+        }
+
+        // ── PHASE 1: baseline agreement on the untrained head (frozen). ──
+        let mut rng = Lcg::new(0xC0FFEE_1234_5678);
+        let first = measure(&vin, &mut rng, window);
+
+        // ── PHASE 2: online training toward the value-greedy optimal. ──
+        // Forward returns TEMPERED logits in out.move_logits — the SAME vector
+        // fed to learn(), so forward/argmax/learn all agree (pain = 0).
+        for _ in 0..4000 {
+            let (px, sz) = random_solvable_maze(size, &mut rng);
+            let out = vin.forward_pixels(&px, sz, (0, 0));
+            let target = match optimal_move(&out, sz) {
+                Some(t) => t,
+                None => continue,
+            };
+            vin.learn(&out.pre, &out.move_logits, target, 0.0);
+        }
+
+        // ── PHASE 3: post-training agreement on the trained head (frozen). ──
+        let last = measure(&vin, &mut rng, window);
+
+        assert!(
+            first < 0.55,
+            "early agreement should start near chance, got {first:.3}"
+        );
+        assert!(
+            last >= 0.85,
+            "late agreement should reach ≥0.85, got {last:.3}"
+        );
+        assert!(
+            last - first > 0.30,
+            "agreement should improve by >0.30 (first {first:.3} → last {last:.3})"
+        );
     }
 }
 

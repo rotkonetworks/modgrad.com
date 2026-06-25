@@ -10,15 +10,20 @@ import { createSignal, createEffect, Show, For } from "solid-js";
 // `eyebrow`, `tag`, `text-dim`, `text-mute`, `font-mono`, accent var(--accent).
 
 type Verdict = "ok" | "wall" | "astray" | "wait";
+// graded neuromodulator tier the agent earned this step (Part A).
+type Neuromod = "dopamine" | "reward" | "disappointment" | "pain";
 
 export type PlasticityPanelProps = {
   enabled: boolean; // plasticity available + on (engine exposes apply_plasticity)
   signal: number; // the three-factor signal fed in this step (pain<0 / reward>0)
+  neuromod?: Neuromod; // graded tier (dopamine/reward/disappointment/pain); falls back to signal
   plasticDelta: number; // ||ΔW|| applied to the readout this step
   verdict: Verdict | null; // the brain's prediction vs the maze, this step
   reached: boolean; // did the agent reach the goal this step?
   loss?: number; // move-head cross-entropy vs the target move (the curve that drops)
   lr?: number; // three-factor learning rate θ used this step (constant)
+  efficiency?: number; // live steps ÷ shortest (→1.0 as it learns; >1 = wandering)
+  efficiencyFinal?: number; // per-solve efficiency point (one per solved maze, for the trend)
   onReset: () => void; // revert the readout to the frozen weights
 };
 
@@ -123,6 +128,7 @@ export default function PlasticityPanel(props: PlasticityPanelProps) {
   const [wallHits, setWallHits] = createSignal(0); // cumulative wall-hits
   const [history, setHistory] = createSignal<number[]>([]); // 0/1 wall-hit samples
   const [lossHist, setLossHist] = createSignal<number[]>([]); // move-head loss samples
+  const [effHist, setEffHist] = createSignal<number[]>([]); // per-solve efficiency points
 
   // Fold each incoming verdict into the running stats. We track the verdict
   // identity so a re-render with the SAME verdict object doesn't double-count;
@@ -165,16 +171,35 @@ export default function PlasticityPanel(props: PlasticityPanelProps) {
         return next;
       });
     }
-    if (isWall) {
-      setWallHits((n) => n + 1);
-      setStreak(0);
-    } else {
+    if (isWall) setWallHits((n) => n + 1);
+    // CLEAN STREAK = consecutive OPTIMAL steps only. A wrong-direction step
+    // (astray / wait) breaks it just like a wall — wandering is not "clean".
+    const isClean = v === "ok";
+    if (isClean) {
       setStreak((s) => {
         const ns = s + 1;
         setRecord((r) => (ns > r ? ns : r));
         return ns;
       });
+    } else {
+      setStreak(0);
     }
+  });
+
+  // ── efficiency trend (Part A) ──
+  // Push one point per solved maze (efficiencyFinal changes on each solve). Guard
+  // against double-counting a re-render with the same value via `lastEff`.
+  let lastEff = -1;
+  createEffect(() => {
+    const ef = props.efficiencyFinal;
+    if (typeof ef !== "number" || !Number.isFinite(ef)) return;
+    if (ef === lastEff) return;
+    lastEff = ef;
+    setEffHist((h) => {
+      const next = h.length >= HISTORY_WINDOW ? h.slice(1) : h.slice();
+      next.push(ef);
+      return next;
+    });
   });
 
   // wall-hit-rate moving average over the rolling window (lower = learning)
@@ -198,12 +223,44 @@ export default function PlasticityPanel(props: PlasticityPanelProps) {
     return ma.length ? ma[ma.length - 1] : 0;
   };
 
-  // live pulse chip state from the raw signal
-  const pulse = () => {
+  // efficiency trend: normalize each per-solve point to (v-1)/(max-1) so the
+  // Sparkline DROPS toward the baseline as the agent approaches the 1.0 optimum.
+  const effNorm = (): number[] => {
+    const h = effHist();
+    const max = Math.max(...h, 1.0);
+    const denom = max - 1 || 1;
+    return h.map((v) => clamp01((v - 1) / denom));
+  };
+  // the live efficiency ratio (steps ÷ shortest); falls back to the last solve.
+  const liveEff = (): number => {
+    const e = props.efficiency;
+    if (typeof e === "number" && Number.isFinite(e)) return e;
+    const h = effHist();
+    return h.length ? h[h.length - 1] : 0;
+  };
+
+  // live 4-state pulse chip — prefers the graded `neuromod` tier, falling back
+  // to the signed `signal` for back-compat (old callers / non-self-drive modes).
+  type PulseCls = "dopamine" | "reward" | "disappointment" | "pain" | "flat";
+  const pulse = (): { label: string; cls: PulseCls } => {
+    const nm = props.neuromod;
+    if (nm === "dopamine") return { label: "✦ dopamine", cls: "dopamine" };
+    if (nm === "reward") return { label: "↑ reward", cls: "reward" };
+    if (nm === "disappointment") return { label: "↘ disappointment", cls: "disappointment" };
+    if (nm === "pain") return { label: "↓ pain", cls: "pain" };
+    // fallback: derive a coarse tier from the signed signal
     const s = props.signal;
-    if (s > 0) return { label: "↑ dopamine", cls: "up" as const };
-    if (s < 0) return { label: "↓ pain", cls: "down" as const };
-    return { label: "—", cls: "flat" as const };
+    if (s > 0) return { label: "↑ reward", cls: "reward" };
+    if (s < 0) return { label: "↓ pain", cls: "pain" };
+    return { label: "—", cls: "flat" };
+  };
+  // cls → {bg, fg} lookup (green / brighter-green / amber / red), no nested ternaries.
+  const PULSE_STYLE: Record<PulseCls, { bg: string; fg: string }> = {
+    dopamine: { bg: "color-mix(in srgb, #3CB371 22%, transparent)", fg: "#2f8c5b" },
+    reward: { bg: "color-mix(in srgb, #3CB371 14%, transparent)", fg: "#3aa86c" },
+    disappointment: { bg: "color-mix(in srgb, #e0a23c 18%, transparent)", fg: "#b07a1e" },
+    pain: { bg: "color-mix(in srgb, #e0564e 16%, transparent)", fg: "#c63d35" },
+    flat: { bg: "var(--bg-2)", fg: "var(--text-mute)" },
   };
 
   // revert the readout to frozen weights AND clear the local learning stats,
@@ -215,8 +272,10 @@ export default function PlasticityPanel(props: PlasticityPanelProps) {
     setWallHits(0);
     setHistory([]);
     setLossHist([]);
+    setEffHist([]);
     lastProcessed = -1;
     stepToken = 0;
+    lastEff = -1;
   };
 
   const readouts = (): { label: string; value: () => number }[] => [
@@ -248,68 +307,30 @@ export default function PlasticityPanel(props: PlasticityPanelProps) {
         </span>
       </div>
 
-      {/* ── banner: only while plasticity is on ── */}
-      <Show when={props.enabled}>
-        <div
-          class="rounded-lg px-3.5 py-3 mb-4 text-sm leading-relaxed"
-          style={{
-            background: "color-mix(in srgb, var(--accent) 9%, transparent)",
-            border:
-              "1px solid color-mix(in srgb, var(--accent) 28%, transparent)",
-          }}
-        >
-          <span class="font-mono text-accent">Learning — right now, in your browser.</span>{" "}
-          <span class="text-dim">
-            No training run, no optimizer: a local three-factor rule updates the
-            readout each step — pain on wall-hits, dopamine on the goal.{" "}
+      {/* ── live metrics: values, not prose ── */}
+      <div class="flex flex-wrap items-center gap-x-4 gap-y-1.5 mb-4 font-mono text-xs tabular-nums">
+        <span class="inline-flex items-center gap-1.5" title={pulse().label}>
+          <span
+            class="pp-live inline-block w-2 h-2 rounded-full shrink-0"
+            style={{ background: PULSE_STYLE[pulse().cls].fg }}
+          />
+          <span class="text-dim">signal</span>
+          <span style={{ color: PULSE_STYLE[pulse().cls].fg }}>
+            {props.signal >= 0 ? "+" : ""}
+            {props.signal.toFixed(2)}
           </span>
-          <span class="text-accent">Inference IS learning.</span>
-        </div>
-      </Show>
-
-      {/* ── live pulse chip + ΔW ── */}
-      <div class="flex flex-wrap items-center gap-2 mb-4">
-        <span
-          class="pp-live inline-flex items-center gap-1.5 font-mono text-xs px-2 py-1 rounded"
-          style={{
-            background:
-              pulse().cls === "up"
-                ? "color-mix(in srgb, #3CB371 16%, transparent)"
-                : pulse().cls === "down"
-                  ? "color-mix(in srgb, #e0564e 16%, transparent)"
-                  : "var(--bg-2)",
-            color:
-              pulse().cls === "up"
-                ? "#2f8c5b"
-                : pulse().cls === "down"
-                  ? "#c63d35"
-                  : "var(--text-mute)",
-          }}
-        >
-          {pulse().label}
         </span>
-        <span class="font-mono text-xs text-mute tabular-nums">
-          ΔW {props.plasticDelta.toFixed(3)}
+        <span>
+          <span class="text-dim">Δw</span> {props.plasticDelta.toFixed(3)}
         </span>
         <Show when={props.lr != null}>
-          <span class="font-mono text-xs text-mute tabular-nums" title="three-factor learning rate θ (constant, set in the engine)">
-            lr {props.lr!.toFixed(3)}
-          </span>
-        </Show>
-        <Show when={props.reached}>
-          <span
-            class="font-mono text-xs px-2 py-1 rounded"
-            style={{
-              background: "color-mix(in srgb, var(--accent) 16%, transparent)",
-              color: "var(--accent)",
-            }}
-          >
-            ✦ goal · dopamine burst
+          <span title="three-factor learning rate θ">
+            <span class="text-dim">lr</span> {props.lr!.toFixed(3)}
           </span>
         </Show>
       </div>
 
-      {/* ── three readouts ── */}
+      {/* ── stat tiles ── */}
       <div class="grid grid-cols-3 gap-3 mb-4">
         <For each={readouts()}>
           {(r) => (
@@ -326,81 +347,58 @@ export default function PlasticityPanel(props: PlasticityPanelProps) {
         </For>
       </div>
 
-      {/* ── training loss curve (move-head cross-entropy → 0 = learned) ── */}
+      {/* ── metric sparklines: terse label + value, no captions ── */}
       <Show when={lossHist().length > 0}>
-        <div class="mb-4">
-          <div class="flex items-center justify-between mb-1.5">
-            <div class="text-[.72rem] text-mute font-mono">
-              training loss (lower = learning)
-            </div>
-            <div class="font-mono text-[.72rem] text-dim tabular-nums">
-              {currentLoss().toFixed(3)}
-            </div>
+        <div class="mb-3">
+          <div class="flex items-center justify-between mb-1 font-mono text-[.72rem]">
+            <span class="text-dim">loss</span>
+            <span class="text-mute tabular-nums">{currentLoss().toFixed(3)}</span>
           </div>
-          <div
-            class="rounded-lg overflow-hidden"
-            style={{ background: "var(--bg-2)", height: "46px" }}
-          >
-            <Sparkline values={lossNorm()} height={46} color="#7c6cf0" />
-          </div>
-          <div class="text-[.66rem] text-mute font-mono mt-1.5">
-            move-head cross-entropy vs the step it should take — the curve you
-            watch drop in training, here it drops at inference
+          <div class="rounded-lg overflow-hidden" style={{ background: "var(--bg-2)", height: "40px" }}>
+            <Sparkline values={lossNorm()} height={40} color="#7c6cf0" />
           </div>
         </div>
       </Show>
 
-      {/* ── wall-hit-rate sparkline (trending down = learning) ── */}
-      <div class="mb-4">
-        <div class="flex items-center justify-between mb-1.5">
-          <div class="text-[.72rem] text-mute font-mono">
-            wall-hit rate (lower = learning)
-          </div>
-          <div class="font-mono text-[.72rem] text-dim tabular-nums">
-            {(currentRate() * 100).toFixed(0)}%
-          </div>
+      <div class="mb-3">
+        <div class="flex items-center justify-between mb-1 font-mono text-[.72rem]">
+          <span class="text-dim">efficiency</span>
+          <span class="text-mute tabular-nums">{liveEff().toFixed(2)}×</span>
         </div>
-        <div
-          class="rounded-lg overflow-hidden"
-          style={{ background: "var(--bg-2)", height: "46px" }}
-        >
+        <div class="rounded-lg overflow-hidden" style={{ background: "var(--bg-2)", height: "40px" }}>
           <Show
-            when={history().length > 0}
-            fallback={
-              <div class="grid place-items-center h-full text-[.7rem] text-mute font-mono">
-                waiting for the first step…
-              </div>
-            }
+            when={effHist().length > 0}
+            fallback={<div class="grid place-items-center h-full text-[.7rem] text-mute font-mono">solving…</div>}
           >
-            <Sparkline values={rate()} height={46} />
+            <Sparkline values={effNorm()} height={40} color="#3aa86c" />
           </Show>
-        </div>
-        <div class="text-[.66rem] text-mute font-mono mt-1.5">
-          each point is a measured wall-hit over the last {HISTORY_WINDOW} moves
         </div>
       </div>
 
-      {/* ── reset + framing copy ── */}
-      <div class="pt-4 border-t border-line">
-        <div class="flex flex-wrap items-center gap-3">
-          <button
-            class="btn"
-            onClick={handleReset}
-            title="revert the readout to the frozen weights"
+      <div class="mb-4">
+        <div class="flex items-center justify-between mb-1 font-mono text-[.72rem]">
+          <span class="text-dim">wall-hit rate</span>
+          <span class="text-mute tabular-nums">{(currentRate() * 100).toFixed(0)}%</span>
+        </div>
+        <div class="rounded-lg overflow-hidden" style={{ background: "var(--bg-2)", height: "40px" }}>
+          <Show
+            when={history().length > 0}
+            fallback={<div class="grid place-items-center h-full text-[.7rem] text-mute font-mono">—</div>}
           >
-            Reset learning
-          </button>
-          <div class="text-[.72rem] text-mute leading-relaxed flex-1 min-w-[200px]">
-            <span class="text-dim">Restart</span> and{" "}
-            <span class="text-dim">New maze</span> keep what was learned.{" "}
-            <span class="text-dim">Reset</span> reverts the readout to the frozen
-            weights.
-          </div>
+            <Sparkline values={rate()} height={40} />
+          </Show>
         </div>
-        <div class="text-[.66rem] text-mute font-mono mt-3 leading-relaxed">
-          Bounded by design: ΔW and the readout weights are clamped each step, so
-          the local rule can't blow up or drift away from the trained brain.
-        </div>
+      </div>
+
+      {/* ── reset ── */}
+      <div class="pt-3 border-t border-line">
+        <button
+          class="btn"
+          onClick={handleReset}
+          title="revert the readout to the frozen weights (Restart / New maze keep what was learned)"
+        >
+          Reset learning
+        </button>
       </div>
     </div>
   );

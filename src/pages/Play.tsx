@@ -644,7 +644,8 @@ export default function Play() {
 
   let brainRotY = 0.7;
   let brainRotX = -0.32;
-  let brainZoom = 1; // wheel / pinch zoom
+  let brainZoom = 0.66; // wheel / pinch zoom — start zoomed OUT so the whole brain
+  // is in frame (people fullscreen + scroll in to see more)
   let brainDragging = false;
   let brainPointers = new Map<number, { x: number; y: number }>(); // active pointers (pinch)
   let pinchDist = 0;

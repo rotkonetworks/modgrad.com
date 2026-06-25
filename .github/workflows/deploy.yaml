@@ -69,6 +69,12 @@ jobs:
                 root /usr/share/nginx/html;
                 index index.html;
 
+                # Behind the TLS-terminating haproxy: emit RELATIVE redirects so a
+                # trailing-slash redirect (e.g. /play → /play/) keeps the https
+                # scheme instead of downgrading to http:// (mixed-content abort).
+                absolute_redirect off;
+                port_in_redirect off;
+
                 gzip on;
                 gzip_vary on;
                 gzip_min_length 1024;

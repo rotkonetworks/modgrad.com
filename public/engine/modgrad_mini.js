@@ -196,6 +196,30 @@ export function learned_vin_forward(tokens, grid_h, grid_w, agent_r, agent_c) {
 }
 
 /**
+ * Like `learned_vin_forward`, but appends the planner's per-cell scalar
+ * value map after the move logits: `[n_dirs logits | grid_h*grid_w value]`.
+ * The value map is the model's OWN proximity-to-goal estimate (no solver),
+ * so the caller can derive an honest "getting closer?" signal from it.
+ * @param {Float32Array} tokens
+ * @param {number} grid_h
+ * @param {number} grid_w
+ * @param {number} agent_r
+ * @param {number} agent_c
+ * @returns {Float32Array}
+ */
+export function learned_vin_forward_compass(tokens, grid_h, grid_w, agent_r, agent_c) {
+    const ptr0 = passArrayF32ToWasm0(tokens, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.learned_vin_forward_compass(ptr0, len0, grid_h, grid_w, agent_r, agent_c);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v2 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+    return v2;
+}
+
+/**
  * Parse `brain_weights.json` and stash the regional weights (and the
  * retina, if present) for subsequent `run_brain`s.
  *

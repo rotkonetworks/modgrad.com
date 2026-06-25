@@ -1495,6 +1495,56 @@ impl LearnedVin {
         grid_w: usize,
         agent: (usize, usize),
     ) -> Vec<f32> {
+        let v = self.config.value_dim.max(1);
+        let (value, value_init, gate) = self.run_value(tokens, grid_h, grid_w);
+        let (ar, ac) = agent;
+        let readout =
+            self.gather_agent_readout(ar, ac, grid_h, grid_w, &value, &value_init, &gate, v);
+        self.move_head.forward(&readout)
+    }
+
+    /// Like `forward`, but ALSO returns the planner's own per-cell scalar value
+    /// map (`sum_k |value[cell,k]|` — the same magnitude the backup uses to rank
+    /// neighbours). This is the model's OWN estimate of proximity-to-goal along
+    /// feasible routes (value floods backward from the goal through open cells),
+    /// so it can drive an honest "am I getting closer?" signal with NO solver in
+    /// the loop. Returns `(move_logits, value_map[n_cells])`.
+    pub fn forward_compass(
+        &self,
+        tokens: &[f32],
+        grid_h: usize,
+        grid_w: usize,
+        agent: (usize, usize),
+    ) -> (Vec<f32>, Vec<f32>) {
+        let n_cells = grid_h * grid_w;
+        let v = self.config.value_dim.max(1);
+        let (value, value_init, gate) = self.run_value(tokens, grid_h, grid_w);
+
+        // per-cell scalar = L1 magnitude of the value vector (the planner's
+        // flooded "closeness" field; higher = closer to the goal by route).
+        let mut vmap = vec![0.0f32; n_cells];
+        for cell in 0..n_cells {
+            vmap[cell] = value[cell * v..(cell + 1) * v]
+                .iter()
+                .map(|x| x.abs())
+                .sum::<f32>();
+        }
+
+        let (ar, ac) = agent;
+        let readout =
+            self.gather_agent_readout(ar, ac, grid_h, grid_w, &value, &value_init, &gate, v);
+        (self.move_head.forward(&readout), vmap)
+    }
+
+    /// Shared value propagation: per-cell reward/gate/value projections, then K
+    /// capped Bellman backups (with the optional Highway gate). Returns the final
+    /// `value` field, the pre-iteration `value_init`, and the per-cell `gate`.
+    fn run_value(
+        &self,
+        tokens: &[f32],
+        grid_h: usize,
+        grid_w: usize,
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         let n_cells = grid_h * grid_w;
         let v = self.config.value_dim.max(1);
 
@@ -1542,11 +1592,7 @@ impl LearnedVin {
             std::mem::swap(&mut value, &mut next);
         }
 
-        // ── 3. Ego-centric readout at the agent cell + move head ─────────
-        let (ar, ac) = agent;
-        let readout =
-            self.gather_agent_readout(ar, ac, grid_h, grid_w, &value, &value_init, &gate, v);
-        self.move_head.forward(&readout)
+        (value, value_init, gate)
     }
 
     /// One cell's Bellman backup — ported VERBATIM from SDK.
@@ -2610,6 +2656,31 @@ mod wasm_bindings {
                 JsValue::from_str("learned_vin_forward: no learned VIN loaded — call load_learned_vin first")
             })?;
             Ok(vin.forward(tokens, grid_h, grid_w, (agent_r, agent_c)))
+        })
+    }
+
+    /// Like `learned_vin_forward`, but appends the planner's per-cell scalar
+    /// value map after the move logits: `[n_dirs logits | grid_h*grid_w value]`.
+    /// The value map is the model's OWN proximity-to-goal estimate (no solver),
+    /// so the caller can derive an honest "getting closer?" signal from it.
+    #[wasm_bindgen]
+    pub fn learned_vin_forward_compass(
+        tokens: &[f32],
+        grid_h: usize,
+        grid_w: usize,
+        agent_r: usize,
+        agent_c: usize,
+    ) -> Result<Vec<f32>, JsValue> {
+        LEARNED_VIN.with(|v| {
+            let vref = v.borrow();
+            let vin = vref.as_ref().ok_or_else(|| {
+                JsValue::from_str("learned_vin_forward_compass: no learned VIN loaded — call load_learned_vin first")
+            })?;
+            let (logits, vmap) = vin.forward_compass(tokens, grid_h, grid_w, (agent_r, agent_c));
+            let mut out = Vec::with_capacity(logits.len() + vmap.len());
+            out.extend_from_slice(&logits);
+            out.extend_from_slice(&vmap);
+            Ok(out)
         })
     }
 }

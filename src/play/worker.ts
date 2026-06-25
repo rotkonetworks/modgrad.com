@@ -142,6 +142,11 @@ type EngineExtras = {
   learned_vin_forward:
     | ((tokens: Float32Array, gridH: number, gridW: number, ar: number, ac: number) => Float32Array)
     | null;
+  // compass variant: returns [4 move logits | SIZE² value map] — the planner's
+  // OWN proximity-to-goal field, so progress can be judged without the solver.
+  learned_vin_forward_compass?:
+    | ((tokens: Float32Array, gridH: number, gridW: number, ar: number, ac: number) => Float32Array)
+    | null;
 };
 
 let engine:
@@ -329,12 +334,23 @@ function vinForward(
   if (!engine?.learned_vin_forward) return null;
   try {
     const tokens = buildVinTokens(grid, _gr, _gc);
-    const out = engine.learned_vin_forward(tokens, SIZE, SIZE, ar, ac);
+    // Prefer the compass export: it appends the planner's SIZE² value map after
+    // the 4 logits, so progress can be judged from the model's OWN field (no
+    // solver). Fall back to the logits-only export on an older engine.
+    const compass = engine.learned_vin_forward_compass;
+    const out = compass
+      ? compass(tokens, SIZE, SIZE, ar, ac)
+      : engine.learned_vin_forward(tokens, SIZE, SIZE, ar, ac);
     if (!out || out.length < 4) return null;
     // pad to N_DIRECTIONS: the 4 learned dirs + a never-chosen Wait slot.
     const ml: number[] = [out[0], out[1], out[2], out[3]];
     while (ml.length < N_DIRECTIONS) ml.push(-1e30);
-    return { move_logits: ml, agent_cell: [ar, ac], value_grid: [], gate: [] };
+    // value map (planner's proximity-to-goal scalar per cell), if present.
+    const value_grid =
+      compass && out.length >= 4 + SIZE * SIZE
+        ? Array.from(out.subarray(4, 4 + SIZE * SIZE))
+        : [];
+    return { move_logits: ml, agent_cell: [ar, ac], value_grid, gate: [] };
   } catch {
     return null;
   }
@@ -1041,6 +1057,10 @@ self.onmessage = async (e: MessageEvent) => {
           fn<(t: Float32Array, h: number, w: number, ar: number, ac: number) => Float32Array>(
             "learned_vin_forward",
           ),
+        learned_vin_forward_compass:
+          fn<(t: Float32Array, h: number, w: number, ar: number, ac: number) => Float32Array>(
+            "learned_vin_forward_compass",
+          ),
       };
       const plastic =
         extras.apply_plasticity !== null && extras.reset_plasticity !== null;
@@ -1060,6 +1080,12 @@ self.onmessage = async (e: MessageEvent) => {
 
       // The closed loop drives on the LEARNED VIN when the engine exports it.
       vinAvailable = extras.learned_vin_forward !== null;
+      // honest progress signal needs the planner's value map (compass export);
+      // without it the neuromodulator falls back to the hidden BFS field.
+      console.log(
+        "[vin] progress signal:",
+        extras.learned_vin_forward_compass ? "planner value field" : "BFS fallback",
+      );
       vinMode = vinAvailable && msg.vinMode !== false; // default ON when available
       mazeCounter = 0;
 
@@ -1265,14 +1291,20 @@ self.onmessage = async (e: MessageEvent) => {
       const reached = next[0] === gr && next[1] === gc;
 
       // ── frustration neuromodulator: PAIN from no-progress, dopamine as carrot ──
-      // The signal is grounded in PROGRESS, not in matching an oracle: getting
-      // closer to the goal rewards; revisiting a cell with no progress is pain
-      // (the frustration of a loop). Frustration cools on progress, heats on
-      // stalls — that heat is what flips the decision from argmax → sampling.
+      // "Progress" is judged by the PLANNER'S OWN value field — its learned
+      // estimate of proximity-to-goal along feasible routes — NOT by the BFS
+      // solver. So the bio-escape is graded by the model itself, with no oracle
+      // in the loop. Because the value floods backward through open cells, it is
+      // inherently route-aware: a cell that's tile-close to the goal but walled
+      // off carries LOW value, so stepping there is not counted as progress.
+      // (Falls back to the hidden BFS field only if the planner value is absent.)
       const nextCell = nr2 * SIZE + nc2;
       const priorVisits = ep.visits.get(nextCell) ?? 0; // visits BEFORE this step's bookkeeping
-      const newDist = Number.isFinite(dist[nextCell]) ? dist[nextCell] : here;
-      const progressed = newDist < here;
+      const vgrid = vf ? vf.value_grid : [];
+      const havePlannerValue = vgrid.length >= SIZE * SIZE;
+      const progressed = havePlannerValue
+        ? vgrid[nextCell] > vgrid[cellIdx] // planner believes the next cell is closer
+        : (Number.isFinite(dist[nextCell]) ? dist[nextCell] : here) < here;
       let neuromod: Neuromod;
       let modScalar: number;
       if (reached) {

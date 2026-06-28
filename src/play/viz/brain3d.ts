@@ -422,18 +422,29 @@ export class Brain3D {
     }
     pts.sort((p, q) => q.depth - p.depth); // painter's algorithm: far first
 
-    // per-region activity (mean |act|) for the co-spike connections
+    // per-region activity for the co-spike connections. Normalise against the
+    // HOTTEST region this tick (not the hottest single neuron): mean/maxNeuron
+    // crushed every region to ~0.1, so the product of two ends was ~0.02 and the
+    // connectome never lit. Relative-to-hottest gives real contrast — the most
+    // active region reads ~1, quieter ones scale down, idle floors at 0.06.
     const regionAct = this.regionAct;
     regionAct.length = 0;
+    const rawMean: number[] = [];
+    let maxRegionMean = 1e-6;
     for (let r = 0; r < bref.regions.length; r++) {
       const ra = tick?.acts[r];
       if (ra && ra.length) {
         let s = 0;
         for (const v of ra) s += v < 0 ? -v : v;
-        regionAct[r] = Math.min(1, s / ra.length / amax);
+        const m = s / ra.length;
+        rawMean[r] = m;
+        if (m > maxRegionMean) maxRegionMean = m;
       } else {
-        regionAct[r] = 0.06;
+        rawMean[r] = 0;
       }
+    }
+    for (let r = 0; r < bref.regions.length; r++) {
+      regionAct[r] = rawMean[r] > 0 ? Math.max(0.06, Math.min(1, rawMean[r] / maxRegionMean)) : 0.06;
     }
 
     // project the region centres (same camera) for the connectome endpoints
@@ -594,7 +605,10 @@ export class Brain3D {
       for (const f of conn.from) {
         const fp = centerProj[f];
         if (!fp) continue;
-        const co = Math.min(1, regionAct[f] * regionAct[conn.to] * this.cospikeGain); // co-spike
+        // co-fire = the WEAKER of the two ends (a true AND: both must be active),
+        // scaled by the gain. Using min() instead of the product keeps the
+        // "both fire" semantics without crushing the value to invisibility.
+        const co = Math.min(1, Math.min(regionAct[f], regionAct[conn.to]) * this.cospikeGain);
         const key = f + "_" + conn.to;
         const g = Math.max(co, (this.edgeGlow.get(key) ?? 0) * decay); // persistence
         this.edgeGlow.set(key, g);

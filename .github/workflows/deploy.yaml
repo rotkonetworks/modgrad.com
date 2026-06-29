@@ -117,6 +117,13 @@ jobs:
                 location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
                     expires 1y;
                     add_header Cache-Control "public, immutable";
+                    # The Vite-bundled engine Web Worker ships under /assets/worker-*.js.
+                    # In the cross-origin-isolated /play context, COEP: require-corp
+                    # blocks a dedicated worker script that lacks CORP — even same-origin.
+                    # So every asset must carry CORP or the worker fails to load and the
+                    # page hangs on "loading". same-origin only restricts cross-site
+                    # hotlinking, which is fine for this vhost.
+                    add_header Cross-Origin-Resource-Policy "same-origin" always;
                 }
 
                 location / {

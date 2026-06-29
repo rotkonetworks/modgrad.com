@@ -278,12 +278,25 @@ export class Brain3D {
   private regionCenters: Vec3[] = [];
   private builtFor = -1; // total neuron count the layout was built for
 
-  // decayed co-spike per edge ("from_to" → glow); persists across frames.
+  // [start, count] into neuronPos for each region (neurons are laid down
+  // region-by-region, so each region owns a contiguous slice).
+  private regionRange: { start: number; count: number }[] = [];
+  // precomputed neuron→neuron strands for the connectome: a stable sample of
+  // individual-neuron pairs per wired region edge (so the wiring reads as real
+  // neural strands, not hub-to-hub spokes). Rebuilt with the neuron layout.
+  private connStrands: { fa: number; fb: number; key: string; from: number; to: number; phase: number }[] = [];
+
+  // decayed co-spike per region edge ("from_to" → glow); persists across frames.
   private readonly edgeGlow = new Map<string, number>();
 
   // Reused scratch buffers — avoid per-frame allocation churn.
   private projScratch: ProjPoint[] = [];
   private regionAct: number[] = [];
+  // per-neuron projected screen position (indexed by neuronPos index), filled
+  // each frame so the neuron-strand connectome can look endpoints up cheaply.
+  private projX = new Float32Array(0);
+  private projY = new Float32Array(0);
+  private projVis = new Uint8Array(0);
 
   constructor(opts: Brain3DOptions = {}) {
     this.colors = opts.regionColors ?? DEFAULT_REGION_COLORS;
@@ -313,6 +326,7 @@ export class Brain3D {
 
     this.neuronPos = [];
     this.regionCenters = [];
+    this.regionRange = [];
     const rand = makeRand(this.seed);
     for (let ri = 0; ri < regions.length; ri++) {
       const want = Math.max(1, Math.round(regions[ri].d_model * scale));
@@ -322,6 +336,7 @@ export class Brain3D {
         0,
       ];
       this.regionCenters[ri] = { x: cx, y: cy, z: cz };
+      this.regionRange[ri] = { start: this.neuronPos.length, count: want };
       // spread keyed to the *true* region size (so big regions stay big even
       // when sub-sampled), with a touch tighter packing for clearer separation.
       const spread = Math.sqrt(regions[ri].d_model) * 0.34;
@@ -340,6 +355,40 @@ export class Brain3D {
       }
     }
     this.builtFor = total;
+    const n = this.neuronPos.length;
+    if (this.projX.length !== n) {
+      this.projX = new Float32Array(n);
+      this.projY = new Float32Array(n);
+      this.projVis = new Uint8Array(n);
+    }
+    this.buildConnStrands();
+  }
+
+  // Sample a stable set of neuron→neuron strands for each wired region edge, so
+  // the connectome renders as individual neural fibres rather than hub spokes.
+  // Endpoints are real neurons (random within each region's slice); the per-edge
+  // co-fire glow is shared across that edge's strands. Seeded → no frame-to-frame
+  // flicker. STRANDS_PER_EDGE keeps the fibre count (and line cost) bounded.
+  private buildConnStrands(): void {
+    this.connStrands = [];
+    const conns = this.ref?.connections;
+    if (!conns) return;
+    const rand = makeRand((this.seed ^ 0x9e3779b1) >>> 0);
+    const STRANDS_PER_EDGE = 4;
+    for (const conn of conns) {
+      const tr = this.regionRange[conn.to];
+      if (!tr || tr.count === 0) continue;
+      for (const f of conn.from) {
+        const fr = this.regionRange[f];
+        if (!fr || fr.count === 0) continue;
+        const key = f + "_" + conn.to;
+        for (let k = 0; k < STRANDS_PER_EDGE; k++) {
+          const fa = fr.start + Math.floor(rand() * fr.count);
+          const fb = tr.start + Math.floor(rand() * tr.count);
+          this.connStrands.push({ fa, fb, key, from: f, to: conn.to, phase: rand() });
+        }
+      }
+    }
   }
 
   /**
@@ -406,11 +455,23 @@ export class Brain3D {
     };
 
     // ── project neurons into the reused scratch buffer ──
+    // Also record every neuron's projected screen position (by index) so the
+    // neuron-strand connectome can look up its endpoints without reprojecting.
     const pts = this.projScratch;
     pts.length = 0;
-    for (const np of this.neuronPos) {
+    const projX = this.projX;
+    const projY = this.projY;
+    const projVis = this.projVis;
+    for (let i = 0; i < this.neuronPos.length; i++) {
+      const np = this.neuronPos[i];
       const p = projectWith(vx, np.x, np.y, np.z);
-      if (!p.vis) continue; // culled (view.z <= near) — also rejects NaN
+      if (!p.vis) {
+        projVis[i] = 0; // culled (view.z <= near) — also rejects NaN
+        continue;
+      }
+      projX[i] = p.x;
+      projY[i] = p.y;
+      projVis[i] = 1;
       const a = actOf(np.region, np.index);
       pts.push({
         x: p.x,
@@ -447,13 +508,10 @@ export class Brain3D {
       regionAct[r] = rawMean[r] > 0 ? Math.max(0.06, Math.min(1, rawMean[r] / maxRegionMean)) : 0.06;
     }
 
-    // project the region centres (same camera) for the connectome endpoints
-    const centerProj = this.regionCenters.map((p) => project(p.x, p.y, p.z));
-
     ctx.globalCompositeOperation = "lighter";
 
     if (this.showConnectome) {
-      this.drawConnectome(ctx, bref, centerProj, regionAct, spikeHold, time);
+      this.drawConnectome(ctx, bref, regionAct, spikeHold, time);
     }
     this.drawNeurons(ctx, pts);
     if (this.showVision && vision && vision.length) {
@@ -591,45 +649,55 @@ export class Brain3D {
   private drawConnectome(
     ctx: CanvasRenderingContext2D,
     bref: BrainRef,
-    centerProj: { x: number; y: number; depth: number }[],
     regionAct: number[],
     spikeHold: number,
     time: number,
   ): void {
     const decay = 0.86 + spikeHold * 0.135; // 0.86 (brief) … ~0.995 (long)
     ctx.lineCap = "round";
+
+    // 1. update the per-region-edge co-fire glow (shared by all that edge's
+    //    neuron strands). co-fire = the WEAKER of the two ends (a true AND: both
+    //    regions must be active), scaled by the gain — min() keeps the "both
+    //    fire" semantics without crushing the value the way the product did.
     for (const conn of bref.connections) {
-      const tp = centerProj[conn.to];
-      if (!tp) continue;
-      const colT = this.regionColor(conn.to);
       for (const f of conn.from) {
-        const fp = centerProj[f];
-        if (!fp) continue;
-        // co-fire = the WEAKER of the two ends (a true AND: both must be active),
-        // scaled by the gain. Using min() instead of the product keeps the
-        // "both fire" semantics without crushing the value to invisibility.
         const co = Math.min(1, Math.min(regionAct[f], regionAct[conn.to]) * this.cospikeGain);
         const key = f + "_" + conn.to;
         const g = Math.max(co, (this.edgeGlow.get(key) ?? 0) * decay); // persistence
         this.edgeGlow.set(key, g);
-        const colF = this.regionColor(f);
-        const grad = ctx.createLinearGradient(fp.x, fp.y, tp.x, tp.y);
-        grad.addColorStop(0, hexA(colF, 0.07 + 0.85 * g));
-        grad.addColorStop(1, hexA(colT, 0.07 + 0.85 * g));
-        ctx.strokeStyle = grad;
-        ctx.lineWidth = 0.7 + 4 * g;
+      }
+    }
+
+    // 2. draw the individual neuron→neuron strands, lit by their edge's glow.
+    const projX = this.projX;
+    const projY = this.projY;
+    const projVis = this.projVis;
+    for (const s of this.connStrands) {
+      if (!projVis[s.fa] || !projVis[s.fb]) continue; // an endpoint is culled
+      const g = this.edgeGlow.get(s.key) ?? 0;
+      const ax = projX[s.fa];
+      const ay = projY[s.fa];
+      const bx = projX[s.fb];
+      const by = projY[s.fb];
+      const colF = this.regionColor(s.from);
+      const colT = this.regionColor(s.to);
+      const grad = ctx.createLinearGradient(ax, ay, bx, by);
+      grad.addColorStop(0, hexA(colF, 0.04 + 0.8 * g));
+      grad.addColorStop(1, hexA(colT, 0.04 + 0.8 * g));
+      ctx.strokeStyle = grad;
+      ctx.lineWidth = 0.4 + 2.4 * g;
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.lineTo(bx, by);
+      ctx.stroke();
+      // a spike travelling neuron→neuron while the fibre is hot
+      if (g > 0.12) {
+        const fr = (time * 0.55 + s.phase) % 1;
+        ctx.fillStyle = hexA("#ffffff", Math.min(0.95, g));
         ctx.beginPath();
-        ctx.moveTo(fp.x, fp.y);
-        ctx.lineTo(tp.x, tp.y);
-        ctx.stroke();
-        // a spark travelling source→destination while the link is hot
-        if (g > 0.1) {
-          const fr = (time * 0.55 + f * 0.17) % 1;
-          ctx.fillStyle = hexA("#ffffff", Math.min(0.95, g));
-          ctx.beginPath();
-          ctx.arc(fp.x + (tp.x - fp.x) * fr, fp.y + (tp.y - fp.y) * fr, 1.4 + 2.6 * g, 0, Math.PI * 2);
-          ctx.fill();
-        }
+        ctx.arc(ax + (bx - ax) * fr, ay + (by - ay) * fr, 1.1 + 2.2 * g, 0, Math.PI * 2);
+        ctx.fill();
       }
     }
   }

@@ -511,7 +511,7 @@ export class Brain3D {
     ctx.globalCompositeOperation = "lighter";
 
     if (this.showConnectome) {
-      this.drawConnectome(ctx, bref, regionAct, spikeHold, time);
+      this.drawConnectome(ctx, bref, regionAct, spikeHold);
     }
     this.drawNeurons(ctx, pts);
     if (this.showVision && vision && vision.length) {
@@ -651,7 +651,6 @@ export class Brain3D {
     bref: BrainRef,
     regionAct: number[],
     spikeHold: number,
-    time: number,
   ): void {
     const decay = 0.86 + spikeHold * 0.135; // 0.86 (brief) … ~0.995 (long)
     ctx.lineCap = "round";
@@ -662,7 +661,13 @@ export class Brain3D {
     //    fire" semantics without crushing the value the way the product did.
     for (const conn of bref.connections) {
       for (const f of conn.from) {
-        const co = Math.min(1, Math.min(regionAct[f], regionAct[conn.to]) * this.cospikeGain);
+        // SELECTIVE co-fire: only a STRONG mutual spike (both ends well above
+        // baseline) lights a fibre — subtract a threshold so the regions, which
+        // are active every tick, don't keep the whole web lit. A fibre flashes
+        // when its two regions peak together, then decays to nothing (the lines
+        // "vanish after the spike" and the neuron dots stay visible underneath).
+        const m = Math.min(regionAct[f], regionAct[conn.to]);
+        const co = Math.min(1, Math.max(0, m - 0.45) * this.cospikeGain * 2.0);
         const key = f + "_" + conn.to;
         const g = Math.max(co, (this.edgeGlow.get(key) ?? 0) * decay); // persistence
         this.edgeGlow.set(key, g);
@@ -674,31 +679,25 @@ export class Brain3D {
     const projY = this.projY;
     const projVis = this.projVis;
     for (const s of this.connStrands) {
-      if (!projVis[s.fa] || !projVis[s.fb]) continue; // an endpoint is culled
       const g = this.edgeGlow.get(s.key) ?? 0;
+      if (g < 0.03) continue; // no floor: a fibre is only visible during/after a
+      if (!projVis[s.fa] || !projVis[s.fb]) continue; // co-fire, then fades out.
       const ax = projX[s.fa];
       const ay = projY[s.fa];
       const bx = projX[s.fb];
       const by = projY[s.fb];
       const colF = this.regionColor(s.from);
       const colT = this.regionColor(s.to);
+      const a = Math.min(0.75, 0.72 * g); // kept under the neuron dots' brightness
       const grad = ctx.createLinearGradient(ax, ay, bx, by);
-      grad.addColorStop(0, hexA(colF, 0.04 + 0.8 * g));
-      grad.addColorStop(1, hexA(colT, 0.04 + 0.8 * g));
+      grad.addColorStop(0, hexA(colF, a));
+      grad.addColorStop(1, hexA(colT, a));
       ctx.strokeStyle = grad;
-      ctx.lineWidth = 0.4 + 2.4 * g;
+      ctx.lineWidth = 0.3 + 1.5 * g;
       ctx.beginPath();
       ctx.moveTo(ax, ay);
       ctx.lineTo(bx, by);
       ctx.stroke();
-      // a spike travelling neuron→neuron while the fibre is hot
-      if (g > 0.12) {
-        const fr = (time * 0.55 + s.phase) % 1;
-        ctx.fillStyle = hexA("#ffffff", Math.min(0.95, g));
-        ctx.beginPath();
-        ctx.arc(ax + (bx - ax) * fr, ay + (by - ay) * fr, 1.1 + 2.2 * g, 0, Math.PI * 2);
-        ctx.fill();
-      }
     }
   }
 

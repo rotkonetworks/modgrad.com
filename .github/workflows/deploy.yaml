@@ -109,6 +109,11 @@ jobs:
                 # winning for /engine/*.js, so CORP is applied. All same-origin already,
                 # but CORP makes the isolation explicit and future-proofs a CDN move.
                 location ^~ /engine/ {
+                    # rayon spawns its workerHelpers.js as nested workers from inside
+                    # the (require-corp) engine worker. A worker created in a
+                    # require-corp context must itself assert COEP: require-corp, not
+                    # just carry CORP — otherwise it is blocked (ERR_BLOCKED_BY_RESPONSE).
+                    add_header Cross-Origin-Embedder-Policy "require-corp" always;
                     add_header Cross-Origin-Resource-Policy "same-origin" always;
                     expires 1y;
                     add_header Cache-Control "public, immutable";
@@ -118,11 +123,13 @@ jobs:
                     expires 1y;
                     add_header Cache-Control "public, immutable";
                     # The Vite-bundled engine Web Worker ships under /assets/worker-*.js.
-                    # In the cross-origin-isolated /play context, COEP: require-corp
-                    # blocks a dedicated worker script that lacks CORP — even same-origin.
-                    # So every asset must carry CORP or the worker fails to load and the
-                    # page hangs on "loading". same-origin only restricts cross-site
-                    # hotlinking, which is fine for this vhost.
+                    # A dedicated worker created in the require-corp /play context must
+                    # itself assert COEP: require-corp AND pass the CORP check, or it is
+                    # blocked (ERR_BLOCKED_BY_RESPONSE) and the page hangs on "loading".
+                    # These headers are meaningful only for the worker script; on plain
+                    # js/css/img responses they are inert. same-origin CORP only blocks
+                    # cross-site hotlinking of our own assets, which is fine here.
+                    add_header Cross-Origin-Embedder-Policy "require-corp" always;
                     add_header Cross-Origin-Resource-Policy "same-origin" always;
                 }
 

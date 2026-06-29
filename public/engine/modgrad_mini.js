@@ -220,6 +220,31 @@ export function learned_vin_forward_compass(tokens, grid_h, grid_w, agent_r, age
 }
 
 /**
+ * DREAM CONSOLIDATION step on the LOADED learned VIN: one SGD update of the
+ * move head toward `target_move` for the maze in `tokens`/`agent`. Mutates
+ * the resident planner (persists for the session) and returns the
+ * cross-entropy loss before the step. A sleep/replay pass calls this per
+ * remembered maze (target = its BFS-optimal move).
+ * @param {Float32Array} tokens
+ * @param {number} grid_h
+ * @param {number} grid_w
+ * @param {number} agent_r
+ * @param {number} agent_c
+ * @param {number} target_move
+ * @param {number} lr
+ * @returns {number}
+ */
+export function learned_vin_train(tokens, grid_h, grid_w, agent_r, agent_c, target_move, lr) {
+    const ptr0 = passArrayF32ToWasm0(tokens, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.learned_vin_train(ptr0, len0, grid_h, grid_w, agent_r, agent_c, target_move, lr);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ret[0];
+}
+
+/**
  * Parse `brain_weights.json` and stash the regional weights (and the
  * retina, if present) for subsequent `run_brain`s.
  *

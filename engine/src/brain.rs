@@ -1595,6 +1595,68 @@ impl LearnedVin {
         (value, value_init, gate)
     }
 
+    /// DREAM CONSOLIDATION — one supervised SGD step on the move head (the
+    /// durable "cortex" readout) toward `target_move`, using cross-entropy on the
+    /// move logits. The value-iteration core stays frozen; only the readout that
+    /// turns the planner's value field into a move is fine-tuned. This is what a
+    /// sleep/replay pass calls per remembered maze (target = its BFS-optimal move,
+    /// the sanctioned "dream" answer). Mutates `self.move_head`; returns the
+    /// cross-entropy loss BEFORE the update (so callers can show it dropping).
+    pub fn consolidate_move(
+        &mut self,
+        tokens: &[f32],
+        grid_h: usize,
+        grid_w: usize,
+        agent: (usize, usize),
+        target_move: usize,
+        lr: f32,
+    ) -> f32 {
+        let v = self.config.value_dim.max(1);
+        let (value, value_init, gate) = self.run_value(tokens, grid_h, grid_w);
+        let (ar, ac) = agent;
+        let readout =
+            self.gather_agent_readout(ar, ac, grid_h, grid_w, &value, &value_init, &gate, v);
+        let logits = self.move_head.forward(&readout);
+        let n = logits.len();
+        if n == 0 || target_move >= n {
+            return 0.0;
+        }
+        // softmax over the move logits
+        let maxl = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let mut probs = vec![0.0f32; n];
+        let mut sum = 0.0f32;
+        for o in 0..n {
+            let e = (logits[o] - maxl).exp();
+            probs[o] = e;
+            sum += e;
+        }
+        let inv = 1.0 / sum.max(1e-9);
+        for p in probs.iter_mut() {
+            *p *= inv;
+        }
+        let loss = -(probs[target_move].max(1e-9)).ln();
+
+        // gradient of cross-entropy wrt logits: p - onehot(target). NORMALISED
+        // (NLMS-style) step: divide by ‖readout‖² so the update is scale-invariant
+        // — the value-iteration readout can be large, and a plain SGD step blows
+        // up. This keeps each consolidation bounded and the loss DROPS.
+        let in_dim = readout.len();
+        let mut rn2 = 0.0f32;
+        for &x in &readout {
+            rn2 += x * x;
+        }
+        let scale = lr / (rn2 + 1.0);
+        for o in 0..n {
+            let g = probs[o] - if o == target_move { 1.0 } else { 0.0 };
+            let row = o * in_dim;
+            for i in 0..in_dim {
+                self.move_head.weight[row + i] -= scale * g * readout[i];
+            }
+            self.move_head.bias[o] -= lr * 0.1 * g; // bias: small fixed step
+        }
+        loss
+    }
+
     /// One cell's Bellman backup — ported VERBATIM from SDK.
     #[allow(clippy::too_many_arguments)]
     fn backup_cell(
@@ -2681,6 +2743,40 @@ mod wasm_bindings {
             out.extend_from_slice(&logits);
             out.extend_from_slice(&vmap);
             Ok(out)
+        })
+    }
+
+    /// DREAM CONSOLIDATION step on the LOADED learned VIN: one SGD update of the
+    /// move head toward `target_move` for the maze in `tokens`/`agent`. Mutates
+    /// the resident planner (persists for the session) and returns the
+    /// cross-entropy loss before the step. A sleep/replay pass calls this per
+    /// remembered maze (target = its BFS-optimal move).
+    #[wasm_bindgen]
+    pub fn learned_vin_train(
+        tokens: &[f32],
+        grid_h: usize,
+        grid_w: usize,
+        agent_r: usize,
+        agent_c: usize,
+        target_move: i32,
+        lr: f32,
+    ) -> Result<f32, JsValue> {
+        if target_move < 0 {
+            return Ok(0.0);
+        }
+        LEARNED_VIN.with(|v| {
+            let mut vref = v.borrow_mut();
+            let vin = vref.as_mut().ok_or_else(|| {
+                JsValue::from_str("learned_vin_train: no learned VIN loaded — call load_learned_vin first")
+            })?;
+            Ok(vin.consolidate_move(
+                tokens,
+                grid_h,
+                grid_w,
+                (agent_r, agent_c),
+                target_move as usize,
+                lr,
+            ))
         })
     }
 }

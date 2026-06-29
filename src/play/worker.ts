@@ -147,6 +147,12 @@ type EngineExtras = {
   learned_vin_forward_compass?:
     | ((tokens: Float32Array, gridH: number, gridW: number, ar: number, ac: number) => Float32Array)
     | null;
+  // DREAM CONSOLIDATION: one SGD step on the learned planner's move head toward
+  // targetMove for this maze; returns the cross-entropy loss BEFORE the step
+  // (lr=0 → measure-only). Mutates the resident planner (persists this session).
+  learned_vin_train?:
+    | ((tokens: Float32Array, gridH: number, gridW: number, ar: number, ac: number, targetMove: number, lr: number) => number)
+    | null;
 };
 
 let engine:
@@ -187,9 +193,21 @@ let SIZE = 9;
 // When on, the VIN drives the predicted move + verdict and learns each step.
 let vinMode = true; // caller may override at init; only effective if vin_forward exists
 let vinAvailable = false; // set true at init iff vin_forward is a function
-let mazeCounter = 0; // counts mazes seen — gates periodic sleep/replay
-const DREAM_EVERY = 5; // run a sleep/replay consolidation every Nth new maze
+let mazeCounter = 0; // counts mazes seen (telemetry)
+let sleepPressure = 0; // homeostatic drive to consolidate; sleep when it crosses
+const SLEEP_PRESSURE_MAX = 10; // …this threshold (then discharge to 0)
 const DREAM_MAX_REPLAYS = 64; // bounded offline replays per sleep pass
+const DREAM_REPS = 3; // passes over each bookmark — repetition consolidates
+const DREAM_LR = 0.3; // normalized (NLMS) rate for the move-head consolidation
+
+// Result of one sleep/replay consolidation pass (for the UI + log).
+type DreamResult = {
+  replays: number; // total move-head updates applied
+  bookmarks: number; // distinct episodes consolidated (top-salience set)
+  nightmares: number; // of those, wall-hit episodes (highest priority)
+  lossBefore: number; // mean cross-entropy on the set before the pass
+  lossAfter: number; // …and after (drops as the planner consolidates)
+};
 // Three-factor learning rates θ baked into the engine (brain.rs): the VIN
 // move-head uses 0.05, the fallback apply_plasticity uses 0.02. Surfaced so the
 // Plasticity panel can show the lr next to the loss curve.
@@ -308,12 +326,13 @@ function runBrain(
 // the maze (walls + goal). No solved distances, no route, no agent position
 // (the agent cell is passed to the planner separately). Exactly the encoding the
 // VIN was trained on. Row-major over cells, raw_dim=3.
-function buildVinTokens(grid: number[], gr: number, gc: number): Float32Array {
-  const n = SIZE * SIZE;
+function buildVinTokens(grid: number[], gr: number, gc: number, size = SIZE): Float32Array {
+  const S = size;
+  const n = S * S;
   const t = new Float32Array(n * 3);
-  for (let r = 0; r < SIZE; r++) {
-    for (let c = 0; c < SIZE; c++) {
-      const cell = r * SIZE + c;
+  for (let r = 0; r < S; r++) {
+    for (let c = 0; c < S; c++) {
+      const cell = r * S + c;
       t[cell * 3] = grid[cell] === 1 ? 0 : 1; // is_open
       t[cell * 3 + 1] = r === gr && c === gc ? 1 : 0; // is_goal
       t[cell * 3 + 2] = 1; // bias
@@ -419,41 +438,68 @@ function sampleDir(p: number[], roll: number): number {
 }
 
 // ── DREAM / SLEEP REPLAY ────────────────────────────────────────────────────
-// Offline consolidation: replay a bounded sample of stored episodes through
-// vin_learn again — re-running vin_forward on each remembered maze to re-derive
-// its current pain, then re-teaching toward its BFS-optimal move. Wall-hit
-// "nightmares" are prioritized so the VIN over-rehearses its worst mistakes.
-// Returns the number of replays actually performed (0 if VIN/learn absent).
-function dreamReplay(maxReplays: number): number {
-  if (!engine?.vin_forward || !engine?.vin_learn) return 0;
-  // gather episodes that carry replay context, nightmares (wall) first.
+// Sleep consolidation, modelled on hippocampal sharp-wave ripples: during the
+// day the agent BOOKMARKS salient episodes (wall-hit "nightmares", goal reaches,
+// high-surprise steps). At sleep, the highest-SALIENCE bookmarks win a
+// competition and are REPLAYED — repeatedly (repetition consolidates) — to
+// fine-tune the durable planner (its move head, the "cortex") toward each maze's
+// BFS-optimal move (the sanctioned dream answer). The frozen value-iteration
+// core is untouched; only the readout consolidates. Returns before/after loss so
+// the demo can show the planner's gap dropping. No-op if the engine can't train.
+function dreamReplay(maxReplays: number): DreamResult {
+  const none: DreamResult = { replays: 0, bookmarks: 0, nightmares: 0, lossBefore: 0, lossAfter: 0 };
+  const train = engine?.learned_vin_train;
+  if (!train) return none;
   const withReplay = episodicMem.filter((ep) => ep.replay != null);
-  if (!withReplay.length) return 0;
-  const nightmares = withReplay.filter((ep) => ep.verdict === "wall");
-  const rest = withReplay.filter((ep) => ep.verdict !== "wall");
-  const ordered = [...nightmares, ...rest].slice(0, maxReplays);
-  let replays = 0;
-  for (const ep of ordered) {
-    const r = ep.replay!;
-    try {
-      // re-derive the current pain: does the VIN STILL want a wall move here?
-      const vf = vinForward(r.grid, r.ar, r.ac, r.gr, r.gc);
-      let pain = r.pain; // fall back to the stored gain (signed: − tiers learn harder)
-      if (vf) {
-        const dist = goalDist(r.grid, r.gr, r.gc);
-        const here = dist[r.ar * SIZE + r.ac];
-        const v = classifyMove(argmaxMove(vf.move_logits), r.grid, r.ar, r.ac, here, dist);
-        // signed-gain convention (reward_signal = 1 − pain): wall → −1.0 (gain 2.0),
-        // astray/wait → −0.3, progress → +0.3. Consolidates nightmares the hardest.
-        pain = v === "wall" ? -1.0 : v === "astray" || v === "wait" ? -0.3 : 0.3;
+  if (!withReplay.length) return none;
+
+  // SALIENCE = surprise (|pain|) + a nightmare/goal bonus — the ripple
+  // "competition": strongest patterns win, the rest fade. Keep the top set that
+  // fits the budget across DREAM_REPS passes.
+  const scored = withReplay
+    .map((ep) => {
+      const r = ep.replay!;
+      const surprise = Math.abs(r.pain ?? 0);
+      const bonus = ep.verdict === "wall" ? 1.0 : ep.reached ? 0.4 : 0;
+      return { ep, sal: surprise + bonus };
+    })
+    .sort((a, b) => b.sal - a.sal);
+  const keep = Math.max(1, Math.floor(maxReplays / DREAM_REPS));
+  const top = scored.slice(0, keep);
+  const nightmares = top.filter((s) => s.ep.verdict === "wall").length;
+
+  // mean cross-entropy of the planner on the bookmark set (lr=0 → measure-only).
+  const measure = (): number => {
+    let sum = 0;
+    let k = 0;
+    for (const { ep } of top) {
+      const r = ep.replay!;
+      const gsz = Math.round(Math.sqrt(r.grid.length)) || SIZE;
+      const loss = train(buildVinTokens(r.grid, r.gr, r.gc, gsz), gsz, gsz, r.ar, r.ac, r.optMove, 0);
+      if (Number.isFinite(loss)) {
+        sum += loss;
+        k++;
       }
-      const delta = engine.vin_learn(r.optMove, pain);
-      if (typeof delta === "number" && Number.isFinite(delta)) replays++;
-    } catch {
-      /* skip a bad replay, keep consolidating */
+    }
+    return k ? sum / k : 0;
+  };
+
+  const lossBefore = measure();
+  let replays = 0;
+  for (let pass = 0; pass < DREAM_REPS; pass++) {
+    for (const { ep } of top) {
+      const r = ep.replay!;
+      try {
+        const gsz = Math.round(Math.sqrt(r.grid.length)) || SIZE;
+        const loss = train(buildVinTokens(r.grid, r.gr, r.gc, gsz), gsz, gsz, r.ar, r.ac, r.optMove, DREAM_LR);
+        if (Number.isFinite(loss)) replays++;
+      } catch {
+        /* skip a bad replay, keep consolidating */
+      }
     }
   }
-  return replays;
+  const lossAfter = measure();
+  return { replays, bookmarks: top.length, nightmares, lossBefore, lossAfter };
 }
 
 // ── Episodic memory ───────────────────────────────────────────────────────
@@ -960,7 +1006,7 @@ self.onmessage = async (e: MessageEvent) => {
       // leaves it as a real runtime import instead of trying to resolve it.
       // ?v=… busts any stale cached engine (a mismatched glue/wasm pair fails
       // to instantiate); bump ENGINE_VER whenever the wasm is rebuilt.
-      const ENGINE_VER = "20260626v2-compass";
+      const ENGINE_VER = "20260628-sleep";
       const enginePath =
         ["", "engine", "modgrad_mini.js"].join("/") + "?v=" + ENGINE_VER;
       // Load the glue as a blob module. Vite's DEV server refuses to serve
@@ -1062,6 +1108,10 @@ self.onmessage = async (e: MessageEvent) => {
           fn<(t: Float32Array, h: number, w: number, ar: number, ac: number) => Float32Array>(
             "learned_vin_forward_compass",
           ),
+        learned_vin_train:
+          fn<(t: Float32Array, h: number, w: number, ar: number, ac: number, tm: number, lr: number) => number>(
+            "learned_vin_train",
+          ),
       };
       const plastic =
         extras.apply_plasticity !== null && extras.reset_plasticity !== null;
@@ -1089,6 +1139,7 @@ self.onmessage = async (e: MessageEvent) => {
       );
       vinMode = vinAvailable && msg.vinMode !== false; // default ON when available
       mazeCounter = 0;
+      sleepPressure = 0;
 
       engine = runBrainPixels
         ? { run_brain_pixels: runBrainPixels, retina_maps: retinaMaps, ...extras }
@@ -1345,6 +1396,16 @@ self.onmessage = async (e: MessageEvent) => {
         neuromod = "disappointment"; // new ground, not closer (a detour)
         modScalar = -0.15;
       }
+      // ── SLEEP PRESSURE (homeostatic) ──────────────────────────────────────
+      // Salient/surprising experience accrues a drive to consolidate, the way
+      // sharp-wave-ripple bookmarks pile up during waking. A wall-hit nightmare
+      // pushes hardest; any surprise (|neuromod|) adds a little; reaching the
+      // goal is salient too. The agent sleeps when this crosses the threshold —
+      // when it NEEDS to, not on a clock — so a mistake-heavy stretch triggers a
+      // sleep sooner than a clean run. Discharged to 0 each time it sleeps.
+      if (vinOn) {
+        sleepPressure += verdict === "wall" ? 1.5 : Math.abs(modScalar) * 0.6;
+      }
       // frustration dynamics keyed on COVERING NEW GROUND, not on the planner's
       // value: any fresh cell cools it (we're exploring); a revisit heats it hard
       // (the ping-pong we must escape). This climbs monotonically inside a loop.
@@ -1517,6 +1578,7 @@ self.onmessage = async (e: MessageEvent) => {
       episodicMem = []; // forget recalled situations too — a clean slate
       episodeCounter = 0;
       mazeCounter = 0; // restart the dream/sleep cadence
+      sleepPressure = 0;
       mazeEp = null; // drop the self-drive episode (efficiency/budget reset)
       if (engine?.reset_plasticity) {
         try {
@@ -1557,19 +1619,40 @@ self.onmessage = async (e: MessageEvent) => {
       }
 
       // ── DREAM / SLEEP REPLAY (VIN) ──
-      // Every DREAM_EVERY mazes, run a short offline consolidation pass over
-      // stored episodes (wall-hit nightmares first) before handing out the new
-      // maze. Bounded by DREAM_MAX_REPLAYS so it never stalls the loop.
+      // Sleep when the homeostatic pressure (accrued from salient/surprising
+      // experience while solving) crosses the threshold — when it NEEDS to, not
+      // on a clock. Then discharge the pressure. The pass replays the
+      // highest-salience bookmarks; bounded by DREAM_MAX_REPLAYS so it never
+      // stalls the loop.
       mazeCounter++;
       let dreaming = false;
       let replays = 0;
-      if (vinMode && vinAvailable && mazeCounter % DREAM_EVERY === 0) {
-        replays = dreamReplay(DREAM_MAX_REPLAYS);
-        dreaming = replays > 0;
-        if (dreaming) post({ type: "slept", replays });
+      if (vinMode && vinAvailable && sleepPressure >= SLEEP_PRESSURE_MAX) {
+        const d = dreamReplay(DREAM_MAX_REPLAYS);
+        replays = d.replays;
+        dreaming = d.replays > 0;
+        if (dreaming) {
+          post({
+            type: "slept",
+            replays: d.replays,
+            bookmarks: d.bookmarks,
+            nightmares: d.nightmares,
+            lossBefore: d.lossBefore,
+            lossAfter: d.lossAfter,
+          });
+        }
+        sleepPressure = 0; // discharge after sleeping
       }
 
-      post({ type: "maze", grid: m.grid, start: m.start, end: m.end, dreaming, replays });
+      post({
+        type: "maze",
+        grid: m.grid,
+        start: m.start,
+        end: m.end,
+        dreaming,
+        replays,
+        sleepPressure: Math.min(1, sleepPressure / SLEEP_PRESSURE_MAX),
+      });
       return;
     }
   } catch (err) {

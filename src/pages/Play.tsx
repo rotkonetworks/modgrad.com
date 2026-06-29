@@ -293,9 +293,24 @@ export default function Play() {
         batch(() => {
           setGenerating(false);
           setMazeNum((n) => n + 1);
+          if (typeof msg.sleepPressure === "number")
+            setSleepPressure(msg.sleepPressure);
         });
         loadMaze(msg as Maze);
         if (!reduced) startPlaying();
+        return;
+      }
+      if (msg.type === "slept") {
+        setSleepPressure(0);
+        setSleeping({
+          replays: msg.replays ?? 0,
+          bookmarks: msg.bookmarks ?? 0,
+          nightmares: msg.nightmares ?? 0,
+          lossBefore: msg.lossBefore ?? 0,
+          lossAfter: msg.lossAfter ?? 0,
+        });
+        if (sleepTimer) clearTimeout(sleepTimer);
+        sleepTimer = setTimeout(() => setSleeping(null), 4000);
         return;
       }
       if (msg.type === "step") onStepResult(msg as StepMsg);
@@ -654,6 +669,19 @@ export default function Play() {
   const [brainAutoRotate, setBrainAutoRotate] = createSignal(true);
   // co-spike line persistence: 0 = instant, 1 = long trail (per-frame decay)
   const [spikeHold, setSpikeHold] = createSignal(0.55);
+  // sleep/consolidation flash: set when the worker reports a dream pass, cleared
+  // after a couple seconds. Drives the SLEEPING overlay on the 3D brain.
+  const [sleeping, setSleeping] = createSignal<{
+    replays: number;
+    bookmarks: number;
+    nightmares: number;
+    lossBefore: number;
+    lossAfter: number;
+  } | null>(null);
+  let sleepTimer: ReturnType<typeof setTimeout> | undefined;
+  // homeostatic sleep pressure (0..1), reported by the worker each maze. Rises
+  // with surprise/wall-hits and discharges to 0 when a consolidation pass fires.
+  const [sleepPressure, setSleepPressure] = createSignal(0);
   let brainTime = 0; // seconds, advanced by the rAF loop for the idle shimmer
   let brainReplay = 0; // fractional tick index; loops the trace so neurons keep
   // spiking between steps instead of freezing on the last tick.
@@ -1511,6 +1539,42 @@ export default function Play() {
               onLostPointerCapture={brainPointerUp}
               aria-label="the eight-region brain computing — drag to rotate, scroll to zoom; fullscreen for WASD free-fly"
             />
+
+            {/* ── SLEEP / CONSOLIDATION flash (hippocampal sharp-wave replay) ── */}
+            <Show when={sleeping()}>
+              {(s) => (
+                <div
+                  class="absolute inset-0 flex items-center justify-center pointer-events-none"
+                  style={{ background: "rgba(8,7,18,0.55)", "backdrop-filter": "blur(1px)" }}
+                >
+                  <div
+                    class="text-center font-mono px-5 py-4 rounded-xl"
+                    style={{
+                      background: "rgba(20,18,40,0.78)",
+                      border: "1px solid rgba(140,120,240,0.4)",
+                      color: "rgba(255,255,255,0.92)",
+                      "box-shadow": "0 0 40px rgba(98,67,217,0.35)",
+                    }}
+                  >
+                    <div class="text-[1.1rem] tracking-wide mb-1 animate-pulse">💤 SLEEPING</div>
+                    <div class="text-[.74rem] text-[rgba(255,255,255,0.7)] leading-relaxed">
+                      replaying {s().bookmarks} bookmarked maze{s().bookmarks === 1 ? "" : "s"}
+                      {s().nightmares > 0 ? ` · ${s().nightmares} nightmare${s().nightmares === 1 ? "" : "s"}` : ""}
+                      <br />
+                      {s().replays} replays · planner gap{" "}
+                      {s().lossAfter <= s().lossBefore ? (
+                        <span style={{ color: "#7ee0a8" }}>
+                          ↓ {(s().lossBefore - s().lossAfter).toFixed(3)}
+                        </span>
+                      ) : (
+                        <span>{s().lossAfter.toFixed(3)}</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </Show>
+
             <div class="absolute top-2 right-2 flex items-center gap-1.5">
               <Show when={!isFullscreen()}>
                 <button
@@ -1818,6 +1882,22 @@ export default function Play() {
 
           <div class="flex flex-wrap items-center gap-x-4 gap-y-1.5 mt-3 text-[.72rem] text-mute font-mono">
             <span class="opacity-80">each dot = 1 neuron · brighter = spiking</span>
+            <span
+              class="inline-flex items-center gap-1.5"
+              title="homeostatic sleep pressure — rises with wall-hits and surprise; a consolidation pass fires when it fills"
+            >
+              💤 sleep&nbsp;pressure
+              <span class="inline-block w-16 h-1.5 rounded-full bg-white/10 overflow-hidden align-middle">
+                <span
+                  class="block h-full rounded-full transition-[width,background] duration-300"
+                  style={{
+                    width: `${Math.round(sleepPressure() * 100)}%`,
+                    background:
+                      sleepPressure() > 0.75 ? "#ff7a59" : "#8a7dff",
+                  }}
+                />
+              </span>
+            </span>
             <label class="inline-flex items-center gap-1.5" title="how long co-spike lines linger">
               spike trail
               <input
@@ -1934,6 +2014,18 @@ export default function Play() {
               more value-iteration rounds, no retraining. Solve-rate drops with
               size, honestly, as the planning gets harder — but it does plan, not
               memorize.
+            </div>
+            <div>
+              <div class="eyebrow mb-1.5">Sleep &amp; consolidation</div>
+              Modelled on hippocampal sharp-wave ripples. While solving, the agent{" "}
+              <strong>bookmarks</strong> salient episodes — wall-hits
+              (“nightmares”), goal reaches, high-surprise steps — tagging them by
+              salience. Every few mazes it <strong>sleeps</strong>: the
+              highest-salience bookmarks win a competition and are replayed,
+              repeatedly, to fine-tune the durable planner toward each maze's
+              optimal move. The frozen value-iteration core is untouched; only the
+              readout consolidates. Answers appear <em>only</em> in this dream —
+              never during live planning — and you watch the planner's gap drop.
             </div>
             <div>
               <div class="eyebrow mb-1.5">Engine</div>

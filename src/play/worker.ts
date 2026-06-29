@@ -1011,7 +1011,7 @@ self.onmessage = async (e: MessageEvent) => {
       // leaves it as a real runtime import instead of trying to resolve it.
       // ?v=… busts any stale cached engine (a mismatched glue/wasm pair fails
       // to instantiate); bump ENGINE_VER whenever the wasm is rebuilt.
-      const ENGINE_VER = "20260630-sdk-mt";
+      const ENGINE_VER = "20260630-sdk-mt-coep";
       const v = "?v=" + ENGINE_VER;
 
       // ── single- vs multi-threaded engine selection ──────────────────────

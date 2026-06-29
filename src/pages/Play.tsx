@@ -643,6 +643,7 @@ export default function Play() {
       thinking: runState() === "thinking",
       tick: tickIdx(),
       ticksTotal: ticksTotal(),
+      sleeping: !!sleeping(),
     };
     drawMazeModule(
       ctx,
@@ -1028,12 +1029,13 @@ export default function Play() {
 
   // redraw whenever the relevant signals change
   createEffect(() => {
-    // dependencies: maze, agent, visited, tick, runState
+    // dependencies: maze, agent, visited, tick, runState, sleeping
     currentMaze();
     agent();
     visited();
     tickIdx();
     runState();
+    sleeping();
     drawMaze();
   });
   // hand the brain structure to the 3D renderer whenever it loads/changes
@@ -1573,24 +1575,21 @@ export default function Play() {
             {/* ── SLEEP / CONSOLIDATION flash (hippocampal sharp-wave replay) ── */}
             <Show when={sleeping()}>
               {(s) => (
+                // bottom bar only — the brain stays fully visible (dreaming)
+                // above it; a soft gradient keeps the text legible over spikes.
                 <div
-                  class="absolute inset-0 flex items-center justify-center pointer-events-none"
-                  style={{ background: "rgba(8,7,18,0.55)", "backdrop-filter": "blur(1px)" }}
+                  class="absolute inset-x-0 bottom-0 flex flex-col items-center justify-end pb-3 px-3 pointer-events-none"
+                  style={{
+                    background:
+                      "linear-gradient(to top, rgba(8,7,18,0.78) 0%, rgba(8,7,18,0.35) 55%, transparent 100%)",
+                  }}
                 >
-                  <div
-                    class="text-center font-mono px-5 py-4 rounded-xl"
-                    style={{
-                      background: "rgba(20,18,40,0.78)",
-                      border: "1px solid rgba(140,120,240,0.4)",
-                      color: "rgba(255,255,255,0.92)",
-                      "box-shadow": "0 0 40px rgba(98,67,217,0.35)",
-                    }}
-                  >
-                    <div class="text-[1.1rem] tracking-wide mb-1 animate-pulse">💤 SLEEPING</div>
-                    <div class="text-[.74rem] text-[rgba(255,255,255,0.7)] leading-relaxed">
+                  <div class="font-mono text-center" style={{ color: "rgba(255,255,255,0.92)" }}>
+                    <div class="text-[.92rem] tracking-wide mb-0.5 animate-pulse">💤 SLEEPING · dreaming</div>
+                    <div class="text-[.7rem] text-[rgba(255,255,255,0.72)] leading-snug">
                       replaying {s().bookmarks} bookmarked maze{s().bookmarks === 1 ? "" : "s"}
                       {s().nightmares > 0 ? ` · ${s().nightmares} nightmare${s().nightmares === 1 ? "" : "s"}` : ""}
-                      <br />
+                      {" · "}
                       {s().replays} replays · planner gap{" "}
                       {s().lossAfter <= s().lossBefore ? (
                         <span style={{ color: "#7ee0a8" }}>

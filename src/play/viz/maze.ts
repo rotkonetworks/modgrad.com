@@ -73,6 +73,8 @@ export interface MazeRenderState {
   tick: number;
   /** Total ticks in the thinking animation; used to normalise `tick`. */
   ticksTotal: number;
+  /** True while the agent is resting during a sleep/consolidation pass. */
+  sleeping?: boolean;
 }
 
 /** The paper-theme palette, resolved by the caller (e.g. from CSS vars). */
@@ -329,6 +331,25 @@ export function drawMaze(
     const pulse = 0.34 + (state.tick / Math.max(1, state.ticksTotal)) * 0.18;
     ctx.arc(ax, ay, cell * pulse, 0, Math.PI * 2);
     ctx.stroke();
+  }
+
+  // Sleeping: a rising "z z Z" trail off the agent's dot so it reads as napping
+  // while the planner consolidates.
+  if (state.sleeping) {
+    ctx.save();
+    ctx.fillStyle = open; // light z's on the dark accent dot
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    const zs = [
+      { dx: 0.16, dy: -0.30, s: 0.30, t: "z" },
+      { dx: 0.34, dy: -0.50, s: 0.40, t: "z" },
+      { dx: 0.56, dy: -0.74, s: 0.54, t: "Z" },
+    ];
+    for (const z of zs) {
+      ctx.font = `700 ${Math.round(cell * z.s)}px ui-monospace, monospace`;
+      ctx.fillText(z.t, ax + cell * z.dx, ay + cell * z.dy);
+    }
+    ctx.restore();
   }
 
   // ── Layer 6: MISSTEP indicator (red) ───────────────────────────────────────

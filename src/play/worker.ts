@@ -173,7 +173,9 @@ let engine:
 // changes, so the UI overlay stays valid).
 type AttnMode = "off" | "coarse" | "full";
 let attnMode: AttnMode = "coarse";
-let attnEvery = 3; // recompute occlusion at most every N steps
+let attnEvery = 1; // recompute occlusion every N steps (1 = every step). Coarse
+// mode keeps each refresh to ~a dozen brain-forwards near the agent, so per-step
+// is affordable; the overlay tracks the agent live instead of lagging by steps.
 let attnRadius = 2; // coarse mode: Chebyshev radius around the agent to probe
 let attnStepCounter = 0; // increments per step; gates recomputation
 let attnCache: number[] | null = null; // last computed saliency grid (SIZE²)
@@ -1042,11 +1044,11 @@ self.onmessage = async (e: MessageEvent) => {
       mazeEp = null; // fresh session → no episode until the first maze loads
 
       // ── attention config (Task 1) — caller may override mode / cadence ──
-      // PERF (Part B): occlusion is O(SIZE²) brain-forwards/step; on larger
-      // boards (SIZE>9) default to coarse + a slower cadence to stay cheap.
+      // PERF (Part B): occlusion is O(SIZE²) brain-forwards/step in full mode;
+      // on larger boards (SIZE>9) stay coarse so each refresh is bounded by the
+      // radius (a dozen-ish cells), which keeps every-step refresh affordable.
       if (SIZE > 9) {
         attnMode = "coarse";
-        attnEvery = Math.max(attnEvery, 4);
       }
       if (msg.attnMode === "off" || msg.attnMode === "coarse" || msg.attnMode === "full") {
         attnMode = msg.attnMode;
@@ -1183,13 +1185,10 @@ self.onmessage = async (e: MessageEvent) => {
         ensurePxBufs();
         attnStepCounter = 0;
         attnCache = null;
-        // bigger boards: the O(SIZE²) occlusion pass gets expensive — throttle
-        // hard above 13, coarse above 9, so the demo stays smooth.
+        // bigger boards: full-mode occlusion is O(SIZE²) — drop it above 13.
+        // 11/13 stay coarse (radius-bounded), refreshed every step.
         if (SIZE > 13) attnMode = "off";
-        else if (SIZE > 9) {
-          attnMode = "coarse";
-          attnEvery = Math.max(attnEvery, 4);
-        }
+        else if (SIZE > 9) attnMode = "coarse";
         const m = genMaze(SIZE);
         const d0 = goalDist(m.grid, m.end[0], m.end[1]);
         const sd = d0[m.start[0] * SIZE + m.start[1]];

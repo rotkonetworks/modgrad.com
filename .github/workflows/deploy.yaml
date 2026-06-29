@@ -89,6 +89,31 @@ jobs:
                     proxy_read_timeout 30s;
                 }
 
+                # /play runs the modgrad wasm engine across browser cores (rayon +
+                # SharedArrayBuffer). That needs a cross-origin-isolated document, which
+                # requires COOP+COEP on the /play HTML response. Scope it to this route
+                # ONLY so the rest of the site (and the contact form under /api/) keeps
+                # its normal, non-isolated context. SPA route → served as index.html.
+                location /play {
+                    add_header Cross-Origin-Opener-Policy "same-origin" always;
+                    add_header Cross-Origin-Embedder-Policy "require-corp" always;
+                    add_header X-Frame-Options "SAMEORIGIN" always;
+                    add_header X-Content-Type-Options "nosniff" always;
+                    add_header X-XSS-Protection "1; mode=block" always;
+                    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+                    try_files $uri $uri/ /index.html;
+                }
+
+                # engine assets (wasm, glue js, rayon worker) load as subresources of the
+                # isolated /play document. ^~ stops the regex asset block below from
+                # winning for /engine/*.js, so CORP is applied. All same-origin already,
+                # but CORP makes the isolation explicit and future-proofs a CDN move.
+                location ^~ /engine/ {
+                    add_header Cross-Origin-Resource-Policy "same-origin" always;
+                    expires 1y;
+                    add_header Cache-Control "public, immutable";
+                }
+
                 location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
                     expires 1y;
                     add_header Cache-Control "public, immutable";

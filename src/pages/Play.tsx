@@ -297,7 +297,9 @@ export default function Play() {
             setSleepPressure(msg.sleepPressure);
         });
         loadMaze(msg as Maze);
-        if (!reduced) startPlaying();
+        // while asleep, hold playback: the maze is loaded but the agent rests
+        // (brain keeps dreaming). The sleep timer resumes it.
+        if (!reduced && !sleepingNow) startPlaying();
         return;
       }
       if (msg.type === "slept") {
@@ -313,8 +315,20 @@ export default function Play() {
         // persistent record so a nap is observable after the flash fades
         setNapCount((n) => n + 1);
         setLastNapGap(gap);
+        // ── rest the agent while it consolidates ──
+        // Pause any in-flight playback so it doesn't solve the next maze over
+        // the SLEEPING flash; the brain's idle replay keeps spiking = dreaming.
+        sleepingNow = true;
+        clearTimeout(playTimer);
+        clearTimeout(stepTimer);
+        setRunState("idle");
         if (sleepTimer) clearTimeout(sleepTimer);
-        sleepTimer = setTimeout(() => setSleeping(null), 5500);
+        sleepTimer = setTimeout(() => {
+          setSleeping(null);
+          sleepingNow = false;
+          // wake up: resume on the maze that loaded during the nap
+          if (!reduced && maze()) startPlaying();
+        }, SLEEP_PAUSE_MS);
         return;
       }
       if (msg.type === "step") onStepResult(msg as StepMsg);
@@ -687,6 +701,10 @@ export default function Play() {
     lossAfter: number;
   } | null>(null);
   let sleepTimer: ReturnType<typeof setTimeout> | undefined;
+  // while true the agent rests: the next maze is loaded but playback is held so
+  // it visibly sleeps (the brain keeps dreaming) instead of solving over itself.
+  let sleepingNow = false;
+  const SLEEP_PAUSE_MS = 3400;
   // homeostatic sleep pressure (0..1), reported by the worker each maze. Rises
   // with surprise/wall-hits and discharges to 0 when a consolidation pass fires.
   const [sleepPressure, setSleepPressure] = createSignal(0);

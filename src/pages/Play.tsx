@@ -655,6 +655,8 @@ export default function Play() {
   // co-spike line persistence: 0 = instant, 1 = long trail (per-frame decay)
   const [spikeHold, setSpikeHold] = createSignal(0.55);
   let brainTime = 0; // seconds, advanced by the rAF loop for the idle shimmer
+  let brainReplay = 0; // fractional tick index; loops the trace so neurons keep
+  // spiking between steps instead of freezing on the last tick.
   let brainVisible = true; // gated by IntersectionObserver — skip drawing off-screen
   let brainIO: IntersectionObserver | undefined;
 
@@ -688,6 +690,19 @@ export default function Play() {
     return bt.ticks[Math.min(tickIdx(), bt.ticks.length - 1)];
   };
 
+  // Tick shown in the 3D cloud. While a step animates it follows the live tick;
+  // when idle it REPLAYS the trace's ticks on a loop (brainReplay), so the
+  // neurons keep spiking instead of holding a single frozen frame.
+  const displayBrainTick = (): BrainTick | null => {
+    const bt = brainTrace();
+    if (!bt || bt.ticks.length === 0) return null;
+    const idx =
+      runState() === "thinking"
+        ? Math.min(tickIdx(), bt.ticks.length - 1)
+        : Math.floor(brainReplay) % bt.ticks.length;
+    return bt.ticks[idx];
+  };
+
   // ── the 8-region brain as a rotating 3D particle cloud (delegated to
   // viz/brain3d.ts). The module owns the neuron cloud / connectome / vision
   // pathway; we own canvas sizing + DPR (ctxOf) and the camera state. ──
@@ -706,7 +721,7 @@ export default function Play() {
     // windowed = orbit-derived camera; fullscreen = the live free-fly camera.
     if (!fs) camera = orbitToCamera(brainRotX, brainRotY, brainZoom, BRAIN_CENTER);
     brain3d.draw(ctx, W, H, {
-      tick: curBrainTick(),
+      tick: displayBrainTick(),
       vision: visionMaps,
       camera,
       spikeHold: spikeHold(),
@@ -999,18 +1014,26 @@ export default function Play() {
         keyHeld.down;
       // active = thinking, within settle, orbiting, flying (always-on in
       // fullscreen so look/move stay live), or we haven't drawn once yet.
+      // a loaded trace keeps the loop alive so the neurons can replay (unless the
+      // user prefers reduced motion → hold a static frame).
+      const hasTrace = (brainTrace()?.ticks.length ?? 0) > 1;
       const active =
         thinking ||
         now - lastThinking < SETTLE_MS ||
         brainDragging ||
         fs ||
         moving ||
-        !drewOnce;
+        !drewOnce ||
+        (hasTrace && !reduced);
       if (!active) return; // idle → hold the last drawn frame
       if (drewOnce && now - lastDraw < MIN_FRAME_MS) return; // 30fps cap
       lastDraw = now;
       drewOnce = true;
       brainTime += 0.033;
+      // idle (settled, not mid-step) → advance the replay so the cloud keeps
+      // spiking through the brain's real ticks instead of freezing.
+      if (!thinking && now - lastThinking >= SETTLE_MS && hasTrace && !reduced)
+        brainReplay += 0.25;
       // auto-spin only in windowed mode (fullscreen is user-driven free-fly).
       if (!reduced && !fs && brainAutoRotate() && !brainDragging)
         brainRotY += 0.009;

@@ -284,10 +284,10 @@ export class Brain3D {
   // precomputed neuron→neuron strands for the connectome: a stable sample of
   // individual-neuron pairs per wired region edge (so the wiring reads as real
   // neural strands, not hub-to-hub spokes). Rebuilt with the neuron layout.
-  private connStrands: { fa: number; fb: number; key: string; from: number; to: number; phase: number }[] = [];
-
-  // decayed co-spike per region edge ("from_to" → glow); persists across frames.
-  private readonly edgeGlow = new Map<string, number>();
+  private connStrands: { fa: number; fb: number; from: number; to: number; phase: number }[] = [];
+  // decayed co-fire glow PER STRAND (parallel to connStrands) — each fibre lights
+  // from its OWN two endpoint neurons co-firing, not a region-level average.
+  private strandGlow = new Float32Array(0);
 
   // Reused scratch buffers — avoid per-frame allocation churn.
   private projScratch: ProjPoint[] = [];
@@ -297,6 +297,7 @@ export class Brain3D {
   private projX = new Float32Array(0);
   private projY = new Float32Array(0);
   private projVis = new Uint8Array(0);
+  private projAct = new Float32Array(0); // each neuron's |act|/amax this frame
 
   constructor(opts: Brain3DOptions = {}) {
     this.colors = opts.regionColors ?? DEFAULT_REGION_COLORS;
@@ -311,8 +312,8 @@ export class Brain3D {
   setRef(ref: BrainRef): void {
     this.ref = ref;
     this.builtFor = -1; // force a rebuild on next draw
-    this.edgeGlow.clear();
-    this.buildNeuronPositions(ref.regions);
+    this.buildNeuronPositions(ref.regions); // also resets the per-strand glow
+
   }
 
   private regionColor(i: number): string {
@@ -360,8 +361,10 @@ export class Brain3D {
       this.projX = new Float32Array(n);
       this.projY = new Float32Array(n);
       this.projVis = new Uint8Array(n);
+      this.projAct = new Float32Array(n);
     }
     this.buildConnStrands();
+    this.strandGlow = new Float32Array(this.connStrands.length);
   }
 
   // Sample a stable set of neuron→neuron strands for each wired region edge, so
@@ -381,11 +384,10 @@ export class Brain3D {
       for (const f of conn.from) {
         const fr = this.regionRange[f];
         if (!fr || fr.count === 0) continue;
-        const key = f + "_" + conn.to;
         for (let k = 0; k < STRANDS_PER_EDGE; k++) {
           const fa = fr.start + Math.floor(rand() * fr.count);
           const fb = tr.start + Math.floor(rand() * tr.count);
-          this.connStrands.push({ fa, fb, key, from: f, to: conn.to, phase: rand() });
+          this.connStrands.push({ fa, fb, from: f, to: conn.to, phase: rand() });
         }
       }
     }
@@ -462,6 +464,7 @@ export class Brain3D {
     const projX = this.projX;
     const projY = this.projY;
     const projVis = this.projVis;
+    const projAct = this.projAct;
     for (let i = 0; i < this.neuronPos.length; i++) {
       const np = this.neuronPos[i];
       const p = projectWith(vx, np.x, np.y, np.z);
@@ -473,6 +476,7 @@ export class Brain3D {
       projY[i] = p.y;
       projVis[i] = 1;
       const a = actOf(np.region, np.index);
+      projAct[i] = Number.isFinite(a) ? a : 0; // this neuron's spike level
       pts.push({
         x: p.x,
         y: p.y,
@@ -511,7 +515,7 @@ export class Brain3D {
     ctx.globalCompositeOperation = "lighter";
 
     if (this.showConnectome) {
-      this.drawConnectome(ctx, bref, regionAct, spikeHold);
+      this.drawConnectome(ctx, spikeHold);
     }
     this.drawNeurons(ctx, pts);
     if (this.showVision && vision && vision.length) {
@@ -646,54 +650,41 @@ export class Brain3D {
 
   // ── connectome edges: faint as structure, bright when both ends co-spike,
   //    then fading over a configurable trail (spikeHold → per-frame decay). ──
-  private drawConnectome(
-    ctx: CanvasRenderingContext2D,
-    bref: BrainRef,
-    regionAct: number[],
-    spikeHold: number,
-  ): void {
+  private drawConnectome(ctx: CanvasRenderingContext2D, spikeHold: number): void {
     const decay = 0.86 + spikeHold * 0.135; // 0.86 (brief) … ~0.995 (long)
     ctx.lineCap = "round";
 
-    // 1. update the per-region-edge co-fire glow (shared by all that edge's
-    //    neuron strands). co-fire = the WEAKER of the two ends (a true AND: both
-    //    regions must be active), scaled by the gain — min() keeps the "both
-    //    fire" semantics without crushing the value the way the product did.
-    for (const conn of bref.connections) {
-      for (const f of conn.from) {
-        // SELECTIVE co-fire: only a STRONG mutual spike (both ends well above
-        // baseline) lights a fibre — subtract a threshold so the regions, which
-        // are active every tick, don't keep the whole web lit. A fibre flashes
-        // when its two regions peak together, then decays to nothing (the lines
-        // "vanish after the spike" and the neuron dots stay visible underneath).
-        const m = Math.min(regionAct[f], regionAct[conn.to]);
-        const co = Math.min(1, Math.max(0, m - 0.45) * this.cospikeGain * 2.0);
-        const key = f + "_" + conn.to;
-        const g = Math.max(co, (this.edgeGlow.get(key) ?? 0) * decay); // persistence
-        this.edgeGlow.set(key, g);
-      }
-    }
-
-    // 2. draw the individual neuron→neuron strands, lit by their edge's glow.
+    // Each fibre lights from its OWN two endpoint NEURONS co-firing — not a
+    // region-level average. co-fire = the weaker of the two neurons' spike
+    // levels (a true AND: both must fire), minus a threshold so only a genuine
+    // mutual spike registers; then it decays per strand and fades to nothing.
     const projX = this.projX;
     const projY = this.projY;
     const projVis = this.projVis;
-    for (const s of this.connStrands) {
-      const g = this.edgeGlow.get(s.key) ?? 0;
-      if (g < 0.03) continue; // no floor: a fibre is only visible during/after a
-      if (!projVis[s.fa] || !projVis[s.fb]) continue; // co-fire, then fades out.
+    const projAct = this.projAct;
+    const glow = this.strandGlow;
+    const strands = this.connStrands;
+    for (let i = 0; i < strands.length; i++) {
+      const s = strands[i];
+      const visible = projVis[s.fa] === 1 && projVis[s.fb] === 1;
+      const co = visible
+        ? Math.min(1, Math.max(0, Math.min(projAct[s.fa], projAct[s.fb]) - 0.35) * this.cospikeGain * 2.2)
+        : 0;
+      const g = Math.max(co, glow[i] * decay); // per-strand persistence
+      glow[i] = g;
+      if (g < 0.03 || !visible) continue; // dark fibre → not drawn (vanished)
       const ax = projX[s.fa];
       const ay = projY[s.fa];
       const bx = projX[s.fb];
       const by = projY[s.fb];
       const colF = this.regionColor(s.from);
       const colT = this.regionColor(s.to);
-      const a = Math.min(0.75, 0.72 * g); // kept under the neuron dots' brightness
+      const a = Math.min(0.8, 0.78 * g); // kept under the neuron dots' brightness
       const grad = ctx.createLinearGradient(ax, ay, bx, by);
       grad.addColorStop(0, hexA(colF, a));
       grad.addColorStop(1, hexA(colT, a));
       ctx.strokeStyle = grad;
-      ctx.lineWidth = 0.3 + 1.5 * g;
+      ctx.lineWidth = 0.3 + 1.6 * g;
       ctx.beginPath();
       ctx.moveTo(ax, ay);
       ctx.lineTo(bx, by);

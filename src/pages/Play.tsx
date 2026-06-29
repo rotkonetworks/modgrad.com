@@ -1465,9 +1465,9 @@ export default function Play() {
           </div>
 
           <p class="text-dim text-sm leading-relaxed mb-4">
-            Each dot is a neuron coloured by region; lines are connectome edges,
-            lit when two regions co-fire. The cyan grids are the retina → V1 → V2
-            → V4 feature maps.{" "}
+            Each dot is a neuron coloured by region; a line lights when two
+            neurons fire together across a wired region edge. The cyan grids are
+            the retina → V1 → V2 → V4 feature maps.{" "}
             <button
               type="button"
               class="text-accent whitespace-nowrap"

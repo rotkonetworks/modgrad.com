@@ -355,7 +355,7 @@ function vinForward(
   _gr: number,
   _gc: number,
 ): VinForward | null {
-  if (!engine?.learned_vin_forward) return null;
+  if (!engine?.learned_vin_forward_compass && !engine?.learned_vin_forward) return null;
   try {
     const tokens = buildVinTokens(grid, _gr, _gc);
     // Prefer the compass export: it appends the planner's SIZE² value map after
@@ -1011,9 +1011,9 @@ self.onmessage = async (e: MessageEvent) => {
       // leaves it as a real runtime import instead of trying to resolve it.
       // ?v=… busts any stale cached engine (a mismatched glue/wasm pair fails
       // to instantiate); bump ENGINE_VER whenever the wasm is rebuilt.
-      const ENGINE_VER = "20260629-reset";
+      const ENGINE_VER = "20260630-sdk";
       const enginePath =
-        ["", "engine", "modgrad_mini.js"].join("/") + "?v=" + ENGINE_VER;
+        ["", "engine", "modgrad_wasm.js"].join("/") + "?v=" + ENGINE_VER;
       // Load the glue as a blob module. Vite's DEV server refuses to serve
       // /public files as importable modules ("can only be referenced via HTML
       // tags"), so a bare import() of enginePath 404s in dev. Fetching the
@@ -1033,7 +1033,7 @@ self.onmessage = async (e: MessageEvent) => {
         mod = await import(/* @vite-ignore */ enginePath);
       }
       // pass the wasm URL (also versioned) so init() doesn't fetch a stale .wasm
-      await mod.default("/engine/modgrad_mini_bg.wasm?v=" + ENGINE_VER);
+      await mod.default("/engine/modgrad_wasm_bg.wasm?v=" + ENGINE_VER);
       SIZE = msg.size ?? 9;
       ensurePxBufs(); // size the reused pixel buffers for this board
 
@@ -1136,7 +1136,11 @@ self.onmessage = async (e: MessageEvent) => {
       }
 
       // The closed loop drives on the LEARNED VIN when the engine exports it.
-      vinAvailable = extras.learned_vin_forward !== null;
+      // The SDK wasm ships the compass forward (value field + logits); the old
+      // logits-only `learned_vin_forward` is accepted too for back-compat.
+      vinAvailable =
+        extras.learned_vin_forward_compass !== null ||
+        extras.learned_vin_forward !== null;
       // honest progress signal needs the planner's value map (compass export);
       // without it the neuromodulator falls back to the hidden BFS field.
       console.log(

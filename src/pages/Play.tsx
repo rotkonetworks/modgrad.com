@@ -173,7 +173,7 @@ export default function Play() {
   useDocMeta(() => ({
     title: "Watch it think",
     description:
-      "A modgrad learned planner (Value Iteration Network) solving mazes in your browser. Trained on solved mazes, it reads the maze image, learns the walls and goal, and plans its own route with no solver at inference — and generalizes to mazes bigger than it trained on. Runs client-side as a bit-exact wasm reimplementation of the modgrad SDK.",
+      "A modgrad learned planner (Value Iteration Network) solving mazes in your browser. Trained on solved mazes, it reads the maze image, learns the walls and goal, and plans its own route with no solver at inference — and generalizes to mazes bigger than it trained on. Runs client-side as the modgrad SDK itself, compiled to WebAssembly.",
     path: "/play",
   }));
 
@@ -1183,8 +1183,8 @@ export default function Play() {
           the maze image and plans its own route — with{" "}
           <span class="grad-text">no solver at inference</span>. It learns the
           walls and the goal from the picture, then propagates value to navigate,
-          and it generalizes to mazes bigger than it ever trained on. The forward
-          pass is a bit-exact in-browser reimplementation of the SDK.
+          and it generalizes to mazes bigger than it ever trained on. The
+          forward pass is the modgrad SDK itself, compiled to WebAssembly.
         </p>
         <div class="mt-4 flex flex-wrap gap-x-5 gap-y-1 text-sm">
           <A href="/docs/brain-composition" class="text-accent">
@@ -1965,7 +1965,7 @@ export default function Play() {
               <i class="w-2.5 h-2.5 rounded-full inline-block" style={{ background: "#62e6ff" }} />
               vision
             </span>
-            <span class="ml-auto opacity-80">reimplemented from the SDK · bit-exact</span>
+            <span class="ml-auto opacity-80">the modgrad SDK · in WebAssembly</span>
           </div>
         </div>
 
@@ -2069,8 +2069,9 @@ export default function Play() {
             </div>
             <div>
               <div class="eyebrow mb-1.5">Engine</div>
-              The browser engine reimplements modgrad's forward pass, bit-exact
-              against the SDK (not the SDK itself on wasm yet). Loads only here.
+              The browser engine is the modgrad SDK's own crates
+              (modgrad-ctm + modgrad-codec) compiled to WebAssembly — the same
+              forward pass that runs on the server, in your tab. Loads only here.
             </div>
           </div>
         </Show>

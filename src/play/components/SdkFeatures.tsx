@@ -34,7 +34,14 @@ type Feature = {
   docHref: string;
   isActive: (s: SdkFeatureState) => boolean;
   liveValue?: (s: SdkFeatureState) => string;
+  /** 0..1 live intensity that fills the row's meter bar. */
+  intensity: (s: SdkFeatureState) => number;
+  /** bar colour — constant, or a function of state (e.g. pain vs reward). */
+  color: string | ((s: SdkFeatureState) => string);
 };
+const clamp01 = (x: number) => (x < 0 ? 0 : x > 1 ? 1 : x);
+const resolveColor = (f: Feature, s: SdkFeatureState) =>
+  typeof f.color === "function" ? f.color(s) : f.color;
 
 // Data-driven list of the modgrad SDK features this demo exercises. Each row is
 // honest about *when* it's active and shows its live value when it is.
@@ -48,6 +55,8 @@ const FEATURES: Feature[] = [
     liveValue: (s) =>
       `${s.ticksUsed} ticks` +
       (s.exitLambda != null ? ` · λ ${s.exitLambda.toFixed(2)}` : ""),
+    intensity: (s) => clamp01(s.ticksUsed / 12),
+    color: "#62e6ff",
   },
   {
     key: "vision",
@@ -56,6 +65,8 @@ const FEATURES: Feature[] = [
     docHref: "/docs/multimodal",
     isActive: (s) => s.visionActive,
     liveValue: (s) => (s.visionActive ? "retina→V4 lit" : "no vision"),
+    intensity: (s) => (s.visionActive ? 1 : 0),
+    color: "#62e6ff",
   },
   {
     key: "regions",
@@ -66,6 +77,13 @@ const FEATURES: Feature[] = [
     // brain is thinking (ticks ran) so the row reflects real computation.
     isActive: (s) => s.ticksUsed > 0,
     liveValue: () => "8 regions wired",
+    intensity: (s) => {
+      const t = s.telemetry;
+      if (!t || t.length === 0) return s.ticksUsed > 0 ? 0.5 : 0;
+      const mean = t.reduce((a, r) => a + (r.rms ?? 0), 0) / t.length;
+      return clamp01(mean / 1.2);
+    },
+    color: "#8a7dff",
   },
   {
     key: "vin",
@@ -75,6 +93,8 @@ const FEATURES: Feature[] = [
     // The VIN drives every step the agent takes — active whenever it's running.
     isActive: (s) => s.ticksUsed > 0,
     liveValue: () => "planning",
+    intensity: (s) => (s.ticksUsed > 0 ? 1 : 0),
+    color: "#7c6cf0",
   },
   {
     key: "plasticity",
@@ -84,6 +104,8 @@ const FEATURES: Feature[] = [
     // Lit on any step the live escape bias actually moved (‖Δ‖ > 0).
     isActive: (s) => s.plasticDelta > 0,
     liveValue: (s) => `‖Δ‖ ${s.plasticDelta.toFixed(3)}`,
+    intensity: (s) => clamp01(s.plasticDelta / 0.3),
+    color: "#3aa86c",
   },
   {
     key: "neuromod",
@@ -93,6 +115,8 @@ const FEATURES: Feature[] = [
     // Lit whenever a (signed) neuromodulator signal was emitted this step.
     isActive: (s) => Math.abs(s.signal) > 1e-4,
     liveValue: (s) => (s.signal >= 0 ? `+${s.signal.toFixed(2)}` : s.signal.toFixed(2)),
+    intensity: (s) => clamp01(Math.abs(s.signal) / 1.5),
+    color: (s) => (s.signal < 0 ? "#e0564e" : "#3aa86c"),
   },
   {
     key: "memory",
@@ -106,6 +130,12 @@ const FEATURES: Feature[] = [
       if (e.recalled) return `recall #${e.id} · sim ${e.sim.toFixed(2)}`;
       return `${e.size} stored`;
     },
+    intensity: (s) => {
+      const e = s.episodic;
+      if (!e || e.size === 0) return 0;
+      return e.recalled ? clamp01(e.sim) : clamp01(e.size / 64) * 0.4;
+    },
+    color: "#e06ce0",
   },
   {
     key: "adaptive",
@@ -115,6 +145,8 @@ const FEATURES: Feature[] = [
     isActive: (s) => s.exitLambda != null,
     liveValue: (s) =>
       s.exitLambda != null ? `gate λ ${s.exitLambda.toFixed(3)}` : "off",
+    intensity: (s) => (s.exitLambda != null ? clamp01(s.exitLambda) : 0),
+    color: "#e0a23c",
   },
 ];
 
@@ -125,7 +157,7 @@ export interface SdkFeaturesProps {
 export function SdkFeatures(props: SdkFeaturesProps) {
   const activeCount = () =>
     FEATURES.filter((f) => f.isActive(props.state)).length;
-  const [open, setOpen] = createSignal(false);
+  const [open, setOpen] = createSignal(true);
 
   return (
     <div class="card">
@@ -150,59 +182,60 @@ export function SdkFeatures(props: SdkFeaturesProps) {
       </button>
       <Show when={open()}>
       <p class="text-mute text-[.72rem] leading-relaxed mb-3 mt-2">
-        Each row is a modgrad SDK capability this demo runs. The dot lights only
-        when its real signal is present this step.
+        Each row is a modgrad SDK capability this demo runs — the meter is its
+        live intensity this step, off when its real signal is absent.
       </p>
 
-      <div class="flex flex-col">
+      <div class="flex flex-col gap-3">
         <For each={FEATURES}>
-          {(f, i) => {
+          {(f) => {
             const active = () => f.isActive(props.state);
+            const level = () => (active() ? f.intensity(props.state) : 0);
+            const col = () => resolveColor(f, props.state);
             return (
-              <div
-                class="flex items-start gap-3 py-2.5"
-                classList={{ "border-t border-line": i() > 0 }}
-              >
-                {/* live activity indicator */}
-                <span
-                  class="mt-1 w-2.5 h-2.5 rounded-full shrink-0"
-                  title={active() ? "active this step" : "idle this step"}
-                  style={{
-                    background: active()
-                      ? "var(--pos, #3CB371)"
-                      : "var(--bg-2)",
-                    "box-shadow": active()
-                      ? "0 0 0 3px color-mix(in srgb, var(--pos, #3CB371) 22%, transparent)"
-                      : "none",
-                    border: active()
-                      ? "none"
-                      : "1px solid var(--line)",
-                    transition: "background .12s ease, box-shadow .12s ease",
-                  }}
-                />
-
-                <div class="min-w-0 flex-1">
-                  <div class="flex items-baseline justify-between gap-2">
-                    <span
-                      class="text-sm font-medium"
-                      classList={{
-                        "text-dim": !active(),
-                      }}
-                    >
-                      {f.name}
-                    </span>
-                    <Show when={active() && f.liveValue}>
-                      <span class="font-mono text-[.68rem] text-accent tabular-nums shrink-0">
-                        {f.liveValue!(props.state)}
-                      </span>
-                    </Show>
-                  </div>
-                  <div class="text-mute text-[.72rem] leading-relaxed mt-0.5">
+              <div class="flex flex-col gap-1">
+                {/* label row: name + live value */}
+                <div class="flex items-baseline justify-between gap-2">
+                  <span
+                    class="font-mono text-[.74rem]"
+                    classList={{ "text-dim": !active() }}
+                    title={f.desc}
+                  >
+                    {f.name}
+                  </span>
+                  <span
+                    class="font-mono text-[.68rem] tabular-nums shrink-0"
+                    classList={{ "text-mute": !active() }}
+                    style={active() ? { color: col() } : undefined}
+                  >
+                    {active() && f.liveValue ? f.liveValue(props.state) : "idle"}
+                  </span>
+                </div>
+                {/* meter bar — fills to live intensity, like the other panels */}
+                <div
+                  class="rounded-full overflow-hidden"
+                  style={{ background: "var(--bg-2)", height: "6px" }}
+                >
+                  <div
+                    class="h-full rounded-full"
+                    style={{
+                      width: `${Math.round(level() * 100)}%`,
+                      background: col(),
+                      opacity: active() ? "1" : "0",
+                      transition: "width .18s ease, opacity .18s ease",
+                      "box-shadow": active()
+                        ? `0 0 8px color-mix(in srgb, ${col()} 55%, transparent)`
+                        : "none",
+                    }}
+                  />
+                </div>
+                <div class="flex items-center justify-between gap-2">
+                  <span class="text-mute text-[.68rem] leading-snug">
                     {f.desc}
-                  </div>
+                  </span>
                   <A
                     href={f.docHref}
-                    class="text-accent text-[.7rem] font-mono inline-block mt-1"
+                    class="text-accent text-[.66rem] font-mono shrink-0"
                   >
                     docs →
                   </A>

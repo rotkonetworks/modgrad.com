@@ -220,6 +220,14 @@ export function learned_vin_forward_compass(tokens, grid_h, grid_w, agent_r, age
 }
 
 /**
+ * Restore the learned VIN's move head to its pristine (as-loaded) weights,
+ * undoing every sleep-consolidation pass. No-op if it was never trained.
+ */
+export function learned_vin_reset() {
+    wasm.learned_vin_reset();
+}
+
+/**
  * DREAM CONSOLIDATION step on the LOADED learned VIN: one SGD update of the
  * move head toward `target_move` for the maze in `tokens`/`agent`. Mutates
  * the resident planner (persists for the session) and returns the

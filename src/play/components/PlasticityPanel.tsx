@@ -368,7 +368,31 @@ export default function PlasticityPanel(props: PlasticityPanelProps) {
         </div>
       </div>
 
-      {/* ── reset ── */}
+      {/* ── learning rate + reset to initial state ── */}
+      <div class="flex items-center justify-between gap-3 pt-1 border-t border-[var(--border)]/60 mt-1">
+        <span
+          class="font-mono text-[.72rem] text-mute tabular-nums"
+          title="three-factor learning rate θ applied per live update (frozen substrate, plastic surround)"
+        >
+          learning rate θ{" "}
+          <span class="text-dim">
+            {props.lr != null ? props.lr.toFixed(3) : "—"}
+          </span>
+        </span>
+        <button
+          type="button"
+          onClick={handleReset}
+          class="font-mono text-[.72rem] px-2.5 py-1 rounded-md transition-colors"
+          style={{
+            background: "var(--bg-2)",
+            border: "1px solid var(--border)",
+            color: "var(--text-mute)",
+          }}
+          title="revert the planner to its trained-offline weights, undoing every live update and dream consolidation"
+        >
+          ↺ reset learning
+        </button>
+      </div>
     </div>
   );
 }

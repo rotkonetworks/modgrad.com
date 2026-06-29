@@ -2193,6 +2193,12 @@ mod wasm_bindings {
         // from the SDK's serde JSON export via `load_learned_vin` and run by
         // `learned_vin_forward`. Distinct from the hardcoded `VIN` above.
         static LEARNED_VIN: RefCell<Option<super::LearnedVin>> = const { RefCell::new(None) };
+
+        // Pristine (as-loaded) move-head weights, snapshotted lazily before the
+        // first sleep consolidation so `learned_vin_reset` can restore the
+        // planner to its trained-offline state — undoing every dream pass.
+        static LEARNED_VIN_PRISTINE: RefCell<Option<(Vec<f32>, Vec<f32>)>> =
+            const { RefCell::new(None) };
     }
 
     /// Stash the readout pre/logits from a finished forward for plasticity.
@@ -2769,6 +2775,13 @@ mod wasm_bindings {
             let vin = vref.as_mut().ok_or_else(|| {
                 JsValue::from_str("learned_vin_train: no learned VIN loaded — call load_learned_vin first")
             })?;
+            // Lazily snapshot the pristine move head BEFORE the first mutation.
+            LEARNED_VIN_PRISTINE.with(|s| {
+                if s.borrow().is_none() {
+                    *s.borrow_mut() =
+                        Some((vin.move_head.weight.clone(), vin.move_head.bias.clone()));
+                }
+            });
             Ok(vin.consolidate_move(
                 tokens,
                 grid_h,
@@ -2778,5 +2791,21 @@ mod wasm_bindings {
                 lr,
             ))
         })
+    }
+
+    /// Restore the learned VIN's move head to its pristine (as-loaded) weights,
+    /// undoing every sleep-consolidation pass. No-op if it was never trained.
+    #[wasm_bindgen]
+    pub fn learned_vin_reset() {
+        LEARNED_VIN_PRISTINE.with(|s| {
+            if let Some((w, b)) = s.borrow().as_ref() {
+                LEARNED_VIN.with(|v| {
+                    if let Some(vin) = v.borrow_mut().as_mut() {
+                        vin.move_head.weight = w.clone();
+                        vin.move_head.bias = b.clone();
+                    }
+                });
+            }
+        });
     }
 }

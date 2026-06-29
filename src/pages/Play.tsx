@@ -302,6 +302,7 @@ export default function Play() {
       }
       if (msg.type === "slept") {
         setSleepPressure(0);
+        const gap = (msg.lossBefore ?? 0) - (msg.lossAfter ?? 0);
         setSleeping({
           replays: msg.replays ?? 0,
           bookmarks: msg.bookmarks ?? 0,
@@ -309,8 +310,11 @@ export default function Play() {
           lossBefore: msg.lossBefore ?? 0,
           lossAfter: msg.lossAfter ?? 0,
         });
+        // persistent record so a nap is observable after the flash fades
+        setNapCount((n) => n + 1);
+        setLastNapGap(gap);
         if (sleepTimer) clearTimeout(sleepTimer);
-        sleepTimer = setTimeout(() => setSleeping(null), 4000);
+        sleepTimer = setTimeout(() => setSleeping(null), 5500);
         return;
       }
       if (msg.type === "step") onStepResult(msg as StepMsg);
@@ -563,6 +567,10 @@ export default function Play() {
     batch(() => {
       setPlasticDelta(0);
       setSignal(0);
+      // back to square one: clear the sleep/consolidation record too
+      setSleepPressure(0);
+      setNapCount(0);
+      setLastNapGap(0);
     });
   }
 
@@ -682,6 +690,10 @@ export default function Play() {
   // homeostatic sleep pressure (0..1), reported by the worker each maze. Rises
   // with surprise/wall-hits and discharges to 0 when a consolidation pass fires.
   const [sleepPressure, setSleepPressure] = createSignal(0);
+  // persistent nap log — survives the brief SLEEPING flash so a consolidation
+  // pass stays observable: how many times it has slept and the last gain.
+  const [napCount, setNapCount] = createSignal(0);
+  const [lastNapGap, setLastNapGap] = createSignal(0);
   let brainTime = 0; // seconds, advanced by the rAF loop for the idle shimmer
   let brainReplay = 0; // fractional tick index; loops the trace so neurons keep
   // spiking between steps instead of freezing on the last tick.
@@ -1897,6 +1909,17 @@ export default function Play() {
                   }}
                 />
               </span>
+              <Show when={napCount() > 0}>
+                <span
+                  class="opacity-90"
+                  title="consolidation passes so far this session, and the planner-gap drop from the last one"
+                >
+                  · slept {napCount()}×
+                  <Show when={lastNapGap() > 0}>
+                    <span style={{ color: "#7ee0a8" }}> (last ↓{lastNapGap().toFixed(3)})</span>
+                  </Show>
+                </span>
+              </Show>
             </span>
             <label class="inline-flex items-center gap-1.5" title="how long co-spike lines linger">
               spike trail
@@ -1947,7 +1970,7 @@ export default function Play() {
           />
         </Show>
 
-        {/* ── SDK features: collapsed by default; click the header to expand ── */}
+        {/* ── SDK features: expanded by default; click the header to collapse ── */}
         <SdkFeatures state={sdkFeatureState()} />
         </div>
         </Show>

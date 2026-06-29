@@ -153,6 +153,9 @@ type EngineExtras = {
   learned_vin_train?:
     | ((tokens: Float32Array, gridH: number, gridW: number, ar: number, ac: number, targetMove: number, lr: number) => number)
     | null;
+  // restore the learned planner's move head to its as-loaded weights, undoing
+  // every dream/consolidation pass (true "reset to initial state").
+  learned_vin_reset?: (() => void) | null;
 };
 
 let engine:
@@ -1006,7 +1009,7 @@ self.onmessage = async (e: MessageEvent) => {
       // leaves it as a real runtime import instead of trying to resolve it.
       // ?v=… busts any stale cached engine (a mismatched glue/wasm pair fails
       // to instantiate); bump ENGINE_VER whenever the wasm is rebuilt.
-      const ENGINE_VER = "20260628-sleep";
+      const ENGINE_VER = "20260629-reset";
       const enginePath =
         ["", "engine", "modgrad_mini.js"].join("/") + "?v=" + ENGINE_VER;
       // Load the glue as a blob module. Vite's DEV server refuses to serve
@@ -1112,6 +1115,7 @@ self.onmessage = async (e: MessageEvent) => {
           fn<(t: Float32Array, h: number, w: number, ar: number, ac: number, tm: number, lr: number) => number>(
             "learned_vin_train",
           ),
+        learned_vin_reset: fn<() => void>("learned_vin_reset"),
       };
       const plastic =
         extras.apply_plasticity !== null && extras.reset_plasticity !== null;
@@ -1591,6 +1595,15 @@ self.onmessage = async (e: MessageEvent) => {
       if (engine?.vin_reset) {
         try {
           engine.vin_reset();
+        } catch {
+          /* ignore */
+        }
+      }
+      // and undo every dream consolidation — restore the planner's move head to
+      // its trained-offline state so "reset" truly means back to square one
+      if (engine?.learned_vin_reset) {
+        try {
+          engine.learned_vin_reset();
         } catch {
           /* ignore */
         }

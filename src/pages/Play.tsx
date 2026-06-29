@@ -102,7 +102,8 @@ type Maze = {
 type Status = "loading" | "ready" | "error";
 type RunState = "idle" | "thinking" | "solved" | "stuck";
 
-const TICK_MS = 95; // pace of the "thinking" animation
+const BASE_TICK_MS = 95; // base pace of the "thinking" animation (at 1× speed)
+const SPEEDS = [0.5, 1, 2, 4] as const; // UI-selectable stepping-speed multipliers
 const MAX_STEPS = 160; // safety backstop. 11×11 paths can be long, and self-drive
 // wanders up to ~3× shortest before the worker nudges/loses — so give it room.
 // the board the worker runs on. MUST stay ODD (recursive-backtracker mazes need
@@ -232,6 +233,9 @@ export default function Play() {
   // is size-agnostic, so this needs no retrain — just a fresh maze at that size.
   const [mazeSize, setMazeSize] = createSignal<number>(PLAY_SIZE);
   const MAZE_SIZES = [9, 11, 13, 15, 21] as const;
+  // user-settable stepping speed: a multiplier on the base tick (higher = faster).
+  const [speed, setSpeed] = createSignal(1);
+  const tickMs = () => Math.round(BASE_TICK_MS / speed());
   // the consolidated factual reference (opened from the 3D panel's "what am I
   // seeing?" link). Keeps the live panels value-only; the prose lives here.
   const [infoOpen, setInfoOpen] = createSignal(false);
@@ -500,10 +504,10 @@ export default function Play() {
     const total = msg.brain?.ticks.length ?? 0;
     if (i >= total - 1) {
       // finished the thinking animation → commit
-      stepTimer = window.setTimeout(() => applyMove(msg), TICK_MS * 2.4);
+      stepTimer = window.setTimeout(() => applyMove(msg), tickMs() * 2.4);
       return;
     }
-    stepTimer = window.setTimeout(() => animateTicks(i + 1, msg), TICK_MS);
+    stepTimer = window.setTimeout(() => animateTicks(i + 1, msg), tickMs());
   }
 
   function applyMove(msg: StepMsg) {
@@ -518,7 +522,7 @@ export default function Play() {
       setRunState("solved");
       // perpetual demo: reached the goal → pause to celebrate, then a fresh maze
       if (looping) {
-        playTimer = window.setTimeout(() => requestNewMaze(), TICK_MS * 14);
+        playTimer = window.setTimeout(() => requestNewMaze(), tickMs() * 14);
       } else {
         setPlaying(false);
       }
@@ -530,7 +534,7 @@ export default function Play() {
       const looping = playing();
       setRunState("stuck");
       if (looping) {
-        playTimer = window.setTimeout(() => requestNewMaze(), TICK_MS * 8);
+        playTimer = window.setTimeout(() => requestNewMaze(), tickMs() * 8);
       } else {
         setPlaying(false);
       }
@@ -538,7 +542,7 @@ export default function Play() {
     }
     // continue to the next cell if still auto-playing
     if (playing()) {
-      playTimer = window.setTimeout(() => requestStep(), TICK_MS * 3);
+      playTimer = window.setTimeout(() => requestStep(), tickMs() * 3);
     } else {
       setRunState("idle");
     }
@@ -1399,6 +1403,37 @@ export default function Play() {
                 Trained on 9×9, run at any size. The planner generalizes to bigger
                 boards by running more value-iteration rounds — nothing is retrained
                 (solve-rate drops with size, honestly).
+              </div>
+
+              {/* ── stepping-speed selector: scales every tick delay live ── */}
+              <div class="flex items-center justify-between mt-4">
+                <div class="eyebrow">Speed</div>
+                <div
+                  class="flex rounded-lg overflow-hidden border border-line"
+                  role="group"
+                  aria-label="stepping speed"
+                >
+                  <For each={SPEEDS}>
+                    {(s) => {
+                      const active = () => speed() === s;
+                      return (
+                        <button
+                          class="text-xs font-mono px-2.5 py-1 tabular-nums transition-colors"
+                          style={{
+                            background: active() ? "var(--accent)" : "transparent",
+                            color: active() ? "#fff" : "var(--text-mute)",
+                          }}
+                          onClick={() => setSpeed(s)}
+                          disabled={status() !== "ready"}
+                          aria-pressed={active()}
+                          title={`${s}× stepping speed`}
+                        >
+                          {s}×
+                        </button>
+                      );
+                    }}
+                  </For>
+                </div>
               </div>
             </div>
           </div>

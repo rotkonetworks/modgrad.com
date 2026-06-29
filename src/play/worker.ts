@@ -1011,29 +1011,107 @@ self.onmessage = async (e: MessageEvent) => {
       // leaves it as a real runtime import instead of trying to resolve it.
       // ?v=… busts any stale cached engine (a mismatched glue/wasm pair fails
       // to instantiate); bump ENGINE_VER whenever the wasm is rebuilt.
-      const ENGINE_VER = "20260630-sdk";
-      const enginePath =
-        ["", "engine", "modgrad_wasm.js"].join("/") + "?v=" + ENGINE_VER;
-      // Load the glue as a blob module. Vite's DEV server refuses to serve
-      // /public files as importable modules ("can only be referenced via HTML
-      // tags"), so a bare import() of enginePath 404s in dev. Fetching the
-      // source and importing it via a blob URL works in both dev AND the built
-      // app. We pass the wasm URL to init() explicitly, so the glue never relies
-      // on its own import.meta.url (which would be the blob: URL) to find it.
-      let mod: any;
-      try {
-        const src = await fetch(enginePath).then((r) => r.text());
-        const blobUrl = URL.createObjectURL(
-          new Blob([src], { type: "text/javascript" }),
-        );
-        mod = await import(/* @vite-ignore */ blobUrl);
-        URL.revokeObjectURL(blobUrl);
-      } catch {
-        // last resort (e.g. blob: blocked by CSP): try the direct import
-        mod = await import(/* @vite-ignore */ enginePath);
+      const ENGINE_VER = "20260630-sdk-mt";
+      const v = "?v=" + ENGINE_VER;
+
+      // ── single- vs multi-threaded engine selection ──────────────────────
+      // When the document is cross-origin isolated (COOP: same-origin + COEP:
+      // require-corp ⇒ SharedArrayBuffer available), we can run the
+      // MULTITHREADED engine across a wasm-bindgen-rayon + Web-Worker pool.
+      // Otherwise — no COOP/COEP headers yet, or Vite dev — we fall back to the
+      // single-threaded engine and behave EXACTLY as before. Threads are never
+      // hard-required: the demo always works.
+      const canThread =
+        typeof crossOriginIsolated !== "undefined" &&
+        crossOriginIsolated === true &&
+        typeof SharedArrayBuffer !== "undefined";
+
+      // Import the glue. The MT glue statically imports its rayon
+      // `workerHelpers.js` snippet by RELATIVE url and uses import.meta.url to
+      // spawn sub-workers, so it must load from its real absolute /engine URL
+      // (a blob: module would break both the snippet import AND the worker
+      // URLs). The single-thread glue is self-contained, so we keep the
+      // blob-import path that also works under Vite dev (which refuses to serve
+      // /public files as importable modules).
+      const importGlue = async (name: string, threaded: boolean): Promise<any> => {
+        const path = "/engine/" + name + ".js" + v;
+        if (threaded) return await import(/* @vite-ignore */ path);
+        try {
+          const src = await fetch(path).then((r) => r.text());
+          const blobUrl = URL.createObjectURL(
+            new Blob([src], { type: "text/javascript" }),
+          );
+          const m = await import(/* @vite-ignore */ blobUrl);
+          URL.revokeObjectURL(blobUrl);
+          return m;
+        } catch {
+          return await import(/* @vite-ignore */ path);
+        }
+      };
+
+      let mod: any = null;
+      let threadsInitialized = 0; // >0 ⇒ rayon pool of N workers is live
+
+      if (canThread) {
+        try {
+          mod = await importGlue("modgrad_wasm_mt", true);
+          await mod.default("/engine/modgrad_wasm_mt_bg.wasm" + v);
+          // wasm-bindgen-rayon exports the pool initialiser as `initThreadPool`
+          // (older builds: `init_thread_pool`). Call it once to spin up the
+          // SharedArrayBuffer-backed rayon pool.
+          const initPool = mod.initThreadPool ?? mod.init_thread_pool;
+          if (typeof initPool === "function") {
+            const n = Math.max(
+              1,
+              (self.navigator && self.navigator.hardwareConcurrency) || 4,
+            );
+            // rayon's workerHelpers spawns `new Worker(new URL('./workerHelpers
+            // .js', import.meta.url), { type:'module' })`. import.meta.url is the
+            // absolute /engine glue URL here, so the URLs already resolve — but
+            // patch the Worker ctor defensively (zafu's nested-worker fix) to
+            // force any non-absolute worker URL onto the /engine origin, then
+            // restore. Harmless no-op when URLs are already absolute.
+            const OriginalWorker = globalThis.Worker;
+            const origin = self.location.origin + "/";
+            globalThis.Worker = class extends OriginalWorker {
+              constructor(url: string | URL, options?: WorkerOptions) {
+                let u = url instanceof URL ? url.href : String(url);
+                if (
+                  !u.startsWith(origin) &&
+                  !u.startsWith("blob:") &&
+                  !u.startsWith("data:")
+                ) {
+                  u = origin + (u.startsWith("/") ? u.slice(1) : u);
+                }
+                super(u, options);
+              }
+            };
+            try {
+              await initPool(n);
+              threadsInitialized = n;
+              console.log(
+                `[engine] multithreaded: rayon pool of ${n} workers (SharedArrayBuffer)`,
+              );
+            } finally {
+              globalThis.Worker = OriginalWorker;
+            }
+          }
+        } catch (err) {
+          // any threaded-init failure → drop back to the single-thread engine.
+          console.warn(
+            "[engine] threaded init failed; falling back to single-thread:",
+            err,
+          );
+          mod = null;
+          threadsInitialized = 0;
+        }
       }
-      // pass the wasm URL (also versioned) so init() doesn't fetch a stale .wasm
-      await mod.default("/engine/modgrad_wasm_bg.wasm?v=" + ENGINE_VER);
+
+      if (!mod) {
+        mod = await importGlue("modgrad_wasm", false);
+        // pass the wasm URL (also versioned) so init() doesn't fetch a stale .wasm
+        await mod.default("/engine/modgrad_wasm_bg.wasm" + v);
+      }
       SIZE = msg.size ?? 9;
       ensurePxBufs(); // size the reused pixel buffers for this board
 
@@ -1161,6 +1239,7 @@ self.onmessage = async (e: MessageEvent) => {
         vin: vinAvailable, // engine exposes the VIN learning loop
         vinMode, // whether it's active for this session
         mode: driveMode, // the active drive-mode
+        threads: threadsInitialized, // >0 ⇒ multithreaded engine + rayon pool
       });
       return;
     }

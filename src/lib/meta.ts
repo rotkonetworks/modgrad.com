@@ -1,9 +1,9 @@
 import { createEffect, onCleanup } from "solid-js";
 
 const SITE = "https://modgrad.com";
-const DEFAULT_TITLE = "modgrad — build your own brain";
+const DEFAULT_TITLE = "modgrad — a Rust SDK for composable brains";
 const DEFAULT_DESC =
-  "Composable Rust crates for building brains: Continuous Thought Machines, multi-region composition, bio-inspired learning, and full-residency GPU training.";
+  "A Rust SDK for Continuous Thought Machines and multi-region brains: graph composition, bio-inspired learning, and GPU-resident training. No framework, no YAML.";
 
 function setMeta(selector: string, attr: string, value: string) {
   let el = document.head.querySelector<HTMLElement>(selector);

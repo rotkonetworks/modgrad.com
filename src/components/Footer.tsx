@@ -41,7 +41,7 @@ export default function Footer() {
               <span class="text-[1.02rem] font-600">modgrad</span>
             </A>
             <p class="text-dim text-sm max-w-[30ch] leading-relaxed">
-              Composable Rust crates for building brains. No framework. No YAML. Just functions.
+              Continuous Thought Machines and multi-region brains, as plain Rust crates. No framework, no YAML.
             </p>
             <div class="flex flex-wrap gap-2 mt-4">
               <a href={site.repo} target="_blank" rel="noopener" class="chip">GitHub ↗</a>

@@ -35,12 +35,12 @@ export default function Home() {
                 Rust · Continuous Thought Machines · open source
               </div>
               <h1 class="text-[clamp(2.6rem,6.4vw,4.3rem)] leading-[1.04] font-650 tracking-[-0.03em]">
-                Build your <span class="grad-text">own brain.</span>
+                A Rust SDK for <span class="grad-text">composable brains.</span>
               </h1>
               <p class="mt-6 text-[1.12rem] text-dim max-w-[46ch] leading-relaxed">
-                Composable Rust crates for building brains: Continuous Thought
-                Machines, multi-region composition, bio-inspired learning, and
-                full-residency GPU training. No framework. No YAML. Just functions.
+                Continuous Thought Machines, multi-region composition,
+                bio-inspired learning, and GPU-resident training — as plain Rust
+                crates. No framework, no YAML; you own the training loop.
               </p>
               <div class="mt-8 flex flex-wrap gap-3">
                 <A href="/docs" class="btn btn-primary">Get started →</A>
@@ -74,24 +74,24 @@ export default function Home() {
       {/* ── the bet ──────────────────────────────────── */}
       <section class="container-page py-20 sm:py-24">
         <div use:reveal class="max-w-[760px]">
-          <div class="eyebrow mb-4">The bet</div>
+          <div class="eyebrow mb-4">Approach</div>
           <h2 class="text-[clamp(1.7rem,4vw,2.5rem)] tracking-[-0.025em] leading-[1.12]">
-            Betting on architecture, not scale.
+            Specialization, not scale.
           </h2>
           <div class="mt-7 text-[1.1rem] text-dim leading-relaxed flex flex-col gap-4">
             <p class="dropcap">
-              The frontier scaled a single architecture, the transformer, to the limits of
-              capital. modgrad takes a different bet: that intelligence comes from specialized
-              regions that <strong>think recurrently</strong>, route information between each
-              other, remember, and learn from their own surprise. Each is a part you can build
-              and test on its own.
+              The premise: capability comes from specialized regions that
+              <strong>think recurrently</strong>, route information between each
+              other, remember, and learn from their own surprise — not from
+              scaling one transformer. Each region is a part you build and test
+              on its own.
             </p>
             <p>
-              Those parts ship as plain Rust crates: a Continuous Thought Machine, graph
-              composition, neuromodulated learning, multimodal codecs, a transformer stack,
-              GPU residency. You assemble the brain you want. The same SDK trains a
-              187k-parameter router and mounts a frozen LLM as a cerebellum, and it runs on one
-              workstation.
+              The parts are plain Rust crates: a Continuous Thought Machine, graph
+              composition, neuromodulated learning, multimodal codecs, a transformer
+              stack, GPU residency. You assemble what you need. The same SDK trains a
+              187k-parameter router and mounts a frozen LLM as a cerebellum, and it
+              runs on one workstation.
             </p>
           </div>
         </div>
@@ -154,7 +154,7 @@ export default function Home() {
       <section use:reveal class="container-page py-20">
         <div class="eyebrow mb-3">Capabilities</div>
         <h2 class="text-[clamp(1.6rem,3.6vw,2.3rem)] tracking-[-0.025em] mb-10">
-          Compose what you need.
+          Six parts. Import what you need.
         </h2>
         <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
           <For each={pillars}>
@@ -177,7 +177,7 @@ export default function Home() {
             <div>
               <div class="eyebrow mb-3">The 8-region brain</div>
               <h2 class="text-[1.7rem] tracking-[-0.02em] mb-3">
-                One graph, eight specialists.
+                Eight regions, one graph.
               </h2>
               <p class="text-dim leading-relaxed text-[.98rem]">
                 Each region is its own CTM with its own neuron count, memory depth, and tick
@@ -302,11 +302,11 @@ export default function Home() {
           <div class="hero-glow" />
           <div class="relative">
             <h2 class="text-[clamp(1.8rem,4.4vw,2.8rem)] tracking-[-0.03em] leading-[1.1]">
-              Start with <span class="grad-text">twenty lines</span> of Rust.
+              <span class="grad-text">Twenty lines</span> of Rust.
             </h2>
             <p class="mt-5 text-dim max-w-[54ch] mx-auto leading-relaxed">
-              modgrad is open source, MIT-licensed, and built in the open by {site.org}.
-              If you're building on it, or want to fund where it's headed, get in touch.
+              Open source, MIT-licensed, built in the open by {site.org}. Using
+              it, or want to fund the roadmap? Get in touch.
             </p>
             <div class="mt-8 flex flex-wrap gap-3 justify-center">
               <A href="/docs" class="btn btn-primary">Read the docs →</A>

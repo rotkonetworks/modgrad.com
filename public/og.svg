@@ -15,8 +15,8 @@
   </g>
   <text x="232" y="166" font-family="-apple-system, Segoe UI, Roboto, sans-serif" font-size="40" font-weight="600" fill="#1B1822">modgrad</text>
 
-  <text x="108" y="320" font-family="-apple-system, Segoe UI, Roboto, sans-serif" font-size="92" font-weight="700" fill="#1B1822" letter-spacing="-3">Build your <tspan fill="#6243D9">own brain.</tspan></text>
-  <text x="108" y="392" font-family="-apple-system, Segoe UI, Roboto, sans-serif" font-size="32" fill="#4C4856">Composable Rust crates for building brains.</text>
+  <text x="108" y="320" font-family="-apple-system, Segoe UI, Roboto, sans-serif" font-size="80" font-weight="700" fill="#1B1822" letter-spacing="-3">A Rust SDK for <tspan fill="#6243D9">composable brains.</tspan></text>
+  <text x="108" y="392" font-family="-apple-system, Segoe UI, Roboto, sans-serif" font-size="32" fill="#4C4856">Continuous Thought Machines and multi-region brains, as Rust crates.</text>
 
-  <text x="108" y="520" font-family="ui-monospace, monospace" font-size="24" fill="#6A6676">No framework.  No YAML.  Just functions.</text>
+  <text x="108" y="520" font-family="ui-monospace, monospace" font-size="24" fill="#6A6676">No framework.  No YAML.  You own the training loop.</text>
 </svg>

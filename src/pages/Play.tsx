@@ -104,7 +104,7 @@ type RunState = "idle" | "thinking" | "solved" | "stuck";
 
 const BASE_TICK_MS = 95; // base pace of the "thinking" animation (at 1× speed)
 const SPEEDS = [0.5, 1, 2, 4, 8, 16] as const; // UI-selectable stepping-speed multipliers
-const MAX_STEPS = 160; // safety backstop. 11×11 paths can be long, and self-drive
+const MAX_STEPS = 260; // safety backstop. 11×11 paths can be long, and self-drive
 // wanders up to ~3× shortest before the worker nudges/loses — so give it room.
 // the board the worker runs on. MUST stay ODD (recursive-backtracker mazes need
 // an odd side). reference.size (=9) is kept only for the "trained on 9×9" copy.

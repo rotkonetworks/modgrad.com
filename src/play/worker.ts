@@ -59,10 +59,15 @@ let driveMode: DriveMode = "normal"; // default; set from init.mode / setMode
 // how strongly frustration warms the softmax to explore out of a loop.
 function levelParams(m: DriveMode): { escapeOn: boolean; budgetMul: number; heat: number } {
   switch (m) {
-    case "easy":     return { escapeOn: true,  budgetMul: 5, heat: 1.6 };
-    case "normal":   return { escapeOn: true,  budgetMul: 3, heat: 1.2 };
-    case "hard":     return { escapeOn: true,  budgetMul: 2, heat: 0.6 };
-    case "hardcore": return { escapeOn: false, budgetMul: 2, heat: 0.0 };
+    // budgetMul = how many × the shortest path the agent may wander before we
+    // call it "lost" and move on. Kept generous: persisting longer means it
+    // works through more of its OWN mistakes (revisits, detours) before giving
+    // up — exactly the states the dream/replay pass learns from. The MAX_STEPS
+    // backstop still bounds the worst case.
+    case "easy":     return { escapeOn: true,  budgetMul: 8, heat: 1.6 };
+    case "normal":   return { escapeOn: true,  budgetMul: 6, heat: 1.2 };
+    case "hard":     return { escapeOn: true,  budgetMul: 4, heat: 0.6 };
+    case "hardcore": return { escapeOn: false, budgetMul: 3, heat: 0.0 };
   }
 }
 
@@ -622,7 +627,8 @@ const STEP_BUDGET_MULT = 3; // wander budget = ceil(shortest × MULT) before fai
 const PLASTIC_LR = 0.5; // learning rate for the per-cell escape bias (three-factor rule)
 const FRUST_TEMP = 1.2; // how much frustration heats the softmax (explore to escape loops)
 const FRUST_MAX = 4; // cap on frustration's effect on temperature
-const FRUST_LOST = 10; // frustration this high = genuinely stuck → fail honestly, next maze
+const FRUST_LOST = 18; // frustration this high = genuinely stuck → fail honestly, next maze
+// (raised from 10: let it keep fighting a loop longer — more self-corrections to learn from)
 const NOVELTY_GAIN = 3.0; // per-frustration pull toward unvisited neighbours (frontier escape)
 let mazeEp: MazeEpisode | null = null; // current self-drive episode (null until a maze loads)
 

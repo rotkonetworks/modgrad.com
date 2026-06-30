@@ -144,6 +144,10 @@ jobs:
             }
             NGINX_EOF
 
+            # Clear the prior extraction FIRST: tar is additive, so a file
+            # removed from the repo would otherwise linger in the server-side
+            # dist/ across deploys and get carried into PROJECT_DIR by cp -a.
+            rm -rf dist server
             tar xzf site.tar.gz
             # zsh aborts on globs that match nothing — avoid PROJECT_DIR/* and dist/*
             rm -rf ${{ env.PROJECT_DIR }}

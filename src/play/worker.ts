@@ -1358,7 +1358,17 @@ self.onmessage = async (e: MessageEvent) => {
       // The value-greedy step is the "perfect planner" move; the move-head's own
       // argmax is the LEARNER (what it would do self-driving). Which of these
       // DRIVES the agent depends on the drive-mode below.
-      const vinOn = vinMode && vinAvailable && engine?.learned_vin_forward != null;
+      // The SDK wasm ships the value-field forward as `learned_vin_forward_compass`
+      // (the plain logits-only `learned_vin_forward` was dropped at the SDK-wasm
+      // pivot). Accept EITHER — `vinForward` already prefers the compass — so the
+      // planner actually drives, and sleep-pressure / bookmarks / dream-replay
+      // (all gated on vinOn) come back to life. (Was: required the plain forward,
+      // so vinOn was permanently false and the planner never engaged.)
+      const vinOn =
+        vinMode &&
+        vinAvailable &&
+        (engine?.learned_vin_forward_compass != null ||
+          engine?.learned_vin_forward != null);
       const vf = vinOn ? vinForward(grid, ar, ac, gr, gc) : null;
       // the learned planner's chosen move = argmax of its move logits.
       const vinGreedy = vf ? argmaxMove(vf.move_logits) : -1;

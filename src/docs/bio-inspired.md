@@ -113,6 +113,20 @@ into a region's state *before* the forward pass, so computation starts from an
 episodically-informed prior rather than zero. An adaptive focus weights positions the
 brain keeps failing on up to 6× more heavily.
 
+## Reverse replay: credit assignment
+
+Dream replay is the **sleep-time** mode. Its awake counterpart is
+`modgrad-training::replay`: roll a policy out, and wherever its action disagrees
+with an expert, those states are the mistakes to learn from. On a *failed* rollout
+the mistakes are ordered **backward from the failure**, assigning blame from the
+point of failure outward — the reverse-replay sweeps the hippocampus runs after an
+error (Foster & Wilson, 2006), versus the consolidation replay it runs at rest
+(Wilson & McNaughton, 1994). It is a generic SDK primitive (`mistake_states`,
+`prioritized_replay`) over an abstract `(state, action)` trajectory and an
+expert closure — no model or task baked in, so it drives a grid planner or a
+language policy alike. Focusing training on a policy's own failure distribution is
+the standard fix for compounding behaviour-cloning error.
+
 ## Consolidation: spindle-ripple
 
 `bio::consolidation` runs **gradient-free SPSA** cycles on the host, mapped onto the

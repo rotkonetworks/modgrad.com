@@ -109,6 +109,10 @@ const MAX_STEPS = 160; // safety backstop. 11×11 paths can be long, and self-dr
 // the board the worker runs on. MUST stay ODD (recursive-backtracker mazes need
 // an odd side). reference.size (=9) is kept only for the "trained on 9×9" copy.
 const PLAY_SIZE = 11;
+// Bump when the shipped model weights change, to bust the heuristic browser
+// cache on the non-content-hashed /models/*.json (the brain export with its
+// folded-in planner). Mirrors ENGINE_VER's role for the wasm.
+const MODEL_VER = "20260630-brainplanner";
 // UP=0 DOWN=1 LEFT=2 RIGHT=3 — [dr, dc], matches the worker's DELTA
 const DIR_DELTA: [number, number][] = [
   [-1, 0],
@@ -339,8 +343,11 @@ export default function Play() {
     };
 
     try {
-      // the 9MB brain weights are the demo's source — the brain is the solver
-      const br = await fetch("/models/brain_solver_weights.json").then((r) =>
+      // The ~9MB brain weights are the demo's source — the brain IS the solver,
+      // and since the fold the export carries its own hippocampus planner (no
+      // separate VIN file). ?v= busts any stale heuristic cache on this
+      // non-content-hashed .json whenever the weights change.
+      const br = await fetch(`/models/brain_solver_weights.json?v=${MODEL_VER}`).then((r) =>
         r.text(),
       );
       worker.postMessage({
@@ -1187,8 +1194,11 @@ export default function Play() {
           the maze image and plans its own route — with{" "}
           <span class="grad-text">no solver at inference</span>. It learns the
           walls and the goal from the picture, then propagates value to navigate,
-          and it generalizes to mazes bigger than it ever trained on. The
-          forward pass is the modgrad SDK itself, compiled to WebAssembly.
+          and it generalizes to mazes bigger than it ever trained on. The planner
+          is the modgrad SDK's own{" "}
+          <span class="grad-text">Value Iteration Network</span> (the{" "}
+          <code class="text-[0.85em]">modgrad-ctm</code> crate) — the same code
+          you'd build with, running here compiled to WebAssembly.
         </p>
         <div class="mt-4 flex flex-wrap gap-x-5 gap-y-1 text-sm">
           <A href="/docs/brain-composition" class="text-accent">
@@ -2051,12 +2061,15 @@ export default function Play() {
           <div class="mt-4 grid gap-5 text-sm leading-relaxed text-dim md:grid-cols-2">
             <div>
               <div class="eyebrow mb-1.5">The planner</div>
-              A learned Value Iteration Network (Tamar et al., 2016). From the
-              maze image it learns a per-cell reward and a traversability gate
-              (the wall mask), runs K rounds of a learned 3×3 value backup to
-              propagate value across the grid, then reads the decision
-              ego-centrically at the agent's own cell. Nothing about the maze is
-              hand-coded — it figures out walls, goal, and routing itself.
+              A learned Value Iteration Network (Tamar et al., 2016) — the{" "}
+              <code class="text-[0.85em]">VinReadout</code> in{" "}
+              <code class="text-[0.85em]">modgrad-ctm</code>, a reusable SDK
+              component, not maze-specific glue. From the maze image it learns a
+              per-cell reward and a traversability gate (the wall mask), runs K
+              rounds of a learned 3×3 value backup to propagate value across the
+              grid, then reads the decision ego-centrically at the agent's own
+              cell. Nothing about the maze is hand-coded — it figures out walls,
+              goal, and routing itself.
             </div>
             <div>
               <div class="eyebrow mb-1.5">Trained, then on its own</div>
@@ -2103,10 +2116,15 @@ export default function Play() {
               never during live planning — and you watch the planner's gap drop.
             </div>
             <div>
-              <div class="eyebrow mb-1.5">Engine</div>
+              <div class="eyebrow mb-1.5">Engine — all SDK</div>
               The browser engine is the modgrad SDK's own crates
-              (modgrad-ctm + modgrad-codec) compiled to WebAssembly — the same
-              forward pass that runs on the server, in your tab. Loads only here.
+              (<code class="text-[0.85em]">modgrad-ctm</code> +{" "}
+              <code class="text-[0.85em]">modgrad-codec</code>) compiled to
+              WebAssembly — the same forward pass that runs on the server, in
+              your tab. The planner, the retina pathway, the 8-region brain and
+              the replay-based consolidation are all composable SDK primitives:
+              modgrad builds brains by wiring regions (vision, planning, motor),
+              not by hand-coding the task.
             </div>
           </div>
         </Show>

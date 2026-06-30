@@ -15,7 +15,7 @@ know about `modgrad-codec`. Import one, or import all fourteen.
 
 | crate | what it gives you |
 |-------|-------------------|
-| **modgrad-ctm** | single CTM (NLM, sync, MHA, U-Net synapse, full BPTT) + graph composition, `NeuralComputer`, the bio modules, plural & organism |
+| **modgrad-ctm** | single CTM (NLM, sync, MHA, U-Net synapse, full BPTT) + graph composition, `NeuralComputer`, the bio modules, plural & organism, the `VinReadout` value-iteration planner |
 | **modgrad-compute** | `Linear`, tensor ops, batched dispatch, resident GPU buffers |
 | **modgrad-device** | CPU / CUDA / ROCm / KFD / Vulkan backends; resident kernels (matvec, AdamW, RoPE, RMSNorm) |
 | **modgrad-transformer** | transformer blocks, MHA, RoPE, KV cache, `GptModelResident`, Qwen-class loader |
@@ -24,7 +24,7 @@ know about `modgrad-codec`. Import one, or import all fourteen.
 | **modgrad-codec** | `VisualRetina` (V1→V4), VQ-VAE, audio codec, FSQ, byte n-gram hash |
 | **modgrad-ffn** | SwiGLU language prior + `FrozenCerebellum` trait |
 | **modgrad-data** | type-safe multimodal tokenization, mixed-modality streaming, lazy loading |
-| **modgrad-training** | AdamW / Adam / SGD, warmup/cosine schedulers, gradient accumulation, dream replay |
+| **modgrad-training** | AdamW / Adam / SGD, warmup/cosine schedulers, gradient accumulation, dream replay (sleep consolidation), reverse-replay credit assignment |
 | **modgrad-memory** | episodic memory with valence, content-addressable recall, surprise-gated replay |
 | **modgrad-io** | telemetry, wincode serialization, safetensors + ONNX + GGUF backends |
 | **modgrad-persist** | wincode / JSON save-load, f32/f16/i8 quantization |

@@ -1011,7 +1011,7 @@ self.onmessage = async (e: MessageEvent) => {
       // leaves it as a real runtime import instead of trying to resolve it.
       // ?v=… busts any stale cached engine (a mismatched glue/wasm pair fails
       // to instantiate); bump ENGINE_VER whenever the wasm is rebuilt.
-      const ENGINE_VER = "20260630-sdk-mt-coep";
+      const ENGINE_VER = "20260630-planner-mistakev4";
       const v = "?v=" + ENGINE_VER;
 
       // ── single- vs multi-threaded engine selection ──────────────────────
@@ -1200,18 +1200,12 @@ self.onmessage = async (e: MessageEvent) => {
       const plastic =
         extras.apply_plasticity !== null && extras.reset_plasticity !== null;
 
-      // ── LEARNED VIN: load the trained planner weights. The agent drives on
-      // this at inference — no solver in the loop. (Trained offline on solved
-      // mazes; at inference it plans from the image alone.)
-      if (extras.load_learned_vin) {
-        try {
-          const vinJson = await fetch("/models/vin_solver_weights.json").then((r) => r.text());
-          extras.load_learned_vin(vinJson);
-          console.log("[vin] learned planner loaded");
-        } catch (e) {
-          console.warn("[vin] failed to load learned planner weights:", e);
-        }
-      }
+      // ── PLANNER: no separate file. Since the fold, the brain export carries
+      // its own hippocampus value-iteration core (`regional.planner`), so
+      // loading the brain above already loaded the planner. The agent drives on
+      // it at inference — no solver in the loop, and ONE artifact, not two.
+      // (`load_learned_vin` still exists in the engine for the standalone path
+      // and tests; the demo just doesn't need it now.)
 
       // The closed loop drives on the LEARNED VIN when the engine exports it.
       // The SDK wasm ships the compass forward (value field + logits); the old

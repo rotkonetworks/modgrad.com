@@ -102,6 +102,26 @@ in the brain, then feeds back into attention. That edge turns stored experience
 into recalled context. Without it, memory accumulates but never influences a
 prediction. **In:** input, attention, output, motor. **Out:** insula (and attention).
 
+## The planner readout
+
+Some tasks need *exact* planning, not just learned reflexes. `modgrad-ctm` ships a
+**`VinReadout`** — a Value Iteration Network as a reusable SDK component, not
+task-specific glue. It projects per-cell reward, gate and value maps, runs `K`
+Jacobi Bellman backups (one value-iteration sweep per tick), and reads the move
+**ego-centrically at the agent's own cell** — a gather, not a global pool. That
+ego-centric readout matters: pooling the cortical state into one vector measurably
+destroys local position (wall information that is ~94% linearly decodable in the
+agent's own grid-cell token collapses toward chance once pooled), so the planner
+reads value *where the agent stands*.
+
+It is a full `Brain`-style component — `forward_train` / `backward` /
+`apply_grads`, plus `consolidate_move` for online correction — so it trains and
+checkpoints like any other region. The design direction is to fold it into the
+**hippocampus** as that region's value-iteration core (`with_planner` /
+`has_planner` / `plan`), warm-started from a standalone planner with zero
+retraining. The [/play demo](/play) runs exactly this `VinReadout`, compiled to
+WebAssembly.
+
 ## Inter-region synapses
 
 A `Connection` concatenates the activations of its source regions (optionally

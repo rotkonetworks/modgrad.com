@@ -1280,18 +1280,26 @@ self.onmessage = async (e: MessageEvent) => {
 
     if (msg.type === "step") {
       if (!engine) return;
-      const { grid, agent, goal } = msg as {
+      const { grid, agent, goal, viz } = msg as {
         grid: number[];
         agent: [number, number];
         goal: [number, number];
+        viz?: boolean;
       };
       const [ar, ac] = agent;
       const [gr, gc] = goal;
+      // The heavy per-step visualisation — the 9MB 8-region brain forward and the
+      // retina feature maps — feeds ONLY the 3D "thinking" panels, not the agent's
+      // move (the VIN below drives navigation). At the high-speed tiers the UI
+      // sends viz:false so we skip both and step on the planner alone; the brain
+      // trace comes back null and the UI commits the move immediately (no tick
+      // animation), which is what makes 8×/16× actually race. Default on.
+      const heavyViz = viz !== false;
       // the brain reads the maze and decides the move (and exposes its trace)
-      const ran = runBrain(grid, ar, ac, gr, gc);
+      const ran = heavyViz ? runBrain(grid, ar, ac, gr, gc) : null;
       // the visual cortex's per-layer feature maps for this cell (for the vision panel)
       let vision: RetinaMap[] | null = null;
-      if (engine.retina_maps) {
+      if (heavyViz && engine.retina_maps) {
         try {
           const px = renderPixels(grid, ar, ac, gr, gc);
           const maps = engine.retina_maps(px);

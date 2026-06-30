@@ -103,7 +103,7 @@ type Status = "loading" | "ready" | "error";
 type RunState = "idle" | "thinking" | "solved" | "stuck";
 
 const BASE_TICK_MS = 95; // base pace of the "thinking" animation (at 1× speed)
-const SPEEDS = [0.5, 1, 2, 4] as const; // UI-selectable stepping-speed multipliers
+const SPEEDS = [0.5, 1, 2, 4, 8, 16] as const; // UI-selectable stepping-speed multipliers
 const MAX_STEPS = 160; // safety backstop. 11×11 paths can be long, and self-drive
 // wanders up to ~3× shortest before the worker nudges/loses — so give it room.
 // the board the worker runs on. MUST stay ODD (recursive-backtracker mazes need
@@ -458,11 +458,17 @@ export default function Play() {
     }
     pendingStep = true;
     setRunState("thinking");
+    // At the high speed tiers (≥8×) skip the heavy per-step brain-viz + retina
+    // forward (the 9MB 8-region brain run that drives the 3D "thinking" panels)
+    // and step on the lightweight planner alone — the agent's move comes from the
+    // VIN regardless, so navigation is unchanged; only the per-step visualisation
+    // pauses while you race. The 3D brain holds its last frame until you slow down.
     worker.postMessage({
       type: "step",
       grid: m.grid,
       agent: agent(),
       goal: maze()!.end,
+      viz: speed() < 8,
     });
   }
 

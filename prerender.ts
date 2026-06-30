@@ -62,7 +62,7 @@ emit(
   "/play",
   variant(
     "Watch it think — modgrad",
-    "A real modgrad Continuous Thought Machine solves a maze in your browser. Watch its neurons fire, attention sweep the maze, and certainty rise as it commits each move. Runs entirely client-side via wasm.",
+    "A real modgrad learned planner solves mazes live in your browser — a Value Iteration Network with no solver at inference — while the Continuous Thought Machine brain's neurons fire and attention sweeps the maze. Runs entirely client-side via wasm.",
     "/play",
   ),
 );

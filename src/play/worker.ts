@@ -49,8 +49,9 @@ type BrainTelemetry = {
 //   "normal"   — bio-escape ON, standard budget. Mostly finishes.
 //   "hard"     — bio-escape ON but tight budget + mild exploration. Fails some.
 //   "hardcore" — bio-escape OFF: the raw frozen VIN, no plastic bias, no
-//                neuromodulator. It plans purely from the image and can get
-//                stuck / fail. The honest "how good is the planner, really".
+//                neuromodulator. It plans purely from the decoded maze grid
+//                (open/goal per cell) and can get stuck / fail. The honest
+//                "how good is the planner, really".
 type DriveMode = "easy" | "normal" | "hard" | "hardcore";
 let driveMode: DriveMode = "normal"; // default; set from init.mode / setMode
 

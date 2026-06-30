@@ -178,7 +178,7 @@ export default function Play() {
   useDocMeta(() => ({
     title: "Watch it think",
     description:
-      "A modgrad learned planner (Value Iteration Network) solving mazes in your browser. Trained on solved mazes, it reads the maze image, learns the walls and goal, and plans its own route with no solver at inference — and generalizes to mazes bigger than it trained on. Runs client-side as the modgrad SDK itself, compiled to WebAssembly.",
+      "A modgrad learned planner (Value Iteration Network) solving mazes in your browser. Trained on solved mazes, it's handed the decoded maze — open cells and the goal — and plans its own route by propagating value across the grid, with no solver at inference, generalizing to mazes bigger than it trained on. Runs client-side as the modgrad SDK itself, compiled to WebAssembly.",
     path: "/play",
   }));
 
@@ -1196,12 +1196,13 @@ export default function Play() {
         <p class="mt-5 text-dim text-[1.05rem] max-w-[60ch] leading-relaxed">
           A real modgrad{" "}
           <span class="grad-text">learned planner</span> solving mazes live in
-          your browser. A Value Iteration Network, trained on solved mazes, reads
-          the maze image and plans its own route — with{" "}
-          <span class="grad-text">no solver at inference</span>. It learns the
-          walls and the goal from the picture, then propagates value to navigate,
-          and it generalizes to mazes bigger than it ever trained on. The planner
-          is the modgrad SDK's own{" "}
+          your browser. A Value Iteration Network, trained on solved mazes, is
+          handed the decoded maze — which cells are open and where the goal sits —
+          and plans its own route with{" "}
+          <span class="grad-text">no solver at inference</span>. It propagates
+          value across the grid and reads its next move ego-centrically at its own
+          cell, and it generalizes to mazes bigger than it ever trained on. The
+          planner is the modgrad SDK's own{" "}
           <span class="grad-text">Value Iteration Network</span> (the{" "}
           <code class="text-[0.85em]">modgrad-ctm</code> crate) — the same code
           you'd build with, running here compiled to WebAssembly.
@@ -2067,21 +2068,21 @@ export default function Play() {
           <div class="mt-4 grid gap-5 text-sm leading-relaxed text-dim md:grid-cols-2">
             <div>
               <div class="eyebrow mb-1.5">The planner</div>
-              A learned Value Iteration Network (Tamar et al., 2016) — the{" "}
-              <code class="text-[0.85em]">VinReadout</code> in{" "}
-              <code class="text-[0.85em]">modgrad-ctm</code>, a reusable SDK
-              component, not maze-specific glue. From the maze image it learns a
-              per-cell reward and a traversability gate (the wall mask), runs K
-              rounds of a learned 3×3 value backup to propagate value across the
-              grid, then reads the decision ego-centrically at the agent's own
-              cell. Nothing about the maze is hand-coded — it figures out walls,
-              goal, and routing itself.
+              A learned Value Iteration Network (Tamar et al., 2016) — a reusable{" "}
+              <code class="text-[0.85em]">modgrad-ctm</code> SDK component, not
+              maze-specific glue. It's handed the decoded maze as per-cell features
+              (open vs wall, and the goal cell), projects a per-cell reward and a
+              traversability gate from them, runs K rounds of a learned 3×3 value
+              backup to propagate value across the grid, then reads the decision
+              ego-centrically at the agent's own cell. What's learned is the{" "}
+              <em>planning</em> — how value flows and which move to take — not the
+              perception: the walls and goal are given to it, not seen.
             </div>
             <div>
               <div class="eyebrow mb-1.5">Trained, then on its own</div>
               It was trained offline (supervised, on solver-labelled mazes, like
               the Sakana CTM) — the answers live in training only. At inference
-              there is no solver: it plans from the picture alone. Because the
+              there is no solver: it plans from the decoded maze alone. Because the
               value propagation is iterative, it generalizes to mazes bigger than
               it trained on by running more rounds — the VIN signature, and the
               reason this is planning rather than memorizing.

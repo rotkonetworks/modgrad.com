@@ -112,7 +112,7 @@ const PLAY_SIZE = 11;
 // Bump when the shipped model weights change, to bust the heuristic browser
 // cache on the non-content-hashed /models/*.json (the brain export with its
 // folded-in planner). Mirrors ENGINE_VER's role for the wasm.
-const MODEL_VER = "20260630-brainplanner";
+const MODEL_VER = "20260630-m2-hippo-region";
 // UP=0 DOWN=1 LEFT=2 RIGHT=3 — [dr, dc], matches the worker's DELTA
 const DIR_DELTA: [number, number][] = [
   [-1, 0],

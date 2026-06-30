@@ -1199,13 +1199,17 @@ export default function Play() {
           your browser. A Value Iteration Network, trained on solved mazes, is
           handed the decoded maze — which cells are open and where the goal sits —
           and plans its own route with{" "}
-          <span class="grad-text">no solver at inference</span>. It propagates
-          value across the grid and reads its next move ego-centrically at its own
-          cell, and it generalizes to mazes bigger than it ever trained on. The
-          planner is the modgrad SDK's own{" "}
-          <span class="grad-text">Value Iteration Network</span> (the{" "}
-          <code class="text-[0.85em]">modgrad-ctm</code> crate) — the same code
-          you'd build with, running here compiled to WebAssembly.
+          <span class="grad-text">no solver at inference</span>. And it isn't one
+          module: the planning is{" "}
+          <span class="grad-text">distributed across the brain's regions</span> —
+          the <strong>basal ganglia</strong> value each cell (dopamine =
+          reward-prediction error), the <strong>hippocampus</strong> replays that
+          value across its cognitive map (the value-iteration sweep), and{" "}
+          <strong>motor</strong> reads the move out ego-centrically at the agent's
+          own cell. It generalizes to mazes bigger than it ever trained on — the
+          modgrad SDK's own code (the{" "}
+          <code class="text-[0.85em]">modgrad-ctm</code> crate), compiled to
+          WebAssembly.
         </p>
         <div class="mt-4 flex flex-wrap gap-x-5 gap-y-1 text-sm">
           <A href="/docs/brain-composition" class="text-accent">
@@ -2068,15 +2072,19 @@ export default function Play() {
           <div class="mt-4 grid gap-5 text-sm leading-relaxed text-dim md:grid-cols-2">
             <div>
               <div class="eyebrow mb-1.5">The planner</div>
-              A learned Value Iteration Network (Tamar et al., 2016) — a reusable{" "}
-              <code class="text-[0.85em]">modgrad-ctm</code> SDK component, not
-              maze-specific glue. It's handed the decoded maze as per-cell features
-              (open vs wall, and the goal cell), projects a per-cell reward and a
-              traversability gate from them, runs K rounds of a learned 3×3 value
-              backup to propagate value across the grid, then reads the decision
-              ego-centrically at the agent's own cell. What's learned is the{" "}
-              <em>planning</em> — how value flows and which move to take — not the
-              perception: the walls and goal are given to it, not seen.
+              A learned Value Iteration Network (Tamar et al., 2016), distributed
+              across three brain regions the way model-based planning is in the
+              brain (hippocampal map &amp; replay × striatal value → action). The{" "}
+              <strong>basal ganglia</strong> project a per-cell reward and value
+              (the striatal value head; dopamine = reward-prediction error). The{" "}
+              <strong>hippocampus</strong> holds the cognitive map — a
+              traversability gate — and runs the <strong>replay</strong> that
+              propagates value across it: K rounds of a 3×3 backup, the reverse
+              replay that is a Bellman update. <strong>Motor</strong> reads the
+              decision ego-centrically at the agent's own cell. It's handed the
+              decoded maze (open vs wall, and the goal) — what's learned is the{" "}
+              <em>planning</em>, not the perception: the walls and goal are given
+              to it, not seen.
             </div>
             <div>
               <div class="eyebrow mb-1.5">Trained, then on its own</div>

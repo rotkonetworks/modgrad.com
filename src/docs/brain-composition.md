@@ -102,25 +102,33 @@ in the brain, then feeds back into attention. That edge turns stored experience
 into recalled context. Without it, memory accumulates but never influences a
 prediction. **In:** input, attention, output, motor. **Out:** insula (and attention).
 
-## The planner readout
+## Planning, distributed across regions
 
-Some tasks need *exact* planning, not just learned reflexes. `modgrad-ctm` ships a
-**`VinReadout`** — a Value Iteration Network as a reusable SDK component, not
-task-specific glue. It projects per-cell reward, gate and value maps, runs `K`
-Jacobi Bellman backups (one value-iteration sweep per tick), and reads the move
-**ego-centrically at the agent's own cell** — a gather, not a global pool. That
-ego-centric readout matters: pooling the cortical state into one vector measurably
-destroys local position (wall information that is ~94% linearly decodable in the
-agent's own grid-cell token collapses toward chance once pooled), so the planner
-reads value *where the agent stands*.
+Some tasks need *exact* planning, not just learned reflexes — and modgrad does it
+the way model-based planning is done in the brain: **hippocampal map & replay ×
+striatal value → action**. The planner is not one module; its value iteration is
+split across three regions (`region_plugins`, keyed by region index):
 
-It is a full `Brain`-style component — `forward_train` / `backward` /
-`apply_grads`, plus `consolidate_move` for online correction — so it trains and
-checkpoints like any other region. The design direction is to fold it into the
-**hippocampus** as that region's value-iteration core (`with_planner` /
-`has_planner` / `plan`), warm-started from a standalone planner with zero
-retraining. The [/play demo](/play) runs exactly this `VinReadout`, compiled to
-WebAssembly.
+- **basal ganglia** — the value head: a per-cell reward and value estimate
+  (dopamine = reward-prediction error).
+- **hippocampus** — the cognitive map (a per-cell traversability gate) and the
+  **replay** that propagates value across it: `K` rounds of a 3×3 backup, the
+  reverse replay that *is* a Bellman update.
+- **motor** — the **ego-centric readout**, reading the move at the agent's own
+  cell. A gather, not a global pool — and that matters: pooling the cortical state
+  into one vector measurably destroys local position (wall information ~94%
+  linearly decodable in the agent's own grid-cell token collapses toward chance
+  once pooled), so the decision is read *where the agent stands*.
+
+The three heads (`BgValueHead` / `HippoGateHead` / `MotorHead` in `modgrad-ctm`)
+are warm-started by splitting a trained standalone Value Iteration Network
+(Tamar et al., 2016) — `split_vin` — so they reproduce it bit-for-bit, then
+fine-tune. Each is a small bundle of `Linear`s; the generic per-region weights
+stay task-agnostic, with the planning circuit owned at the composition layer
+beside `connections`/`router`. The [/play demo](/play) runs exactly this, compiled
+to WebAssembly. (Today `plan()` composes the three heads to run the sweeps;
+running them *as* the hippocampus region's own tick dynamics — value flowing
+through a basal-ganglia↔hippocampus edge each tick — is the next integration.)
 
 ## Inter-region synapses
 

@@ -88,7 +88,7 @@ const FEATURES: Feature[] = [
   {
     key: "vin",
     name: "Value Iteration Network",
-    desc: "The SDK's own planner (VinReadout in modgrad-ctm): propagates value across the grid, reads the move ego-centrically.",
+    desc: "The planner, distributed across regions: basal ganglia value each cell (dopamine = RPE), the hippocampus replays value across its cognitive map (a Bellman backup), motor reads the move ego-centrically.",
     docHref: "/docs/brain-composition",
     // The VIN drives every step the agent takes — active whenever it's running.
     isActive: (s) => s.ticksUsed > 0,

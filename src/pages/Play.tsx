@@ -112,7 +112,7 @@ const PLAY_SIZE = 11;
 // Bump when the shipped model weights change, to bust the heuristic browser
 // cache on the non-content-hashed /models/*.json (the brain export with its
 // folded-in planner). Mirrors ENGINE_VER's role for the wasm.
-const MODEL_VER = "20260630-m3-distributed";
+const MODEL_VER = "20260701-size-selector";
 // UP=0 DOWN=1 LEFT=2 RIGHT=3 — [dr, dc], matches the worker's DELTA
 const DIR_DELTA: [number, number][] = [
   [-1, 0],
@@ -237,6 +237,18 @@ export default function Play() {
   // is size-agnostic, so this needs no retrain — just a fresh maze at that size.
   const [mazeSize, setMazeSize] = createSignal<number>(PLAY_SIZE);
   const MAZE_SIZES = [9, 11, 13, 15, 21] as const;
+  // Brain size-selector: three trained variants of the SAME 8-region brain at
+  // different cortical widths (16 / 32 / 64). All share the retina cortex and
+  // the folded grid-planner; only the CTM's neuron count — the "thinking"
+  // you watch — changes. Hot-swapped in the worker without a reload.
+  const BRAIN_MODELS = [
+    { key: "small", label: "Small", file: "brain_small_weights.json", ref: "brain_small_reference.json", note: "cortex 16" },
+    { key: "medium", label: "Medium", file: "brain_solver_weights.json", ref: "brain_solver_reference.json", note: "cortex 32" },
+    { key: "large", label: "Large", file: "brain_large_weights.json", ref: "brain_large_reference.json", note: "cortex 64" },
+  ] as const;
+  type BrainModelKey = (typeof BRAIN_MODELS)[number]["key"];
+  const [modelSize, setModelSize] = createSignal<BrainModelKey>("medium");
+  const [modelSwitching, setModelSwitching] = createSignal(false);
   // user-settable stepping speed: a multiplier on the base tick (higher = faster).
   const [speed, setSpeed] = createSignal(1);
   const tickMs = () => Math.round(BASE_TICK_MS / speed());
@@ -295,6 +307,12 @@ export default function Play() {
       if (msg.type === "error") {
         setStatus("error");
         setErrMsg(msg.message || "The brain failed to load.");
+        return;
+      }
+      if (msg.type === "brainReloaded") {
+        setModelSwitching(false);
+        // resume on a fresh maze so the newly-sized brain starts clean
+        if (msg.ok) requestNewMaze();
         return;
       }
       if (msg.type === "maze") {
@@ -437,6 +455,30 @@ export default function Play() {
     pause();
     setGenerating(true);
     worker?.postMessage({ type: "setSize", size });
+  }
+
+  // Hot-swap the trained brain size. Fetches the variant's {cortex, regional}
+  // export and hands it to the worker, which re-deserialises it in place (the
+  // folded planner rides along). No engine teardown, no maze reset.
+  async function changeModel(key: BrainModelKey) {
+    if (key === modelSize() || status() !== "ready" || modelSwitching()) return;
+    const m = BRAIN_MODELS.find((b) => b.key === key);
+    if (!m || !worker) return;
+    setModelSwitching(true);
+    setModelSize(key);
+    pause();
+    try {
+      // Swap the reference too — region widths and the accuracy differ per
+      // size, and brainRef drives the 3D viz structure + the accuracy readout.
+      const [br, ref] = await Promise.all([
+        fetch(`/models/${m.file}?v=${MODEL_VER}`).then((r) => r.text()),
+        fetch(`/models/${m.ref}?v=${MODEL_VER}`).then((r) => r.json() as Promise<BrainRef>),
+      ]);
+      setBrainRef(ref);
+      worker.postMessage({ type: "reloadBrain", brainWeights: br });
+    } catch (e) {
+      setModelSwitching(false);
+    }
   }
 
   // ask the worker to invent a fresh maze the brain can actually solve
@@ -1389,6 +1431,43 @@ export default function Play() {
                 </For>
               </div>
               <div class="text-sm text-dim mt-2 leading-relaxed">{modeDesc()}</div>
+
+              {/* ── brain size-selector: three trained CTM widths, hot-swapped ── */}
+              <div class="flex items-center justify-between mt-4">
+                <div class="eyebrow">Brain size</div>
+                <div
+                  class="flex rounded-lg overflow-hidden border border-line"
+                  role="group"
+                  aria-label="brain size"
+                >
+                  <For each={BRAIN_MODELS}>
+                    {(m) => {
+                      const active = () => modelSize() === m.key;
+                      return (
+                        <button
+                          class="text-xs font-mono px-2.5 py-1 transition-colors"
+                          style={{
+                            background: active() ? "var(--accent)" : "transparent",
+                            color: active() ? "#fff" : "var(--text-mute)",
+                          }}
+                          onClick={() => changeModel(m.key)}
+                          disabled={status() !== "ready" || modelSwitching()}
+                          aria-pressed={active()}
+                          title={`${m.label} brain — ${m.note}`}
+                        >
+                          {m.label}
+                        </button>
+                      );
+                    }}
+                  </For>
+                </div>
+              </div>
+              <div class="text-[.72rem] text-mute font-mono mt-1.5 leading-relaxed">
+                Same 8-region brain at three cortical widths (16 / 32 / 64). All
+                share the retina and the folded grid-planner — only the neuron
+                count you watch think changes. Bigger = more capacity, larger
+                download.{modelSwitching() ? " Loading…" : ""}
+              </div>
 
               {/* ── board-size selector: arbitrary-resolution retina, no retrain ── */}
               <div class="flex items-center justify-between mt-4">

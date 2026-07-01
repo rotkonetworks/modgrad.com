@@ -145,6 +145,10 @@ type EngineExtras = {
   // runs the planner over per-cell [is_open, is_goal, bias] tokens and returns the
   // 4 move logits (U,D,L,R). Trained offline; no solver at inference.
   load_learned_vin: ((json: string) => void) | null;
+  // Hot-swap the loaded brain (size-selector). Re-deserialises a new
+  // {cortex, regional} export in place — the folded planner rides along, so
+  // one call switches both the visualised CTM and its solver.
+  load_brain_weights: ((json: string) => void) | null;
   learned_vin_forward:
     | ((tokens: Float32Array, gridH: number, gridW: number, ar: number, ac: number) => Float32Array)
     | null;
@@ -1190,6 +1194,7 @@ self.onmessage = async (e: MessageEvent) => {
         vin_learn: fn<(targetMove: number, pain: number) => number>("vin_learn"),
         vin_reset: fn<() => void>("vin_reset"),
         load_learned_vin: fn<(json: string) => void>("load_learned_vin"),
+        load_brain_weights: fn<(json: string) => void>("load_brain_weights"),
         learned_vin_forward:
           fn<(t: Float32Array, h: number, w: number, ar: number, ac: number) => Float32Array>(
             "learned_vin_forward",
@@ -1242,6 +1247,41 @@ self.onmessage = async (e: MessageEvent) => {
         mode: driveMode, // the active drive-mode
         threads: threadsInitialized, // >0 ⇒ multithreaded engine + rayon pool
       });
+      return;
+    }
+
+    // Hot-swap the trained brain (size-selector) WITHOUT tearing down the
+    // engine/rayon pool. Each size variant is a self-contained {cortex,
+    // regional} export with its planner folded in, so one load_brain_weights
+    // call switches the visualised CTM and its solver together. The retina and
+    // out-dims are identical across sizes, so no buffer resize is needed.
+    if (msg.type === "reloadBrain") {
+      if (!engine || !engine.load_brain_weights || !msg.brainWeights) {
+        post({ type: "brainReloaded", ok: false });
+        return;
+      }
+      try {
+        engine.load_brain_weights(msg.brainWeights);
+        // Probe: a trained net gives a non-uniform response on a blank board.
+        let spread = 0;
+        try {
+          const probe = engine.run_brain_pixels(
+            renderPixels(new Array(SIZE * SIZE).fill(0), 1, 1, SIZE - 2, SIZE - 2),
+          );
+          const last = probe.ticks[probe.ticks.length - 1]?.prediction ?? [];
+          const l = last.slice(0, 5).map((v) => Number(v.toFixed(2)));
+          spread = Math.max(...l) - Math.min(...l);
+          console.log(
+            `[brain] reloaded ${(msg.brainWeights.length / 1e6).toFixed(2)} MB · probe spread=${spread.toFixed(2)}`,
+          );
+        } catch (e) {
+          console.warn("[brain] reload self-test failed:", e);
+        }
+        post({ type: "brainReloaded", ok: true, sizeMB: msg.brainWeights.length / 1e6 });
+      } catch (e) {
+        console.error("[brain] reload failed:", e);
+        post({ type: "brainReloaded", ok: false });
+      }
       return;
     }
 

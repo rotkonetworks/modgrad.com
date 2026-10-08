@@ -4718,6 +4718,7 @@ dependencies = [
  "modgrad-traits",
  "rayon",
  "serde",
+ "serde_json",
  "wincode",
  "wincode-derive",
 ]

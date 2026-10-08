@@ -5,6 +5,8 @@
   "version": "1.0.0",
   "description": "JMAP-backed contact endpoint for modgrad.com",
   "scripts": {
-    "start": "node contact.mjs"
+    "start": "node contact.mjs",
+    "proxy": "node proxy.mjs",
+    "test": "node test-ledger.mjs"
   }
 }

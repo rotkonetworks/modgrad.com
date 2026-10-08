@@ -1001,6 +1001,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "btoi"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b5ab9db53bcda568284df0fd39f6eac24ad6f7ba7ff1168b9e76eba6576b976"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4619,6 +4628,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "modgrad-chess"
+version = "0.1.0"
+dependencies = [
+ "rand 0.9.2",
+ "rayon",
+ "serde",
+ "serde_json",
+ "shakmaty",
+ "shakmaty-syzygy",
+]
+
+[[package]]
 name = "modgrad-codec"
 version = "0.1.0"
 dependencies = [
@@ -8140,6 +8161,35 @@ checksum = "77fd7028345d415a4034cf8777cd4f8ab1851274233b45f84e3d955502d93874"
 dependencies = [
  "digest 0.10.7",
  "keccak",
+]
+
+[[package]]
+name = "shakmaty"
+version = "0.30.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d465a6a07031a8c60d92dc9b656cc8f59f8c1640493576d5d88f898883b4bd67"
+dependencies = [
+ "arrayvec 0.7.6",
+ "bitflags 2.11.0",
+ "btoi",
+ "nohash-hasher",
+ "serde",
+]
+
+[[package]]
+name = "shakmaty-syzygy"
+version = "0.28.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24b16b1750dfcbbdee863037af8bebdc37e8f66fbb988e48c6e3e1576b2934fb"
+dependencies = [
+ "arrayvec 0.7.6",
+ "bitflags 2.11.0",
+ "byteorder",
+ "libc",
+ "once_cell",
+ "rustc-hash 2.1.2",
+ "shakmaty",
+ "tracing",
 ]
 
 [[package]]

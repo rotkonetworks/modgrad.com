@@ -109,6 +109,8 @@ type StepResult = {
   stepsTaken?: number; // steps taken in this episode so far
   vetoed?: boolean; // the self-driven move hit a wall/edge → vetoed + PAIN
   lost?: boolean; // honest mode: episode exceeded budget without solving
+  died?: boolean; // the raw move stepped into a wall / off-board → fatal
+  deathCell?: number; // grid index of the death mark (wall struck, or last cell)
 };
 
 // The VIN (value-iteration readout) forward result, feature-detected on the
@@ -629,12 +631,9 @@ type MazeEpisode = {
   frustration: number; // neuromodulator: ↑ on no-progress/revisits, ↓ on progress/goal
 };
 const STEP_BUDGET_MULT = 3; // wander budget = ceil(shortest × MULT) before fail
-const PLASTIC_LR = 0.5; // learning rate for the per-cell escape bias (three-factor rule)
-const FRUST_TEMP = 1.2; // how much frustration heats the softmax (explore to escape loops)
-const FRUST_MAX = 4; // cap on frustration's effect on temperature
-const FRUST_LOST = 18; // frustration this high = genuinely stuck → fail honestly, next maze
-// (raised from 10: let it keep fighting a loop longer — more self-corrections to learn from)
-const NOVELTY_GAIN = 3.0; // per-frustration pull toward unvisited neighbours (frontier escape)
+// Honest-run wander budget: if the agent hasn't died on a wall and hasn't
+// reached the goal within this many × the shortest path, the maze is failed.
+const WANDER_MULT = 6;
 let mazeEp: MazeEpisode | null = null; // current self-drive episode (null until a maze loads)
 
 function newMazeEpisode(shortest: number, startCell: number): MazeEpisode {
@@ -1366,7 +1365,8 @@ self.onmessage = async (e: MessageEvent) => {
       }
 
       // The brain's predicted move (0..3, 4 = wait). The 8-region brain is
-      // ~84.5% per-move but ~0% end-to-end on 9×9 — one wrong step into a wall
+      // 94-98% per-move held-out (post 2026-07 training fix; was ~84.5%), but
+      // per-move accuracy compounds over a path — one wrong step into a wall
       // would stall it. So the agent walks the SHORTEST PATH to the goal (the
       // demo always completes and keeps thinking), and we report whether the
       // brain AGREED with the optimal step or made a misstep — honest, not faked.
@@ -1431,53 +1431,41 @@ self.onmessage = async (e: MessageEvent) => {
       // follow the plan (argmax); frustrated → SAMPLE to break out of a loop.
       // Difficulty knobs: hardcore turns the escape OFF (raw VIN, no plastic
       // bias, no frustration heat) so the planner runs on its own and can fail.
-      const lvl = levelParams(driveMode);
+      // ── DECISION (honest — no safeguards) ─────────────────────────────────
+      // The agent moves where the model's OWN move distribution sends it. No
+      // wall-mask, no plastic escape bias, no novelty/frontier bonus, no
+      // loop-break. We sample the raw softmax over all four directions
+      // (temperature 1), so a step into a wall happens exactly as often as the
+      // model actually wants it — and a wall / off-board step is FATAL. Nothing
+      // catches it; where it dies, it leaves a mark.
       const cellIdx = ar * SIZE + ac;
-      const vinLogits = vf ? vf.move_logits : [0, 0, 0, 0];
-      const bias = lvl.escapeOn
-        ? ep.plastic.get(cellIdx) ?? new Float32Array(4)
-        : new Float32Array(4); // hardcore: no plastic surround
-      // NOVELTY / FRONTIER drive: when frustrated, pull toward legal neighbours
-      // we have NOT visited yet — the honest "I'm looping, try new ground" signal
-      // (the agent's own visit memory, no solver). This is what lets it commit to
-      // a direction that leads AWAY from the goal when the shortest path requires
-      // detouring around a wall — the planner alone keeps aiming at the goal and
-      // ping-pongs; the novelty bonus breaks the tie toward the unexplored exit.
-      // ramp the novelty pull from frustration ≥ 1 (≈2 revisits) so a single
-      // stall on an otherwise-clean board doesn't yank the agent off the optimal
-      // line — only a genuine loop builds enough heat to trigger exploration.
-      const novelty = lvl.escapeOn
-        ? NOVELTY_GAIN * Math.max(0, Math.min(ep.frustration, FRUST_MAX) - 1)
-        : 0;
-      const comb: number[] = [0, 0, 0, 0];
-      for (let d = 0; d < 4; d++) {
-        const nr = ar + DELTA[d][0];
-        const nc = ac + DELTA[d][1];
-        const off = nr < 0 || nr >= SIZE || nc < 0 || nc >= SIZE;
-        if (off || grid[nr * SIZE + nc] === 1) {
-          comb[d] = -1e30; // mask illegal dir
-        } else {
-          const unvisited = (ep.visits.get(nr * SIZE + nc) ?? 0) === 0;
-          comb[d] = (vinLogits[d] ?? 0) + bias[d] + (unvisited ? novelty : 0);
-        }
-      }
-      // frustration only heats the softmax when the escape is on (easy/normal/hard).
-      const temp = lvl.escapeOn
-        ? 1 + lvl.heat * Math.min(ep.frustration, FRUST_MAX)
-        : 1;
-      const probs = softmaxTemp(comb, temp);
-      // calm → commit the plan; a sustained loop (frustration ≥ 2) → explore via
-      // sampling to escape. hardcore never samples: raw VIN argmax every step.
-      const decidedMove =
-        lvl.escapeOn && ep.frustration >= 2
-          ? sampleDir(probs, Math.random())
-          : argmax4(probs);
-      const nudged = false; // (no oracle nudge — kept for the result shape)
-      const vetoed = false; // walls are masked out → the agent always moves legally
-      let lost = false; // genuinely stuck on this maze → fail honestly, next maze
+      const rawLogits = vf ? vf.move_logits : ran?.moveLogits ?? [0, 0, 0, 0];
+      const comb: number[] = [
+        rawLogits[0] ?? 0,
+        rawLogits[1] ?? 0,
+        rawLogits[2] ?? 0,
+        rawLogits[3] ?? 0,
+      ];
+      const probs = softmaxTemp(comb, 1);
+      const decidedMove = sampleDir(probs, Math.random());
+      const nudged = false; // (kept for the result shape)
 
-      // Verdict classifies the DRIVEN move (ok / wall / astray / wait). Walls are
-      // masked so "wall" should never appear, but classifyMove stays the judge.
+      // resolve the landing; a wall or off-board step kills the agent.
+      const [adr, adc] =
+        decidedMove >= 0 && decidedMove < 4 ? DELTA[decidedMove] : [0, 0];
+      const tr = ar + adr;
+      const tc = ac + adc;
+      const offBoard = tr < 0 || tr >= SIZE || tc < 0 || tc >= SIZE;
+      const intoWall = !offBoard && grid[tr * SIZE + tc] === 1;
+      const died = offBoard || intoWall;
+      // the death mark: the wall cell it struck (in-bounds), else the cell it
+      // stepped off the board from.
+      const deathCell = intoWall ? tr * SIZE + tc : cellIdx;
+      const vetoed = false; // nothing vetoes a move now — a bad move is just death
+      let lost = died; // a death ends the episode as a failure
+      // on death the agent does NOT advance; otherwise it steps onto its choice.
+      const next: [number, number] = died ? [ar, ac] : [tr, tc];
+      // Verdict classifies the DRIVEN move (ok / wall / astray / wait).
       const verdict: StepResult["verdict"] = classifyMove(
         decidedMove,
         grid,
@@ -1488,20 +1476,7 @@ self.onmessage = async (e: MessageEvent) => {
       );
       // "agreed" = the driven move matched the HIDDEN BFS-optimal step (scoring).
       const agreed = decidedMove === optMove;
-
-      // the agent steps along the DECIDED move. Masking makes an illegal landing
-      // rare, but keep the safety net: if it lands off-grid / on a wall, stay put.
-      const [adr, adc] =
-        decidedMove >= 0 && decidedMove < 4 ? DELTA[decidedMove] : [0, 0];
-      let nr2 = ar + adr;
-      let nc2 = ac + adc;
-      if (nr2 < 0 || nr2 >= SIZE || nc2 < 0 || nc2 >= SIZE || grid[nr2 * SIZE + nc2] === 1) {
-        // safety net: never step into a wall (masking should make this unreachable)
-        nr2 = ar;
-        nc2 = ac;
-      }
-      const next: [number, number] = [nr2, nc2];
-      const reached = next[0] === gr && next[1] === gc;
+      const reached = !died && next[0] === gr && next[1] === gc;
 
       // ── frustration neuromodulator: PAIN from no-progress, dopamine as carrot ──
       // "Progress" is judged by the PLANNER'S OWN value field — its learned
@@ -1511,7 +1486,7 @@ self.onmessage = async (e: MessageEvent) => {
       // inherently route-aware: a cell that's tile-close to the goal but walled
       // off carries LOW value, so stepping there is not counted as progress.
       // (Falls back to the hidden BFS field only if the planner value is absent.)
-      const nextCell = nr2 * SIZE + nc2;
+      const nextCell = next[0] * SIZE + next[1];
       const priorVisits = ep.visits.get(nextCell) ?? 0; // visits BEFORE this step's bookkeeping
       const vgrid = vf ? vf.value_grid : [];
       const havePlannerValue = vgrid.length >= SIZE * SIZE;
@@ -1614,32 +1589,15 @@ self.onmessage = async (e: MessageEvent) => {
       // move's bias RISES, reinforcing a step that made progress.
       // hardcore: the bio loop is OFF — no plastic surround, no neuromodulator
       // emitted (the SDK panel honestly shows plasticity/neuromod idle).
-      let plasticDelta: number | undefined;
-      let signal: number | undefined;
-      if (lvl.escapeOn) {
-        const dP = ep.plastic.get(cellIdx) ?? new Float32Array(4);
-        let norm = 0;
-        for (let d = 0; d < 4; d++) {
-          if (comb[d] <= -1e29) continue; // skip illegal (masked) dirs
-          const err = (d === decidedMove ? 1 : 0) - probs[d];
-          const delta = PLASTIC_LR * modScalar * err;
-          const before = dP[d];
-          dP[d] = Math.max(-6, Math.min(6, dP[d] + delta)); // clamp the bias to [-6,6]
-          const applied = dP[d] - before; // the delta that actually landed (post-clamp)
-          norm += applied * applied;
-        }
-        ep.plastic.set(cellIdx, dP);
-        plasticDelta = Math.sqrt(norm);
-        signal = modScalar;
-      }
+      // Plastic escape bias was a safeguard — removed. The panel reads idle.
+      const plasticDelta: number | undefined = undefined;
+      const signal: number | undefined = undefined;
 
-      // LOST: give the plasticity a chance to escape; if it truly can't (budget
-      // blown OR frustration pinned high), fail honestly so the page advances to a
-      // fresh maze. The plastic state is per-maze, so nothing carries over.
-      const budgetOut = ep.steps >= Math.ceil(ep.shortest * lvl.budgetMul);
-      // frustration-stuck only fails the episode when the escape is live; hardcore
-      // fails purely on the wander budget (it has no frustration loop to pin).
-      if (budgetOut || (lvl.escapeOn && ep.frustration >= FRUST_LOST)) lost = true;
+      // LOST: besides dying on a wall, an agent that just wanders without ever
+      // reaching the goal also fails the maze (so the page advances). Fixed
+      // wander budget — no difficulty knobs, no escape rescue.
+      const budgetOut = ep.steps >= Math.ceil(ep.shortest * WANDER_MULT);
+      if (budgetOut) lost = true;
 
       // TRAINING LOSS: cross-entropy of the move-head's softmax against the move
       // it should take (the VIN's value-greedy plan, else the BFS-optimal step).
@@ -1707,6 +1665,8 @@ self.onmessage = async (e: MessageEvent) => {
         stepsTaken,
         vetoed,
         lost,
+        died,
+        deathCell,
       };
       // a finished episode (solved or lost) clears the episode state so the next
       // maze starts fresh. `nudged` is referenced for clarity / future telemetry.

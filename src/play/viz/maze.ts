@@ -75,6 +75,8 @@ export interface MazeRenderState {
   ticksTotal: number;
   /** True while the agent is resting during a sleep/consolidation pass. */
   sleeping?: boolean;
+  /** Grid indices where the agent died walking into a wall (the graveyard). */
+  deaths?: number[];
 }
 
 /** The paper-theme palette, resolved by the caller (e.g. from CSS vars). */
@@ -312,6 +314,36 @@ export function drawMaze(
       ctx.lineTo(px, py + cell * 0.1);
       ctx.stroke();
     });
+  }
+
+  // ── Layer 4.5: the GRAVEYARD ───────────────────────────────────────────────
+  // Where the agent walked into a wall and died — no safeguard caught it. Each
+  // death leaves a red ✗ on the wall cell it struck; they accumulate over the
+  // maze so you can see exactly where, and how often, the model fails.
+  const deaths = state.deaths;
+  if (deaths && deaths.length) {
+    // count deaths per cell so repeat-deaths on the same wall read darker
+    const tally = new Map<number, number>();
+    for (const idx of deaths) tally.set(idx, (tally.get(idx) ?? 0) + 1);
+    ctx.lineCap = "round";
+    for (const [idx, count] of tally) {
+      const r = Math.floor(idx / n);
+      const c = idx % n;
+      if (!inBounds(r, c)) continue;
+      const px = cx(c) + cell / 2;
+      const py = cy(r) + cell / 2;
+      const a = Math.min(1, 0.55 + 0.15 * count);
+      ctx.strokeStyle = `rgba(220, 38, 38, ${a.toFixed(2)})`;
+      ctx.lineWidth = Math.max(1.5, cell * 0.11);
+      const s = cell * 0.24;
+      ctx.beginPath();
+      ctx.moveTo(px - s, py - s);
+      ctx.lineTo(px + s, py + s);
+      ctx.moveTo(px + s, py - s);
+      ctx.lineTo(px - s, py + s);
+      ctx.stroke();
+    }
+    ctx.lineCap = "butt";
   }
 
   // ── Layer 5: the agent ─────────────────────────────────────────────────────

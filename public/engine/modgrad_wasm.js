@@ -81,6 +81,35 @@ export function load_learned_vin(json) {
     }
 }
 
+/**
+ * @param {string} json
+ */
+export function load_sheaf(json) {
+    const ptr0 = passStringToWasm0(json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.load_sheaf(ptr0, len0);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * Load the supersdf inference bundle. Returns `[low, high]`.
+ * @param {string} json
+ * @returns {Uint32Array}
+ */
+export function load_supersdf(json) {
+    const ptr0 = passStringToWasm0(json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.load_supersdf(ptr0, len0);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v2 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+    return v2;
+}
+
 export function reset_plasticity() {
     const ret = wasm.reset_plasticity();
     if (ret[1]) {
@@ -116,10 +145,96 @@ export function run_brain_pixels(pixels) {
     return takeFromExternrefTable0(ret[0]);
 }
 
+/**
+ * @param {Float32Array} buf
+ */
+export function sheaf_load_params(buf) {
+    const ptr0 = passArrayF32ToWasm0(buf, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.sheaf_load_params(ptr0, len0);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * @param {Uint32Array} tokens
+ * @param {Uint32Array} labels
+ * @param {number} batch
+ * @param {number} h
+ * @param {number} w
+ * @param {number} stride
+ * @param {number} conn
+ * @param {number} k
+ * @param {number} lr
+ * @returns {number}
+ */
+export function sheaf_sleep_step(tokens, labels, batch, h, w, stride, conn, k, lr) {
+    const ptr0 = passArray32ToWasm0(tokens, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray32ToWasm0(labels, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.sheaf_sleep_step(ptr0, len0, ptr1, len1, batch, h, w, stride, conn, k, lr);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ret[0];
+}
+
+/**
+ * @returns {Float32Array}
+ */
+export function sheaf_snapshot() {
+    const ret = wasm.sheaf_snapshot();
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+    return v1;
+}
+
+/**
+ * @param {Uint32Array} tokens
+ * @param {number} h
+ * @param {number} w
+ * @param {number} stride
+ * @param {number} conn
+ * @param {number} k
+ * @returns {Uint32Array}
+ */
+export function sheaf_solve(tokens, h, w, stride, conn, k) {
+    const ptr0 = passArray32ToWasm0(tokens, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.sheaf_solve(ptr0, len0, h, w, stride, conn, k);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v2 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+    return v2;
+}
+
+/**
+ * `low²` grayscale mask (ink=1) → `high²` SDF field (negative = inside).
+ * @param {Float32Array} mask
+ * @returns {Float32Array}
+ */
+export function supersdf_field(mask) {
+    const ptr0 = passArrayF32ToWasm0(mask, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.supersdf_field(ptr0, len0);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v2 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+    return v2;
+}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
-        __wbg_Error_2e59b1b37a9a34c3: function(arg0, arg1) {
+        __wbg_Error_92b29b0548f8b746: function(arg0, arg1) {
             const ret = Error(getStringFromWasm0(arg0, arg1));
             return ret;
         },
@@ -130,21 +245,21 @@ function __wbg_get_imports() {
             getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
             getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
         },
-        __wbg___wbindgen_throw_81fc77679af83bc6: function(arg0, arg1) {
+        __wbg___wbindgen_throw_344f42d3211c4765: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
         },
-        __wbg_new_4f9fafbb3909af72: function() {
-            const ret = new Object();
+        __wbg_new_32b398fb48b6d94a: function() {
+            const ret = new Array();
             return ret;
         },
-        __wbg_new_f3c9df4f38f3f798: function() {
-            const ret = new Array();
+        __wbg_new_da52cf8fe3429cb2: function() {
+            const ret = new Object();
             return ret;
         },
         __wbg_set_6be42768c690e380: function(arg0, arg1, arg2) {
             arg0[arg1] = arg2;
         },
-        __wbg_set_6c60b2e8ad0e9383: function(arg0, arg1, arg2) {
+        __wbg_set_8a16b38e4805b298: function(arg0, arg1, arg2) {
             arg0[arg1 >>> 0] = arg2;
         },
         __wbindgen_cast_0000000000000001: function(arg0) {
@@ -183,6 +298,11 @@ function getArrayF32FromWasm0(ptr, len) {
     return getFloat32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
 }
 
+function getArrayU32FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getUint32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
+}
+
 let cachedDataViewMemory0 = null;
 function getDataViewMemory0() {
     if (cachedDataViewMemory0 === null || cachedDataViewMemory0.buffer.detached === true || (cachedDataViewMemory0.buffer.detached === undefined && cachedDataViewMemory0.buffer !== wasm.memory.buffer)) {
@@ -200,8 +320,15 @@ function getFloat32ArrayMemory0() {
 }
 
 function getStringFromWasm0(ptr, len) {
-    ptr = ptr >>> 0;
-    return decodeText(ptr, len);
+    return decodeText(ptr >>> 0, len);
+}
+
+let cachedUint32ArrayMemory0 = null;
+function getUint32ArrayMemory0() {
+    if (cachedUint32ArrayMemory0 === null || cachedUint32ArrayMemory0.byteLength === 0) {
+        cachedUint32ArrayMemory0 = new Uint32Array(wasm.memory.buffer);
+    }
+    return cachedUint32ArrayMemory0;
 }
 
 let cachedUint8ArrayMemory0 = null;
@@ -210,6 +337,13 @@ function getUint8ArrayMemory0() {
         cachedUint8ArrayMemory0 = new Uint8Array(wasm.memory.buffer);
     }
     return cachedUint8ArrayMemory0;
+}
+
+function passArray32ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 4, 4) >>> 0;
+    getUint32ArrayMemory0().set(arg, ptr / 4);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
 }
 
 function passArrayF32ToWasm0(arg, malloc) {
@@ -291,12 +425,14 @@ if (!('encodeInto' in cachedTextEncoder)) {
 
 let WASM_VECTOR_LEN = 0;
 
-let wasmModule, wasm;
+let wasmModule, wasmInstance, wasm;
 function __wbg_finalize_init(instance, module) {
+    wasmInstance = instance;
     wasm = instance.exports;
     wasmModule = module;
     cachedDataViewMemory0 = null;
     cachedFloat32ArrayMemory0 = null;
+    cachedUint32ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;
     wasm.__wbindgen_start();
     return wasm;

@@ -76,6 +76,8 @@ type StepMsg = {
   stepsTaken?: number; // steps taken in this episode so far
   vetoed?: boolean; // the self-driven move hit a wall/edge → vetoed + PAIN
   lost?: boolean; // honest mode: episode exceeded budget without solving
+  died?: boolean; // the raw move stepped into a wall / off-board → fatal
+  deathCell?: number; // grid index of the death mark
 };
 
 // the three modular drive-modes (a UI toggle switches them live).
@@ -112,7 +114,7 @@ const PLAY_SIZE = 11;
 // Bump when the shipped model weights change, to bust the heuristic browser
 // cache on the non-content-hashed /models/*.json (the brain export with its
 // folded-in planner). Mirrors ENGINE_VER's role for the wasm.
-const MODEL_VER = "20260701-size-selector";
+const MODEL_VER = "20260703-full-brain-training";
 // UP=0 DOWN=1 LEFT=2 RIGHT=3 — [dr, dc], matches the worker's DELTA
 const DIR_DELTA: [number, number][] = [
   [-1, 0],
@@ -221,6 +223,14 @@ export default function Play() {
   const [agreeCount, setAgreeCount] = createSignal(0);
   const [moveCount, setMoveCount] = createSignal(0);
   const [reachedNow, setReachedNow] = createSignal(false); // reached goal this step
+  // ── graveyard: no safeguards, so a wall step kills the agent. Death marks
+  // accumulate on the CURRENT maze (cleared when a fresh maze loads); the tolls
+  // run for the whole session. This is the honest scoreboard of where and how
+  // often the model actually fails.
+  const [deaths, setDeaths] = createSignal<number[]>([]); // cell indices, this maze
+  const [deathToll, setDeathToll] = createSignal(0); // session deaths
+  const [solveToll, setSolveToll] = createSignal(0); // session solves
+  const DEATHS_PER_MAZE = 25; // give up on a maze after this many deaths → next
 
   // ── NEW SDK-feature signals (all optional / feature-detected) ──
   const [plasticityAvailable, setPlasticityAvailable] = createSignal(false);
@@ -237,17 +247,18 @@ export default function Play() {
   // is size-agnostic, so this needs no retrain — just a fresh maze at that size.
   const [mazeSize, setMazeSize] = createSignal<number>(PLAY_SIZE);
   const MAZE_SIZES = [9, 11, 13, 15, 21] as const;
-  // Brain size-selector: three trained variants of the SAME 8-region brain at
-  // different cortical widths (16 / 32 / 64). All share the retina cortex and
-  // the folded grid-planner; only the CTM's neuron count — the "thinking"
-  // you watch — changes. Hot-swapped in the worker without a reload.
+  // Brain size-selector: four trained variants of the SAME 8-region brain at
+  // different cortical widths (16 / 32 / 64 / 128). All share the retina
+  // cortex and the folded grid-planner; only the CTM's neuron count — the
+  // "thinking" you watch — changes. Hot-swapped in the worker without a reload.
   const BRAIN_MODELS = [
-    { key: "small", label: "Small", file: "brain_small_weights.json", ref: "brain_small_reference.json", note: "cortex 16" },
-    { key: "medium", label: "Medium", file: "brain_solver_weights.json", ref: "brain_solver_reference.json", note: "cortex 32" },
-    { key: "large", label: "Large", file: "brain_large_weights.json", ref: "brain_large_reference.json", note: "cortex 64" },
+    { key: "c16", label: "16", file: "brain_small_weights.json", ref: "brain_small_reference.json", note: "cortex 16" },
+    { key: "c32", label: "32", file: "brain_solver_weights.json", ref: "brain_solver_reference.json", note: "cortex 32" },
+    { key: "c64", label: "64", file: "brain_large_weights.json", ref: "brain_large_reference.json", note: "cortex 64" },
+    { key: "c128", label: "128", file: "brain_xl_weights.json", ref: "brain_xl_reference.json", note: "cortex 128" },
   ] as const;
   type BrainModelKey = (typeof BRAIN_MODELS)[number]["key"];
-  const [modelSize, setModelSize] = createSignal<BrainModelKey>("medium");
+  const [modelSize, setModelSize] = createSignal<BrainModelKey>("c32");
   const [modelSwitching, setModelSwitching] = createSignal(false);
   // user-settable stepping speed: a multiplier on the base tick (higher = faster).
   const [speed, setSpeed] = createSignal(1);
@@ -405,6 +416,7 @@ export default function Play() {
       setCurrentMaze(m);
       setAgent([m.start[0], m.start[1]]);
       setVisited([[m.start[0], m.start[1]]]);
+      setDeaths([]); // fresh maze → fresh graveyard (session tolls persist)
       setStepCount(0);
       setBrainTrace(null);
       setTickIdx(0);
@@ -572,9 +584,41 @@ export default function Play() {
       setStepCount((s) => s + 1);
     });
 
+    // DEATH: the raw move walked into a wall / off the board. No crutch caught
+    // it. Leave a death mark, tally it, and — if the maze isn't a hopeless
+    // graveyard yet — respawn at the start and let it try again (it samples its
+    // own move distribution, so each life takes a different, possibly-fatal
+    // route). Handle this BEFORE `lost`, since a death also sets lost.
+    if (msg.died) {
+      const cell = msg.deathCell;
+      batch(() => {
+        if (cell != null) setDeaths((d) => [...d, cell]);
+        setDeathToll((n) => n + 1);
+        setRunState("stuck");
+      });
+      const m = currentMaze();
+      const tooMany = deaths().length >= DEATHS_PER_MAZE;
+      if (playing() && m && !tooMany) {
+        // respawn at the maze start, same maze, marks intact
+        batch(() => {
+          setAgent([m.start[0], m.start[1]]);
+          setVisited([[m.start[0], m.start[1]]]);
+        });
+        // the worker already nulled its episode on death → respawn gets a fresh
+        // budget automatically; just step again from the start.
+        playTimer = window.setTimeout(() => requestStep(), tickMs() * 6);
+      } else if (playing() && m && tooMany) {
+        playTimer = window.setTimeout(() => requestNewMaze(), tickMs() * 8);
+      } else {
+        setPlaying(false);
+      }
+      return;
+    }
+
     if (msg.reached) {
       const looping = playing();
       setRunState("solved");
+      setSolveToll((n) => n + 1);
       // perpetual demo: reached the goal → pause to celebrate, then a fresh maze
       if (looping) {
         playTimer = window.setTimeout(() => requestNewMaze(), tickMs() * 14);
@@ -703,6 +747,7 @@ export default function Play() {
       tick: tickIdx(),
       ticksTotal: ticksTotal(),
       sleeping: !!sleeping(),
+      deaths: deaths(),
     };
     drawMazeModule(
       ctx,
@@ -1095,6 +1140,7 @@ export default function Play() {
     tickIdx();
     runState();
     sleeping();
+    deaths();
     drawMaze();
   });
   // hand the brain structure to the 3D renderer whenever it loads/changes
@@ -1291,6 +1337,19 @@ export default function Play() {
               </Show>
             </div>
 
+            {/* graveyard scoreboard — no safeguards: a wall step is fatal, and
+                every death leaves a mark. This is the honest tally of the raw
+                planner's competence. */}
+            <div class="flex items-center gap-4 mb-3 font-mono text-sm">
+              <span style={{ color: "rgb(220,38,38)" }}>
+                ✗ {deathToll()} deaths
+              </span>
+              <span class="text-dim">✓ {solveToll()} solved</span>
+              <Show when={deaths().length > 0}>
+                <span class="text-dim">· {deaths().length} on this maze</span>
+              </Show>
+            </div>
+
             {/* fixed-ratio box so the canvas never reflows */}
             <div class="relative w-full" style={{ "aspect-ratio": "1 / 1" }}>
               <canvas
@@ -1463,10 +1522,19 @@ export default function Play() {
                 </div>
               </div>
               <div class="text-[.72rem] text-mute font-mono mt-1.5 leading-relaxed">
-                Same 8-region brain at three cortical widths (16 / 32 / 64). All
-                share the retina and the folded grid-planner — only the neuron
-                count you watch think changes. Bigger = more capacity, larger
-                download.{modelSwitching() ? " Loading…" : ""}
+                Same brain, five cortical widths — shared retina + folded planner.
+                {modelSwitching() ? " Loading…" : ""}
+              </div>
+              {/* terse, data-forward lineage note — the CTM is Sakana's; we go
+                  wide (regions), they go deep (ticks/synapse). Numbers, not prose. */}
+              <div class="text-[.68rem] text-mute font-mono mt-2 leading-relaxed opacity-80 tabular-nums">
+                <div class="opacity-70">
+                  CTM core is{" "}
+                  <a href="/docs/continuous-thought-machine" class="underline">Sakana's</a>{" "}
+                  — depth vs width:
+                </div>
+                <div class="mt-0.5">Sakana maze · 1×512 · 75 ticks · synapse 8</div>
+                <div>this brain · 8×(16–256) · 16 ticks · synapse 3</div>
               </div>
 
               {/* ── board-size selector: arbitrary-resolution retina, no retrain ── */}

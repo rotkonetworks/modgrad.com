@@ -13,11 +13,31 @@ export function load_brain_weights(json: string): void;
 
 export function load_learned_vin(json: string): void;
 
+export function load_sheaf(json: string): void;
+
+/**
+ * Load the supersdf inference bundle. Returns `[low, high]`.
+ */
+export function load_supersdf(json: string): Uint32Array;
+
 export function reset_plasticity(): void;
 
 export function retina_maps(pixels: Float32Array): any;
 
 export function run_brain_pixels(pixels: Float32Array): any;
+
+export function sheaf_load_params(buf: Float32Array): void;
+
+export function sheaf_sleep_step(tokens: Uint32Array, labels: Uint32Array, batch: number, h: number, w: number, stride: number, conn: number, k: number, lr: number): number;
+
+export function sheaf_snapshot(): Float32Array;
+
+export function sheaf_solve(tokens: Uint32Array, h: number, w: number, stride: number, conn: number, k: number): Uint32Array;
+
+/**
+ * `low²` grayscale mask (ink=1) → `high²` SDF field (negative = inside).
+ */
+export function supersdf_field(mask: Float32Array): Float32Array;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
@@ -29,9 +49,16 @@ export interface InitOutput {
     readonly learned_vin_train: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
     readonly load_brain_weights: (a: number, b: number) => [number, number];
     readonly load_learned_vin: (a: number, b: number) => [number, number];
+    readonly load_sheaf: (a: number, b: number) => [number, number];
+    readonly load_supersdf: (a: number, b: number) => [number, number, number, number];
     readonly reset_plasticity: () => [number, number];
     readonly retina_maps: (a: number, b: number) => [number, number, number];
     readonly run_brain_pixels: (a: number, b: number) => [number, number, number];
+    readonly sheaf_load_params: (a: number, b: number) => [number, number];
+    readonly sheaf_sleep_step: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number];
+    readonly sheaf_snapshot: () => [number, number, number, number];
+    readonly sheaf_solve: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+    readonly supersdf_field: (a: number, b: number) => [number, number, number, number];
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;

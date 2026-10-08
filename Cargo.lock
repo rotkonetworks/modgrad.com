@@ -4404,6 +4404,7 @@ dependencies = [
  "modgrad-ctm",
  "modgrad-device",
  "modgrad-persist",
+ "modgrad-sheaf",
  "modgrad-substrate",
  "modgrad-training",
  "modgrad-traits",

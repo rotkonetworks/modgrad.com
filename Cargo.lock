@@ -51,6 +51,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
 dependencies = [
  "cfg-if",
+ "const-random",
  "getrandom 0.3.4",
  "once_cell",
  "serde",
@@ -106,6 +107,12 @@ name = "android-properties"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc7eb209b1518d6bb87b283c20095f5228ecda460da70b44f0802523dea6da04"
+
+[[package]]
+name = "android-tzdata"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e999941b234f3131b00bc13c22d06e8c5ff726d1b6318ac7eb276997bbb4fef0"
 
 [[package]]
 name = "android_system_properties"
@@ -639,6 +646,19 @@ dependencies = [
  "modgrad-ctm",
  "modgrad-device",
  "modgrad-traits",
+]
+
+[[package]]
+name = "bezier_fit"
+version = "0.1.0"
+dependencies = [
+ "modgrad-codec",
+ "modgrad-compute",
+ "modgrad-ctm",
+ "modgrad-training",
+ "modgrad-traits",
+ "parquet",
+ "serde_json",
 ]
 
 [[package]]
@@ -1191,14 +1211,15 @@ dependencies = [
 
 [[package]]
 name = "chrono"
-version = "0.4.44"
+version = "0.4.39"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c673075a2e0e5f4a1dde27ce9dee1ea4558c7ffe648f576438a20ca1d2acc4b0"
+checksum = "7e36cc9d416881d2e24f9a963be5fb1cd90966419ac844274161d10488b3e825"
 dependencies = [
+ "android-tzdata",
  "iana-time-zone",
  "num-traits",
  "serde",
- "windows-link",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -1350,7 +1371,7 @@ dependencies = [
 
 [[package]]
 name = "cnidarium-component"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1442,6 +1463,26 @@ name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
+
+[[package]]
+name = "const-random"
+version = "0.1.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "87e00182fe74b066627d63b85fd550ac2998d4b0bd86bfed477a0ae4c7c71359"
+dependencies = [
+ "const-random-macro",
+]
+
+[[package]]
+name = "const-random-macro"
+version = "0.1.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9d839f2a20b0aee515dc581a6172f2321f96cab76c1a38a4c584a194955390e"
+dependencies = [
+ "getrandom 0.2.17",
+ "once_cell",
+ "tiny-keccak",
+]
 
 [[package]]
 name = "const_format"
@@ -1851,7 +1892,7 @@ dependencies = [
 
 [[package]]
 name = "decaf377-fmd"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "ark-ff",
  "ark-serialize",
@@ -1864,7 +1905,7 @@ dependencies = [
 
 [[package]]
 name = "decaf377-frost"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "anyhow",
  "ark-ff",
@@ -1879,7 +1920,7 @@ dependencies = [
 
 [[package]]
 name = "decaf377-ka"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "ark-ff",
  "decaf377",
@@ -3853,6 +3894,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "integer-encoding"
+version = "3.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8bb03732005da905c88227371639bf1ad885cc712789c011c31c5fb3ab3ccf02"
+
+[[package]]
 name = "ipnet"
 version = "2.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4066,13 +4113,12 @@ dependencies = [
 
 [[package]]
 name = "js-sys"
-version = "0.3.94"
+version = "0.3.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e04e2ef80ce82e13552136fabeef8a5ed1f985a96805761cbb9a2c34e7664d9"
+checksum = "53b44bfcdb3f8d5837a46dae1ca9660a837176eee74a28b229bc626816589102"
 dependencies = [
  "cfg-if",
  "futures-util",
- "once_cell",
  "wasm-bindgen",
 ]
 
@@ -4550,6 +4596,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "modgrad-autograd"
+version = "0.1.0"
+dependencies = [
+ "modgrad-compute",
+ "modgrad-device",
+ "modgrad-training",
+]
+
+[[package]]
 name = "modgrad-blt"
 version = "0.1.0"
 dependencies = [
@@ -4705,6 +4760,8 @@ name = "modgrad-memory"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "modgrad-autograd",
+ "modgrad-device",
  "rayon",
  "serde",
 ]
@@ -4729,6 +4786,17 @@ version = "0.1.0"
 name = "modgrad-serve"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "modgrad-sheaf"
+version = "0.1.0"
+dependencies = [
+ "modgrad-autograd",
+ "modgrad-training",
+ "rayon",
+ "serde",
  "serde_json",
 ]
 
@@ -4778,8 +4846,11 @@ dependencies = [
 name = "modgrad-wasm"
 version = "0.1.0"
 dependencies = [
+ "modgrad-autograd",
  "modgrad-codec",
  "modgrad-ctm",
+ "modgrad-sheaf",
+ "modgrad-training",
  "rayon",
  "serde",
  "serde-wasm-bindgen",
@@ -4968,6 +5039,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "num"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35bd024e8b2ff75562e5f34e7f4905839deb4b22955ef5e73d2fea1b9813cb23"
+dependencies = [
+ "num-complex",
+ "num-integer",
+ "num-iter",
+ "num-rational",
+ "num-traits",
+]
+
+[[package]]
 name = "num-bigint"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5009,6 +5093,27 @@ version = "0.1.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7969661fd2958a5cb096e56c8e1ad0444ac2bbcd0061bd28660485a44879858f"
 dependencies = [
+ "num-traits",
+]
+
+[[package]]
+name = "num-iter"
+version = "0.1.45"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1429034a0490724d0075ebb2bc9e875d6503c3cf69e235a8941aa757d83ef5bf"
+dependencies = [
+ "autocfg",
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
+name = "num-rational"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f83d14da390562dca69fc84082e73e548e1ad308d24accdedd2720017cb37824"
+dependencies = [
+ "num-integer",
  "num-traits",
 ]
 
@@ -5447,6 +5552,15 @@ dependencies = [
 
 [[package]]
 name = "ordered-float"
+version = "2.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68f19d67e5a2795c94e73e0bb1cc1a7edeb2e28efd39e2e1c9b7a40c1108b11c"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
+name = "ordered-float"
 version = "4.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7bb71e1b3fa6ca1c61f383464aaf2bb0e2f8e772a1f01d486832464de363b951"
@@ -5551,6 +5665,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "parquet"
+version = "53.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f8cf58b29782a7add991f655ff42929e31a7859f5319e53db9e39a714cb113c"
+dependencies = [
+ "ahash",
+ "bytes",
+ "chrono",
+ "half",
+ "hashbrown 0.15.5",
+ "num",
+ "num-bigint",
+ "paste",
+ "seq-macro",
+ "snap",
+ "thrift",
+ "twox-hash",
+]
+
+[[package]]
 name = "password-hash"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5647,7 +5781,7 @@ dependencies = [
 
 [[package]]
 name = "penumbra-sdk-app"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "anyhow",
  "ark-ff",
@@ -5715,7 +5849,7 @@ dependencies = [
 
 [[package]]
 name = "penumbra-sdk-asset"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "anyhow",
  "ark-ff",
@@ -5754,7 +5888,7 @@ dependencies = [
 
 [[package]]
 name = "penumbra-sdk-auction"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "anyhow",
  "ark-ff",
@@ -5798,7 +5932,7 @@ dependencies = [
 
 [[package]]
 name = "penumbra-sdk-community-pool"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "anyhow",
  "ark-ff",
@@ -5827,7 +5961,7 @@ dependencies = [
 
 [[package]]
 name = "penumbra-sdk-compact-block"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "anyhow",
  "ark-ff",
@@ -5857,7 +5991,7 @@ dependencies = [
 
 [[package]]
 name = "penumbra-sdk-custody"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "anyhow",
  "argon2",
@@ -5892,7 +6026,7 @@ dependencies = [
 
 [[package]]
 name = "penumbra-sdk-dex"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "anyhow",
  "ark-ff",
@@ -5950,7 +6084,7 @@ dependencies = [
 
 [[package]]
 name = "penumbra-sdk-distributions"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5965,7 +6099,7 @@ dependencies = [
 
 [[package]]
 name = "penumbra-sdk-fee"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "anyhow",
  "ark-ff",
@@ -5991,7 +6125,7 @@ dependencies = [
 
 [[package]]
 name = "penumbra-sdk-funding"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "anyhow",
  "ark-groth16",
@@ -6021,7 +6155,7 @@ dependencies = [
 
 [[package]]
 name = "penumbra-sdk-governance"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "anyhow",
  "ark-ff",
@@ -6069,7 +6203,7 @@ dependencies = [
 
 [[package]]
 name = "penumbra-sdk-ibc"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "anyhow",
  "ark-ff",
@@ -6104,7 +6238,7 @@ dependencies = [
 
 [[package]]
 name = "penumbra-sdk-keys"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "aes",
  "anyhow",
@@ -6147,7 +6281,7 @@ dependencies = [
 
 [[package]]
 name = "penumbra-sdk-num"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "anyhow",
  "ark-ff",
@@ -6182,7 +6316,7 @@ dependencies = [
 
 [[package]]
 name = "penumbra-sdk-proof-params"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "anyhow",
  "ark-ec",
@@ -6206,7 +6340,7 @@ dependencies = [
 
 [[package]]
 name = "penumbra-sdk-proto"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6234,7 +6368,7 @@ dependencies = [
 
 [[package]]
 name = "penumbra-sdk-sct"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "anyhow",
  "ark-ff",
@@ -6270,7 +6404,7 @@ dependencies = [
 
 [[package]]
 name = "penumbra-sdk-shielded-pool"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "anyhow",
  "ark-ff",
@@ -6323,7 +6457,7 @@ dependencies = [
 
 [[package]]
 name = "penumbra-sdk-stake"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "anyhow",
  "ark-ff",
@@ -6363,7 +6497,7 @@ dependencies = [
 
 [[package]]
 name = "penumbra-sdk-tct"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "ark-ed-on-bls12-377",
  "ark-ff",
@@ -6391,7 +6525,7 @@ dependencies = [
 
 [[package]]
 name = "penumbra-sdk-tower-trace"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "futures",
  "hex",
@@ -6412,7 +6546,7 @@ dependencies = [
 
 [[package]]
 name = "penumbra-sdk-transaction"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "anyhow",
  "ark-ff",
@@ -6464,7 +6598,7 @@ dependencies = [
 
 [[package]]
 name = "penumbra-sdk-txhash"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "anyhow",
  "blake2b_simd 1.0.4",
@@ -6477,7 +6611,7 @@ dependencies = [
 
 [[package]]
 name = "penumbra-sdk-view"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "anyhow",
  "ark-std",
@@ -6536,7 +6670,7 @@ dependencies = [
 
 [[package]]
 name = "penumbra-sdk-wallet"
-version = "2.0.6"
+version = "2.0.13"
 dependencies = [
  "anyhow",
  "ark-std",
@@ -7825,6 +7959,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 
 [[package]]
+name = "seq-macro"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1bc711410fbe7399f390ca1c3b60ad0f53f80e95c5eb935e52268a0e2cd49acc"
+
+[[package]]
 name = "serde"
 version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8175,6 +8315,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "snap"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b6b67fb9a61334225b5b790716f609cd58395f895b3fe8b328786812a40bc3b"
+
+[[package]]
 name = "socket2"
 version = "0.5.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8504,6 +8650,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "thrift"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e54bc85fc7faa8bc175c4bab5b92ba8d9a3ce893d0e9f42cc455c8ab16a9e09"
+dependencies = [
+ "byteorder",
+ "integer-encoding",
+ "ordered-float 2.10.1",
+]
+
+[[package]]
 name = "tiff"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8546,6 +8703,15 @@ checksum = "3526739392ec93fd8b359c8e98514cb3e8e021beb4e5f597b00a0221f8ed8a49"
 dependencies = [
  "num-conv",
  "time-core",
+]
+
+[[package]]
+name = "tiny-keccak"
+version = "2.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c9d3793400a45f954c52e73d068316d76b6f4e36977e3fcebb13a2721e80237"
+dependencies = [
+ "crunchy",
 ]
 
 [[package]]
@@ -8954,6 +9120,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 
 [[package]]
+name = "twox-hash"
+version = "1.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
+dependencies = [
+ "cfg-if",
+ "static_assertions",
+]
+
+[[package]]
 name = "type-map"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9209,9 +9385,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen"
-version = "0.2.117"
+version = "0.2.126"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0551fc1bb415591e3372d0bc4780db7e587d84e2a7e79da121051c5c4b89d0b0"
+checksum = "4b067c0c11094aef6b7a801c1e34a26affafdf3d051dba08456b868789aaf9a4"
 dependencies = [
  "cfg-if",
  "once_cell",
@@ -9222,9 +9398,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-futures"
-version = "0.4.67"
+version = "0.4.76"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03623de6905b7206edd0a75f69f747f134b7f0a2323392d664448bf2d3c5d87e"
+checksum = "c62df1340f32221cb9c54d6a27b030e3dba64361d4a95bed55f9aacb44da291d"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
@@ -9232,9 +9408,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro"
-version = "0.2.117"
+version = "0.2.126"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7fbdf9a35adf44786aecd5ff89b4563a90325f9da0923236f6104e603c7e86be"
+checksum = "167ce5e579f6bcf889c4f7175a8a5a585de84e8ff93976ce393efa5f2837aab1"
 dependencies = [
  "quote",
  "wasm-bindgen-macro-support",
@@ -9242,9 +9418,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro-support"
-version = "0.2.117"
+version = "0.2.126"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dca9693ef2bab6d4e6707234500350d8dad079eb508dca05530c85dc3a529ff2"
+checksum = "f3997c7839262f4ef12cf90b818d6340c18e80f263f1a94bf157d0ec4420380e"
 dependencies = [
  "bumpalo",
  "proc-macro2 1.0.106",
@@ -9267,9 +9443,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-shared"
-version = "0.2.117"
+version = "0.2.126"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39129a682a6d2d841b6c429d0c51e5cb0ed1a03829d8b3d1e69a011e62cb3d3b"
+checksum = "dc1b4cb0cc549fcf58d7dfc081778139b3d283a081644e833e84682ad71cea24"
 dependencies = [
  "unicode-ident",
 ]
@@ -9422,9 +9598,9 @@ dependencies = [
 
 [[package]]
 name = "web-sys"
-version = "0.3.94"
+version = "0.3.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd70027e39b12f0849461e08ffc50b9cd7688d942c1c8e3c7b22273236b4dd0a"
+checksum = "8622dcb61c0bcc9fffa6938bed81210af2da9a7e4a1a834b2e37a59b6dfb6141"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
@@ -9578,7 +9754,7 @@ dependencies = [
  "ndk-sys 0.5.0+25.2.9519653",
  "objc",
  "once_cell",
- "ordered-float",
+ "ordered-float 4.6.0",
  "parking_lot",
  "profiling",
  "raw-window-handle",

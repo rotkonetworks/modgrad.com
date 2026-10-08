@@ -4834,6 +4834,7 @@ dependencies = [
 name = "modgrad-transformer"
 version = "0.1.0"
 dependencies = [
+ "matrixmultiply",
  "modgrad-compute",
  "modgrad-device",
  "modgrad-traits",

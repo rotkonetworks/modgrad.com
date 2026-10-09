@@ -4708,6 +4708,7 @@ dependencies = [
  "bincode",
  "half",
  "matrixmultiply",
+ "modgrad-autograd",
  "modgrad-compute",
  "modgrad-device",
  "modgrad-memory",

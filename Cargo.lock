@@ -4767,6 +4767,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "modgrad-mouth"
+version = "0.1.0"
+dependencies = [
+ "modgrad-blt",
+ "modgrad-compute",
+ "modgrad-device",
+ "modgrad-transformer",
+]
+
+[[package]]
 name = "modgrad-persist"
 version = "0.1.0"
 dependencies = [
@@ -8313,6 +8323,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd538fb6910ac1099850255cf94a94df6551fbdd602454387d0adb2d1ca6dead"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "smollm3_parity"
+version = "0.1.0"
+dependencies = [
+ "modgrad-io",
+ "modgrad-transformer",
+ "serde_json",
 ]
 
 [[package]]

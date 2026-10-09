@@ -4790,6 +4790,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "modgrad-mouth"
+version = "0.1.0"
+dependencies = [
+ "modgrad-blt",
+ "modgrad-compute",
+ "modgrad-device",
+ "modgrad-io",
+ "modgrad-transformer",
+]
+
+[[package]]
 name = "modgrad-pc"
 version = "0.1.0"
 dependencies = [
@@ -4865,6 +4876,7 @@ dependencies = [
 name = "modgrad-transformer"
 version = "0.1.0"
 dependencies = [
+ "matrixmultiply",
  "modgrad-compute",
  "modgrad-device",
  "modgrad-traits",
@@ -4910,6 +4922,16 @@ dependencies = [
  "proc-macro2 1.0.106",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "mouth_smoke"
+version = "0.1.0"
+dependencies = [
+ "modgrad-compute",
+ "modgrad-io",
+ "modgrad-mouth",
+ "modgrad-transformer",
 ]
 
 [[package]]
@@ -8372,6 +8394,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd538fb6910ac1099850255cf94a94df6551fbdd602454387d0adb2d1ca6dead"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "smollm3_parity"
+version = "0.1.0"
+dependencies = [
+ "modgrad-io",
+ "modgrad-transformer",
+ "serde_json",
 ]
 
 [[package]]

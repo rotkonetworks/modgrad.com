@@ -4773,6 +4773,7 @@ dependencies = [
  "modgrad-blt",
  "modgrad-compute",
  "modgrad-device",
+ "modgrad-io",
  "modgrad-transformer",
 ]
 
@@ -4890,6 +4891,16 @@ dependencies = [
  "proc-macro2 1.0.106",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "mouth_smoke"
+version = "0.1.0"
+dependencies = [
+ "modgrad-compute",
+ "modgrad-io",
+ "modgrad-mouth",
+ "modgrad-transformer",
 ]
 
 [[package]]

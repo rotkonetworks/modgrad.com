@@ -4751,6 +4751,7 @@ dependencies = [
  "libc",
  "matrixmultiply",
  "memmap2",
+ "modgrad-traits",
  "proptest",
  "rayon",
  "safetensors",
@@ -4834,6 +4835,7 @@ dependencies = [
 name = "modgrad-pc"
 version = "0.1.0"
 dependencies = [
+ "modgrad-traits",
  "rayon",
 ]
 

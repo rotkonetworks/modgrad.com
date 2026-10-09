@@ -4768,6 +4768,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "modgrad-pc"
+version = "0.1.0"
+dependencies = [
+ "rayon",
+]
+
+[[package]]
 name = "modgrad-persist"
 version = "0.1.0"
 dependencies = [

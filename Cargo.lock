@@ -4722,6 +4722,7 @@ dependencies = [
  "ash",
  "cudarc",
  "libc",
+ "matrixmultiply",
  "memmap2",
  "proptest",
  "rayon",
@@ -4836,6 +4837,19 @@ name = "modgrad-substrate"
 version = "0.1.0"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "modgrad-tasks"
+version = "0.1.0"
+dependencies = [
+ "matrixmultiply",
+ "modgrad-chess",
+ "modgrad-ctm",
+ "modgrad-device",
+ "rand 0.9.2",
+ "rayon",
+ "serde_json",
 ]
 
 [[package]]

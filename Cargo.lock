@@ -4785,6 +4785,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "modgrad-autograd",
+ "modgrad-compute",
  "modgrad-device",
  "rayon",
  "serde",

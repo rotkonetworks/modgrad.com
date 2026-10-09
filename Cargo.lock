@@ -4799,6 +4799,7 @@ dependencies = [
  "modgrad-compute",
  "modgrad-device",
  "modgrad-io",
+ "modgrad-memory",
  "modgrad-transformer",
 ]
 

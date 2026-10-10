@@ -2,7 +2,7 @@
 title: Brain composition
 section: Architecture
 order: 40
-description: Wiring CTMs into a directed graph of eight brain regions. The closed cortical loop, each region in depth, inter-region synapses, learned routing, and the presets behind the maze result.
+description: Wiring CTMs into a directed graph of eight brain regions. The closed cortical loop, each region, inter-region synapses, learned routing, presets, and where this design stands now.
 ---
 
 # Brain composition
@@ -23,11 +23,10 @@ input → attention → output → motor
   └────────────────────────────┘   (motor feeds back into input)
 ```
 
-That feedback edge is the point. The motor region's action is fed back into the
-input region alongside the next observation, so perception becomes
-**action-conditioned**: the brain predicts the next observation *given its own
-action*. This is the efference-copy / corollary-discharge motif from biology, and
-it lets a small brain learn a world model instead of a reflex.
+The motor region's action is fed back into the input region alongside the next
+observation, so perception is **action-conditioned**: the brain can predict the
+next observation given its own action. This mirrors the efference-copy motif in
+biology.
 
 Around that loop sit the subcortical regions and an episodic memory:
 
@@ -97,38 +96,34 @@ Monitors internal state, biased by hippocampal memory, to weight what matters no
 
 ### hippocampus
 
-Binds the activations of all four cortical regions into the longest, deepest memory
-in the brain, then feeds back into attention. That edge turns stored experience
-into recalled context. Without it, memory accumulates but never influences a
-prediction. **In:** input, attention, output, motor. **Out:** insula (and attention).
+Reads the activations of all four cortical regions with the longest memory in the
+brain, and feeds back into attention, so stored context can influence later
+predictions. **In:** input, attention, output, motor. **Out:** insula (and attention).
 
 ## Planning, distributed across regions
 
-Some tasks need *exact* planning, not just learned reflexes — and modgrad does it
-the way model-based planning is done in the brain: **hippocampal map & replay ×
-striatal value → action**. The planner is not one module; its value iteration is
-split across three regions (`region_plugins`, keyed by region index):
+The SDK can also run an exact grid planner inside the region graph, split the way
+model-based planning is often described in the brain (hippocampal map and replay,
+striatal value, motor readout). Its value iteration is divided across three regions
+(`region_plugins`, keyed by region index):
 
-- **basal ganglia** — the value head: a per-cell reward and value estimate
-  (dopamine = reward-prediction error).
-- **hippocampus** — the cognitive map (a per-cell traversability gate) and the
-  **replay** that propagates value across it: `K` rounds of a 3×3 backup, the
-  reverse replay that *is* a Bellman update.
-- **motor** — the **ego-centric readout**, reading the move at the agent's own
-  cell. A gather, not a global pool — and that matters: pooling the cortical state
-  into one vector measurably destroys local position (wall information ~94%
-  linearly decodable in the agent's own grid-cell token collapses toward chance
-  once pooled), so the decision is read *where the agent stands*.
+- **basal ganglia**: the value head, a per-cell reward and value estimate.
+- **hippocampus**: a per-cell traversability gate and the propagation of value
+  across it, `K` rounds of a 3×3 Bellman backup.
+- **motor**: the readout, gathered at the agent's own cell rather than pooled. In
+  our probes, wall information that was linearly decodable (~94%) from the agent's
+  own grid-cell token fell to near chance after pooling, so the move is read where
+  the agent stands.
 
 The three heads (`BgValueHead` / `HippoGateHead` / `MotorHead` in `modgrad-ctm`)
-are warm-started by splitting a trained standalone Value Iteration Network
-(Tamar et al., 2016) — `split_vin` — so they reproduce it bit-for-bit, then
-fine-tune. Each is a small bundle of `Linear`s; the generic per-region weights
+are initialised by splitting a trained standalone Value Iteration Network
+(Tamar et al., 2016) with `split_vin`, so they reproduce it bit-for-bit. Each is a small bundle of `Linear`s; the generic per-region weights
 stay task-agnostic, with the planning circuit owned at the composition layer
 beside `connections`/`router`. Today `plan()` composes the three heads to run
 the sweeps outside the regions' tick dynamics; running them *as* the hippocampus
 region's own ticks — value flowing through a basal-ganglia↔hippocampus edge each
-tick — is not done yet. The [/play demo](/play) does **not** use this planner: there,
+tick — is not done. This planner is a fixed algorithm with learned parts, not
+something the CTM learned to do. The [/play demo](/play) does **not** use it: there,
 the brain's own output head predicts the route from the maze image and nothing
 else plans or decides.
 
@@ -148,7 +143,9 @@ thalamus-style mechanism that, every tick, scores region-to-region affinity from
 the global sync state plus a tick embedding and selects the **top-k sources per
 destination** (k = 3, with a little ε-greedy exploration). On the 8-region brain
 it adds roughly 40k parameters, under 0.3%, and replaces fixed wiring with
-learned, tick-conditioned routing.
+learned, tick-conditioned routing. A bug fixed in 2026-10 made router brains ignore
+their observation entirely; results obtained with the router before that fix should
+be re-measured before they are relied on.
 
 ## Auxiliary losses
 
@@ -169,7 +166,7 @@ difference** (a value head trained against realized loss).
 | `eight_region_large` | ~200M | cortex 512 / sub 64 | |
 | `eight_region_billion` | ~1B | cortex 1024 / sub 128 | ~19 GB RAM |
 
-## The result that motivated this
+## The result that motivated this, and where it stands
 
 On 21×21 maze routing (5000 steps, 3 seeds, held-out 200-maze eval, a fresh random
 maze every batch), the 8-region brain beats a single CTM on every metric with
@@ -180,7 +177,16 @@ maze every batch), the 8-region brain beats a single CTM on every metric with
 | single CTM | 450k | 51.3% | 27.4% | 1.2 |
 | **8-region brain** | **187k** | **79.2%** | **38.1%** | **2.1** |
 
-The brain's worst seed beats the single CTM's best seed; the ranges don't overlap.
+The brain's worst seed beat the single CTM's best seed.
+
+Two later findings qualify this. First, until a 2026-10 fix, every region's
+synchronization pairs were self-pairs (a random-number bug), so these runs had no
+cross-neuron synchronization; they have not been repeated since. Second, a
+pre-registered, parameter-matched comparison on a two-stream composition task (3
+seeds) found **no difference** between a 3-block graph and a single block (96.5 vs
+99.8 and 23.4 vs 20.5 on two versions). New work therefore uses a single CTM (or
+CMM) block, and a multi-region graph is added only if it wins a new pre-registered
+comparison. The /play brain is the older 8-region graph.
 
 ```bash
 cargo run -p mazes --release -- --size 21 --steps 5000 --seed 42

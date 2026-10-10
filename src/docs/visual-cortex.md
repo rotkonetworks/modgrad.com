@@ -2,75 +2,70 @@
 title: Visual cortex
 section: Architecture
 order: 42
-description: The retina that turns raw pixels into spatial tokens — a retina → V1 → V2 → V4 convolutional cascade — and how the /play demo renders what the brain actually sees.
+description: The retina → V1 → V2 → V4 convolutional cascade that turns raw pixels into spatial tokens, and how the /play demo renders what the brain sees.
 ---
 
 # Visual cortex
 
 The 8-region brain in the [/play demo](/play) does not read the maze as a grid of
-integers. It reads it as an **image**, the same way the trained model was fed during
-training, and a small convolutional **visual cortex** turns that image into the
-spatial tokens the cortical regions attend over. The component is a faithful port of
-`modgrad_codec::retina::VisualCortex`, and the demo's wasm reimplementation matches
-it bit-for-bit.
+integers. It reads it as an **image**, as it did in training, and a small
+convolutional **visual cortex** turns that image into the spatial tokens the
+cortical regions attend over. This is `modgrad_codec::retina::VisualCortex`; the
+browser runs the SDK's own code compiled to WebAssembly.
 
 ## What it is
 
-The cortex is a four-stage convolutional cascade, named after the early
-visual-processing hierarchy:
+A four-stage convolutional cascade, named after the early visual hierarchy:
 
 ```
 raw pixels [3 × H × W]  →  retina  →  V1  →  V2  →  V4  →  spatial tokens
 ```
 
 Each stage is a `Conv2d` (im2col + matmul + bias) followed by a leaky ReLU
-(slope 0.1), exactly mirroring `retina::leaky_relu`. The final V4 feature map is
-flattened into a `[n_tokens × token_dim]` stream — one token per surviving spatial
-location, `token_dim` channels deep. That token stream is the **observation** the
-brain's `input` region embeds; the inter-region synapses read only their own
-`in_dim` prefix of it, exactly as on the device.
+(slope 0.1). The final V4 feature map is flattened into a `[n_tokens × token_dim]`
+stream, one token per remaining spatial location, `token_dim` channels deep. That
+token stream is the **observation** the brain's `input` region embeds.
 
 ## Why it matters
 
-Feeding the model pixels rather than a hand-built feature vector is what makes the
-demo an honest test of the architecture. Nothing pre-parses the maze into "wall
-here, opening there"; the brain has to **see** structure the way it would have to
-see any visual input. The same retina front-end is what lets the architecture
-generalise beyond mazes — the cortex is a reusable perception stage, not a
-maze-specific encoder.
+The model gets pixels, not a hand-built feature vector. Nothing pre-parses the maze
+into walls and openings; whatever structure the brain uses, it had to learn from the
+image. The same front-end is not maze-specific.
 
 ## How the demo uses it
 
-At every cell the agent occupies, the worker renders the maze to RGB pixels in the
-exact training scheme (`renderPixels` in `src/play/worker.ts`):
+For each maze, the worker renders the start position to RGB pixels in the training
+scheme (`renderPixels` in `src/play/worker.ts`):
 
 | cell | colour |
 |------|--------|
 | wall | black `(0,0,0)` |
 | open | white `(1,1,1)` |
-| agent | red `(1,0,0)` |
+| start (agent) | red `(1,0,0)` |
 | goal | green `(0,1,0)` |
 
-The wasm `retina_maps(pixels)` entry point runs the full cascade and returns every
-layer's feature map (CHW). The demo prepends the literal RGB it fed in — labelled
-`sight` — so the panel shows the whole pathway:
+The wasm `retina_maps(pixels)` entry point runs the cascade and returns every
+layer's feature map (CHW). The demo prepends the literal RGB it fed in, labelled
+`sight`, and draws the pathway in the 3D view:
 
-- **what it sees** — the framed RGB image (the eye's "screen"), front-most;
-- **retina → V1 → V2 → V4** — each learned feature map as a cyan response field,
-  brightness = mean absolute channel response at that location;
-- a feedforward beam wiring those layers into the `input` region of the 3D brain,
-  so you watch perception flow into cognition.
+- **what it sees**: the RGB image, in front of the eyes;
+- **retina**: the first feature map, drawn in both eyes;
+- **V1 → V2 → V4**: each feature map as a cyan response field (brightness = mean
+  absolute channel response at that location), placed at the occipital pole and
+  along the ventral stream, wired on into the `input` region.
 
+The optic chiasm and LGN drawn along that path are anatomical landmarks only; the
+model has no relay stage between retina and V1.
 
 ## Limitations
 
-- The cortex used here is the maze brain's, trained on 9×9 mazes, and it takes a
-  **fixed 9×9 input** (`input_h = input_w = 9` in the export), so the demo runs 9×9
-  only. The feature maps are correspondingly low-resolution and read best as
-  activity fields, not crisp edge detectors.
-- The cyan response fields are a **visualisation** — channels are averaged per
-  location for display. They show *that* a layer responds, not the per-channel
-  filters individually.
+- The cortex takes a **fixed 9×9 input** (`input_h = input_w = 9` in every brain
+  export) and reads exactly 3·9·9 pixel values, so the demo runs 9×9 only. A
+  smaller image would be read out of bounds, a larger one as the wrong pixels.
+- The feature maps are low-resolution; read them as activity fields, not edge
+  detectors.
+- Channels are averaged per location for display. The fields show *that* a layer
+  responds, not what individual filters encode.
 
-Next: how the eight regions consume these tokens and predict a route —
+Next: how the eight regions consume these tokens and predict a route:
 [the 8-region brain →](/docs/brain-composition).

@@ -2,117 +2,128 @@
 title: Memory & multiplicity
 section: Architecture
 order: 55
-description: Episodic memory with emotional valence, content-addressable recall, multiple selves sharing one brain, the organism that orchestrates them, emotional-health vital signs, and red-team conditioning defenses.
+description: Episodic memory stores, memory for frozen LLMs, multiple selves sharing one set of weights, the organism that orchestrates them, emotional-health checks, and red-team conditioning tests.
 ---
 
 # Memory & multiplicity
 
-On top of the [bio-inspired learning](/docs/bio-inspired) modules, modgrad builds a
-genuinely unusual set of systems: a brain that remembers episodes with how they
-*felt*, that can host **several selves on one set of weights**, and that monitors its
-own emotional health. These live in `modgrad-memory` and `modgrad-ctm` (`plural`,
-`organism`, `monarch`, `bio::autonomic`).
+On top of the [bio-inspired learning](/docs/bio-inspired) modules, modgrad has a set
+of memory and multi-agent systems. They live in `modgrad-memory`,
+`modgrad-lm-memory` and `modgrad-ctm` (`plural`, `organism`, `monarch`,
+`bio::autonomic`). Most of this page is research code; the status section at the
+end says which parts are tested and which are exploratory.
 
 ## Episodic memory
 
-`modgrad-memory` stores trajectories, the full per-tick path `h₀ → h₁ → … → hₖ`
-rather than just the answer, in a ring buffer (default 256 slots), each keyed by the
-L2-normalized final-tick state and tagged with a **valence receipt** (valence, the
-loss at storage time, confidence, whether it was correct).
+`modgrad-memory` has two episodic stores.
 
-- **Storage is gated.** An episode is stored only if it ran long enough
-  (`≥ 2` ticks) or was surprising enough (`surprise ≥ 0.5`). Trivial moments are
-  dropped.
-- **Retrieval is content-addressable.** A query is matched by cosine similarity
-  against all live keys; entries above a `0.7` threshold are combined by a sharp
-  soft-attention (`temperature 0.1`) into a **blended trajectory and blended
-  valence**. That blend can [prime a region's state](/docs/bio-inspired#dream-replay)
-  before the forward pass.
-- **Consolidation** runs during sleep: strengths decay (`×0.95`), weak episodes
-  (`< 0.01`) are evicted, and near-duplicate keys (`cosine > 0.95`) are merged into
-  the stronger one. After ~10 retrievals an episode undergoes **semantic collapse**:
-  the path is discarded and only the summary kept.
-- **Reappraisal** fades the valence of painful memories in proportion to how much
-  the brain has since improved. Sleep as therapy.
+**`episode`** (the newer store) binds four facets per episode: `what` (a pooled
+frozen-encoder state), `where_` (context), `when` (temporal context at encoding)
+and `feeling` (affect). Its index is a k-winners-take-all code over a fixed random
+projection of the facets, so a cue with only some facets can still find an episode.
+Recall returns the best match with a margin, as `Hit`, `Ambiguous` or `Miss`,
+never a soft average. Facets from a different encoder than the store's are refused.
 
-A faster **hippocampal CAM** (`memory::hippocampus`) gives O(1) store / O(capacity)
-recall with the same cosine soft-attention for single-shot binding, and a
-surprise-gated **replay buffer** (`memory::replay`) keeps only high-surprise
-experiences, evicting the least surprising first so sleep replays what's worth
-revisiting.
+**`episodic`** (the older slot store, still used by `organism`, `plural` and dream
+replay) keeps trajectories, the per-tick path `h₀ → h₁ → … → hₖ`, in a ring buffer
+(default 256 slots). Each is keyed by the L2-normalized final-tick state and tagged
+with a valence receipt (valence, loss at storage time, confidence, correctness).
 
-## Valence and emotional decay
+- **Storage is gated**: an episode is stored only if it ran at least 2 ticks or
+  its surprise was at least 0.5.
+- **Retrieval**: a query is matched by cosine similarity against live keys; entries
+  above 0.7 are combined by soft attention (temperature 0.1) into a blended
+  trajectory and valence, which can
+  [prime a region's state](/docs/bio-inspired#dream-replay) before the forward pass.
+- **Consolidation**: strengths decay (×0.95), episodes below 0.01 are evicted, and
+  near-duplicate keys (cosine > 0.95) are merged. After 10 retrievals an episode is
+  collapsed to its summary and the path is dropped.
+- **Reappraisal** reduces the valence of painful memories in proportion to how much
+  the model has improved since.
 
-Memories carry an emotional **valence** with type-dependent persistence. Fearful
-memories decay far slower than positive ones, and a reconsolidation window after
-recall makes a memory briefly labile (re-writable). `bio::autonomic` turns this into
-**emotional vital signs**:
+`modgrad-memory` also has fast weights (`gated_delta`, a gated delta rule written
+at test time). Reverse-replay credit assignment over a policy's own mistakes is in
+`modgrad_training::replay`.
 
-| diagnosis | trigger |
-|-----------|---------|
+## Memory for frozen LLMs
+
+`modgrad-lm-memory` is an agent that stores episodes (a key facet, the text, and
+per-layer K/V) for a frozen language model, recalls them by cue, and lets the model
+read them through a swappable read path (`TextRead`, `KvRead`, or none).
+
+**Status.** This is the active line of work. A memory read that starts from the
+model's own retrieval heads recalls stored facts with their text absent from the
+context, on fact types it was trained on. It does not yet transfer to fact types it
+has not seen.
+
+## Valence and emotional checks
+
+Memories carry a valence with type-dependent persistence: fear-valenced memories
+decay more slowly than positive ones, and a reconsolidation window after recall
+makes a memory briefly re-writable. `bio::autonomic` computes a set of checks over
+the memory store:
+
+| flag | trigger |
+|------|---------|
 | PTSD risk | > 30% of memories fear-valenced |
-| depressive risk | > 50% negative/fear |
+| depressive risk | > 50% negative or fear |
 | hate risk | avoidance patterns over-generalize (mean pairwise similarity > 0.7) |
 | hypervigilance | > 20 active avoidance patterns |
 
-A health score in `[0, 1]` deducts for each pathology, and a **subconscious REM**
-process auto-tunes plasticity to the brain's state (aggressive when fearful, gentle
-when healthy), replays fear/negative episodes to shift their valence toward neutral,
-and prunes over-generalized avoidances before they snowball. The brain is
-"safe to deploy" only when its health score clears 0.5 with no active diagnoses.
+A health score in `[0, 1]` is reduced for each flag. A REM-style process adjusts
+plasticity to the current state, replays fear/negative episodes to move their
+valence toward neutral, and prunes over-generalized avoidances.
+`safe_to_deploy()` requires the score to clear 0.5 with no active flags. The names
+are labels for thresholds on these statistics, not clinical claims.
 
-## Plural: many selves, one brain
+## Plural: several selves, one set of weights
 
-The `plural` system runs **multiple alters** over one set of weights. Each alter has
-its own private episodic memory, its own neuromodulator baselines (temperament), its
-own sleep pressure, and additive routing/exit biases: a distinct personality on a
-shared substrate.
+The `plural` system runs multiple **alters** over one set of weights. Each alter
+has its own episodic memory, neuromodulator baselines, sleep pressure, and additive
+routing/exit biases.
 
-- **Permeability** `[0, 1]` controls how much alters share memory. `0.0` is a hard
-  amnesic barrier (alters invisible to each other), `0.3` is co-conscious (the
-  default, where others are dimly perceptible), `1.0` is full integration.
+- **Permeability** `[0, 1]` sets how much alters share memory: `0.0` is a hard
+  barrier, `0.3` (the default) lets others be dimly visible, `1.0` is full sharing.
 - **Switching** is decided by `evaluate_claims`: each alter scores a claim from its
-  own salience, curiosity, calm, serotonin, and routing affinity, discounted by
-  fatigue. Policies are **Salience** (best fitness fronts), **Negotiated** (a claim
-  must beat the active one by a threshold), or **Handler** (external control). Every
-  switch is logged with its trigger and the pressure at the time.
-- **Partitions** install hard amnesic barriers between groups of alters, overriding
+  salience, curiosity, calm, serotonin and routing affinity, discounted by fatigue.
+  Policies are **Salience** (best score fronts), **Negotiated** (a claim must beat
+  the active alter by a threshold) and **Handler** (external control). Every switch
+  is logged with its trigger.
+- **Partitions** put hard barriers between groups of alters, overriding
   permeability.
 
-## The organism: orchestrator
+## The organism
 
-`organism` ties the learning modules, memory, and plurality into one training
-lifecycle, with a hook at each stage:
+`organism` combines the learning modules, memory and plurality into one training
+loop, with a hook at each stage:
 
 | hook | what it does |
 |------|--------------|
-| `begin_step` | check salience-based switching, apply a plural switch |
+| `begin_step` | check salience-based switching, apply a switch |
 | `before_sample` | retrieve from the active alter's memory, prime, compute retrieval pain |
-| `after_position` | update the loss baseline + adaptive focus, fire pain or relief |
+| `after_position` | update the loss baseline and adaptive focus, emit pain or relief |
 | `after_sample` | store the episode with its blended valence receipt |
-| `after_batch` | tick homeostasis, scale the learning rate, sleep if pressured, **split a new alter** if pressure stays in the red |
+| `after_batch` | tick homeostasis, scale the learning rate, sleep if pressure is high, and fork a new alter if pressure stays in the red zone |
 
-That last step is the striking one: under sustained red-zone pressure the organism
-**spontaneously forks a new alter** with an inverted neuromodulator profile, up to a
-configured maximum. Multiplicity as a stress response.
+The fork creates an alter with an inverted neuromodulator profile, up to a
+configured maximum.
 
-## Monarch: red-team and defenses
+## Monarch: red-team tests
 
-`monarch` exists to test the above against adversarial control. It implements attack
-primitives, **forced switching** (spiking an alter's arousal to seize the front),
-**forced partitions** (amnesic walls), **conditioned-reflex injection** (logit
-biases that fire when the hidden state matches a trigger), and **token suppression**,
-each paired with a detector: a forced switch shows as high arousal without curiosity,
-a partition as memory-isolation drift, a reflex as a sudden entropy drop. A
-`verify_erosion` check measures whether sleep consolidation *weakens* a conditioned
-response, and `deprogram` clears injected reflexes and partitions. It's a defensive
-research surface, not a default training path.
+`monarch` tests the above against adversarial control. It implements attacks:
+**forced switching** (raising an alter's arousal to take the front), **forced
+partitions**, **conditioned-reflex injection** (logit biases that fire when the
+hidden state matches a trigger) and **token suppression**, each with a detector (a
+forced switch shows as high arousal without curiosity, a partition as memory
+isolation drift, a reflex as a sudden entropy drop). `verify_erosion` measures
+whether sleep consolidation weakens a conditioned response, and `deprogram` clears
+injected reflexes and partitions. It is a test surface, not a training default.
 
 ## Status
 
-Episodic memory, the hippocampal CAM, and the replay buffer are working and tested.
-Plural, organism, autonomic, and monarch compile and run and are wired into the
-runtime (`OrganismNC`), but are explicitly research surface: the interesting,
-exploratory edge of the project rather than its settled core.
+- The episodic stores and replay are implemented and tested.
+- Memory for frozen LLMs is in progress (see above).
+- Plural, organism, autonomic and monarch compile and run, but they are
+  exploratory research code, not a settled part of the SDK.
 
 Next: how it all [runs on the GPU →](/docs/compute-gpu).

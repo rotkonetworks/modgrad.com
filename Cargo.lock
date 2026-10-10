@@ -4809,6 +4809,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "modgrad-lm-memory"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "modgrad-compute",
+ "modgrad-io",
+ "modgrad-memory",
+ "modgrad-mouth",
+ "modgrad-transformer",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "modgrad-memory"
 version = "0.1.0"
 dependencies = [

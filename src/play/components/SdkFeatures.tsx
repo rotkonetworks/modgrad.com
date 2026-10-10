@@ -1,6 +1,5 @@
 import { For, Show, createSignal } from "solid-js";
 import { A } from "@solidjs/router";
-import type { RegionTel } from "./RegionTelemetry";
 
 // ── what the parent passes us each step ──────────────────────────────────────
 // Every field is a *real* signal off the running brain. We only light a feature
@@ -12,19 +11,6 @@ export interface SdkFeatureState {
   exitLambda: number | null;
   /** True when the visual retina/cortex produced feature maps this step. */
   visionActive: boolean;
-  /** Magnitude of any three-factor plastic weight change this step (≥0). */
-  plasticDelta: number;
-  /** Pain / reward neuromodulator signal this step (e.g. wall-hit, reach). */
-  signal: number;
-  /** Optional per-region engine stats (drives the memory/region readouts). */
-  telemetry?: RegionTel[];
-  /** Episodic-memory recall this step: nearest past situation by similarity. */
-  episodic?: {
-    recalled: boolean;
-    sim: number; // cosine similarity to the nearest stored episode
-    id: number; // which episode matched
-    size: number; // episodes currently held
-  } | null;
 }
 
 type Feature = {
@@ -61,7 +47,7 @@ const FEATURES: Feature[] = [
   {
     key: "vision",
     name: "Visual retina / cortex",
-    desc: "Each cell is seen through a retina → V1 → V2 → V4 pathway.",
+    desc: "The maze image is seen through a retina → V1 → V2 → V4 pathway.",
     docHref: "/docs/multimodal",
     isActive: (s) => s.visionActive,
     liveValue: (s) => (s.visionActive ? "retina→V4 lit" : "no vision"),
@@ -73,69 +59,11 @@ const FEATURES: Feature[] = [
     name: "8-region brain",
     desc: "input · attention · output · motor · cerebellum · basal-ganglia · insula · hippocampus.",
     docHref: "/docs/brain-composition",
-    // The wired brain is always the substrate; treat it as active whenever the
-    // brain is thinking (ticks ran) so the row reflects real computation.
+    // The wired brain is the whole model; active whenever it ran (ticks > 0).
     isActive: (s) => s.ticksUsed > 0,
     liveValue: () => "8 regions wired",
-    intensity: (s) => {
-      const t = s.telemetry;
-      if (!t || t.length === 0) return s.ticksUsed > 0 ? 0.5 : 0;
-      const mean = t.reduce((a, r) => a + (r.rms ?? 0), 0) / t.length;
-      return clamp01(mean / 1.2);
-    },
+    intensity: (s) => (s.ticksUsed > 0 ? 0.6 : 0),
     color: "#8a7dff",
-  },
-  {
-    key: "vin",
-    name: "Value Iteration Network",
-    desc: "The planner, distributed across regions: basal ganglia value each cell (dopamine = RPE), the hippocampus replays value across its cognitive map (a Bellman backup), motor reads the move ego-centrically.",
-    docHref: "/docs/brain-composition",
-    // The VIN drives every step the agent takes — active whenever it's running.
-    isActive: (s) => s.ticksUsed > 0,
-    liveValue: () => "planning",
-    intensity: (s) => (s.ticksUsed > 0 ? 1 : 0),
-    color: "#7c6cf0",
-  },
-  {
-    key: "plasticity",
-    name: "Three-factor plasticity",
-    desc: "A per-cell bias adapts live on the planner's prior — three-factor, no backprop.",
-    docHref: "/docs/bio-inspired",
-    // Lit on any step the live escape bias actually moved (‖Δ‖ > 0).
-    isActive: (s) => s.plasticDelta > 0,
-    liveValue: (s) => `‖Δ‖ ${s.plasticDelta.toFixed(3)}`,
-    intensity: (s) => clamp01(s.plasticDelta / 0.3),
-    color: "#3aa86c",
-  },
-  {
-    key: "neuromod",
-    name: "Pain / neuromodulators",
-    desc: "Pain from no progress / revisits, dopamine on progress and the goal.",
-    docHref: "/docs/bio-inspired",
-    // Lit whenever a (signed) neuromodulator signal was emitted this step.
-    isActive: (s) => Math.abs(s.signal) > 1e-4,
-    liveValue: (s) => (s.signal >= 0 ? `+${s.signal.toFixed(2)}` : s.signal.toFixed(2)),
-    intensity: (s) => clamp01(Math.abs(s.signal) / 1.5),
-    color: (s) => (s.signal < 0 ? "#e0564e" : "#3aa86c"),
-  },
-  {
-    key: "memory",
-    name: "Episodic memory",
-    desc: "Recalls the nearest past situation it has seen, by similarity.",
-    docHref: "/docs/memory",
-    isActive: (s) => !!s.episodic?.recalled,
-    liveValue: (s) => {
-      const e = s.episodic;
-      if (!e || e.size === 0) return "empty";
-      if (e.recalled) return `recall #${e.id} · sim ${e.sim.toFixed(2)}`;
-      return `${e.size} stored`;
-    },
-    intensity: (s) => {
-      const e = s.episodic;
-      if (!e || e.size === 0) return 0;
-      return e.recalled ? clamp01(e.sim) : clamp01(e.size / 64) * 0.4;
-    },
-    color: "#e06ce0",
   },
   {
     key: "adaptive",
@@ -183,7 +111,7 @@ export function SdkFeatures(props: SdkFeaturesProps) {
       <Show when={open()}>
       <p class="text-mute text-[.72rem] leading-relaxed mb-3 mt-2">
         Each row is a modgrad SDK capability this demo runs — the meter is its
-        live intensity this step, off when its real signal is absent.
+        live intensity for the current maze, off when its real signal is absent.
       </p>
 
       <div class="flex flex-col gap-3">

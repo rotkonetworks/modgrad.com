@@ -62,7 +62,7 @@ emit(
   "/play",
   variant(
     "Watch it think — modgrad",
-    "A real modgrad learned planner solves mazes live in your browser — a Value Iteration Network with no solver at inference — while the Continuous Thought Machine brain's neurons fire and attention sweeps the maze. Runs entirely client-side via wasm.",
+    "A small 8-region CTM brain looks at a maze image and predicts a 20-step route over its internal ticks, live in your browser. Nothing else plans or decides. It is early: it usually gets the first steps right and then drifts. Runs client-side via wasm.",
     "/play",
   ),
 );

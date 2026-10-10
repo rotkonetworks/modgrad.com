@@ -42,7 +42,7 @@ function emit(path: string, html: string) {
 }
 
 const DEFAULT_DESC =
-  "Composable Rust crates for building brains: Continuous Thought Machines, multi-region composition, bio-inspired learning, and full-residency GPU training. No framework. No YAML. Just functions.";
+  "Rust crates for Continuous Thought Machines and multi-region networks of them: backpropagation through every tick, optional bio-inspired learning rules, CPU and GPU backends. Open source, early research.";
 
 // home
 emit("/", variant("modgrad — build your own brain", DEFAULT_DESC, "/"));

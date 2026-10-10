@@ -14,6 +14,7 @@ import {
   pillars,
   proofStat,
   regions,
+  researchStatus,
   runningToday,
   useCases,
 } from "@/data/content";
@@ -38,9 +39,10 @@ export default function Home() {
                 A Rust SDK for <span class="grad-text">composable brains.</span>
               </h1>
               <p class="mt-6 text-[1.12rem] text-dim max-w-[46ch] leading-relaxed">
-                Continuous Thought Machines, multi-region composition,
-                bio-inspired learning, and GPU-resident training — as plain Rust
-                crates. No framework, no YAML; you own the training loop.
+                Rust crates for Continuous Thought Machines and networks of
+                them: training with backpropagation through every tick,
+                optional bio-inspired learning rules, CPU and GPU backends. You
+                write the training loop.
               </p>
               <div class="mt-8 flex flex-wrap gap-3">
                 <A href="/docs" class="btn btn-primary">Get started →</A>
@@ -52,8 +54,11 @@ export default function Home() {
                   View on GitHub ↗
                 </a>
               </div>
-              <div class="mt-7 font-mono text-[.82rem] text-mute">
-                <span class="text-dim">$</span> cargo add modgrad-ctm
+              <div class="mt-7 font-mono text-[.82rem] text-mute break-all">
+                <span class="text-dim">$</span> cargo add --git {site.repo} modgrad-ctm
+              </div>
+              <div class="mt-1.5 text-[.75rem] text-mute">
+                Not on crates.io yet; depend on the git repository.
               </div>
             </div>
 
@@ -80,18 +85,18 @@ export default function Home() {
           </h2>
           <div class="mt-7 text-[1.1rem] text-dim leading-relaxed flex flex-col gap-4">
             <p class="dropcap">
-              The premise: capability comes from specialized regions that
-              <strong>think recurrently</strong>, route information between each
-              other, remember, and learn from their own surprise — not from
-              scaling one transformer. Each region is a part you build and test
-              on its own.
+              The hypothesis we are testing: useful capability can come from
+              specialized regions that <strong>think recurrently</strong>, pass
+              information between each other and remember, rather than only from
+              scaling one transformer. Each region is a part you can build and
+              test on its own.
             </p>
             <p>
-              The parts are plain Rust crates: a Continuous Thought Machine, graph
-              composition, neuromodulated learning, multimodal codecs, a transformer
-              stack, GPU residency. You assemble what you need. The same SDK trains a
-              187k-parameter router and mounts a frozen LLM as a cerebellum, and it
-              runs on one workstation.
+              The parts are Rust crates: a Continuous Thought Machine, graph
+              composition, optional neuromodulated learning, multimodal codecs, a
+              transformer stack, GPU residency. The same SDK trains a
+              187k-parameter brain and mounts a frozen LLM as a cerebellum, on
+              one workstation.
             </p>
           </div>
         </div>
@@ -101,8 +106,9 @@ export default function Home() {
       <section use:reveal class="container-page pb-8">
         <div class="grid lg:grid-cols-[0.9fr_1.1fr] gap-6">
           <div class="card glow-card">
-            <div class="eyebrow mb-4">Measured, reproducible</div>
-            <div class="text-[1.15rem] font-600 mb-5 leading-snug">{proofStat.headline}</div>
+            <div class="eyebrow mb-4">Measured</div>
+            <div class="text-[1.15rem] font-600 mb-1.5 leading-snug">{proofStat.headline}</div>
+            <div class="text-sm text-mute mb-5">{proofStat.detail}</div>
             <div class="flex flex-col gap-3">
               <For each={proofStat.rows}>
                 {(r) => (
@@ -121,11 +127,15 @@ export default function Home() {
                     <div class="stat-num !text-[1.15rem]" classList={{ "grad-text": r.pos }}>
                       {r.metric}
                     </div>
+                    <div class="font-mono text-xs text-mute w-12">{r.spread}</div>
                   </div>
                 )}
               </For>
             </div>
             <p class="mt-5 text-sm text-mute leading-relaxed">{proofStat.foot}</p>
+            <p class="mt-3 font-mono text-[.72rem] text-mute leading-relaxed break-all">
+              cargo run -p mazes --release -- [--brain] --size 21 --steps 5000 --seed 42
+            </p>
           </div>
 
           <div class="card">
@@ -146,6 +156,17 @@ export default function Home() {
                 )}
               </For>
             </ul>
+            <div class="eyebrow mt-6 mb-2">Research status</div>
+            <ul class="flex flex-col">
+              <For each={researchStatus}>
+                {([title, body], i) => (
+                  <li class="py-3" classList={{ "border-t border-line": i() > 0 }}>
+                    <div class="font-550">{title}</div>
+                    <div class="text-sm text-dim leading-relaxed mt-0.5">{body}</div>
+                  </li>
+                )}
+              </For>
+            </ul>
           </div>
         </div>
       </section>
@@ -154,7 +175,7 @@ export default function Home() {
       <section use:reveal class="container-page py-20">
         <div class="eyebrow mb-3">Capabilities</div>
         <h2 class="text-[clamp(1.6rem,3.6vw,2.3rem)] tracking-[-0.025em] mb-10">
-          Six parts. Import what you need.
+          Six parts. Use the ones you need.
         </h2>
         <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
           <For each={pillars}>
@@ -181,11 +202,12 @@ export default function Home() {
               </h2>
               <p class="text-dim leading-relaxed text-[.98rem]">
                 Each region is its own CTM with its own neuron count, memory depth, and tick
-                budget. They talk over learned inter-region synapses: a cortical loop plus
-                subcortical value, salience, and episodic memory pathways.
+                budget. They are connected by learned inter-region synapses: a cortical
+                loop plus subcortical value, salience and memory pathways. The names are
+                anatomical analogies, not claims of equivalence.
               </p>
               <div class="mt-5 flex flex-wrap gap-x-5 gap-y-2 text-sm">
-                <A href="/play" class="text-accent">Watch it think live →</A>
+                <A href="/play" class="text-accent">See it predict a maze route →</A>
                 <A href="/docs/brain-composition" class="text-accent">Read the architecture →</A>
               </div>
             </div>
@@ -233,7 +255,7 @@ export default function Home() {
       <section use:reveal class="container-page py-20">
         <div class="eyebrow mb-3">Design</div>
         <h2 class="text-[clamp(1.6rem,3.6vw,2.3rem)] tracking-[-0.025em] mb-10">
-          Four deliberate constraints.
+          Four design choices.
         </h2>
         <div class="grid sm:grid-cols-2 gap-4">
           <For each={differentiators}>
@@ -256,7 +278,7 @@ export default function Home() {
       <section use:reveal class="container-page py-20">
         <div class="eyebrow mb-3">What you can build</div>
         <h2 class="text-[clamp(1.6rem,3.6vw,2.3rem)] tracking-[-0.025em] mb-10">
-          A toolkit, not a model.
+          A toolkit, not a trained model.
         </h2>
         <dl class="border-t border-line">
           <For each={useCases}>
@@ -276,7 +298,7 @@ export default function Home() {
           <div>
             <div class="eyebrow mb-3">The SDK</div>
             <h2 class="text-[clamp(1.6rem,3.6vw,2.3rem)] tracking-[-0.025em]">
-              Fourteen crates. Use any of them.
+              The main crates.
             </h2>
           </div>
           <A href="/docs/crates" class="btn btn-ghost h-10">Full reference →</A>
@@ -302,11 +324,11 @@ export default function Home() {
           <div class="hero-glow" />
           <div class="relative">
             <h2 class="text-[clamp(1.8rem,4.4vw,2.8rem)] tracking-[-0.03em] leading-[1.1]">
-              <span class="grad-text">Twenty lines</span> of Rust.
+              Read the code.
             </h2>
             <p class="mt-5 text-dim max-w-[54ch] mx-auto leading-relaxed">
-              Open source, MIT-licensed, built in the open by {site.org}. Using
-              it, or want to fund the roadmap? Get in touch.
+              Open source (MIT), developed in the open by {site.org}. If you use
+              it, or want to fund the work, get in touch.
             </p>
             <div class="mt-8 flex flex-wrap gap-3 justify-center">
               <A href="/docs" class="btn btn-primary">Read the docs →</A>

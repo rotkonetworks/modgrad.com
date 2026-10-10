@@ -113,29 +113,20 @@ export default function Home() {
               <For each={proofStat.rows}>
                 {(r) => (
                   <div class="flex items-center gap-4">
-                    <div class="w-[120px] text-sm text-dim">{r.label}</div>
-                    <div class="font-mono text-xs text-mute w-12">{r.params}</div>
+                    <div class="w-[140px] shrink-0 text-sm text-dim">{r.label}</div>
                     <div class="flex-1 h-2 rounded-full bg-raised overflow-hidden">
                       <div
                         class="h-full rounded-full"
-                        style={{
-                          width: r.metric,
-                          background: r.pos ? "var(--grad)" : "var(--line-2)",
-                        }}
+                        style={{ width: r.width, background: "var(--grad)" }}
                       />
                     </div>
-                    <div class="stat-num !text-[1.15rem]" classList={{ "grad-text": r.pos }}>
-                      {r.metric}
-                    </div>
-                    <div class="font-mono text-xs text-mute w-12">{r.spread}</div>
+                    <div class="font-mono text-sm tabular-nums w-[84px] text-right">{r.value}</div>
                   </div>
                 )}
               </For>
             </div>
             <p class="mt-5 text-sm text-mute leading-relaxed">{proofStat.foot}</p>
-            <p class="mt-3 font-mono text-[.72rem] text-mute leading-relaxed break-all">
-              cargo run -p mazes --release -- [--brain] --size 21 --steps 5000 --seed 42
-            </p>
+            <A href="/play" class="mt-3 inline-block text-sm text-accent">See it on a maze →</A>
           </div>
 
           <div class="card">

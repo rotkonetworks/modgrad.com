@@ -111,7 +111,11 @@ type NeuronPos = {
   z: number;
   region: number;
   index: number;
+  /** hemisphere: +1 / −1 (bilateral regions split their neurons across both) */
+  hemi: number;
 };
+/** One dot of the translucent anatomical shell, with its outward normal. */
+type ShellPt = { x: number; y: number; z: number; nx: number; ny: number; nz: number; w: number };
 type Vec3 = { x: number; y: number; z: number };
 type ProjPoint = { x: number; y: number; depth: number; region: number; a: number };
 
@@ -135,22 +139,96 @@ const DEFAULT_REGION_COLORS = [
   "#8844ff", "#88ff44", "#ff88ff", "#ffff44",
 ];
 
-// Anatomical-ish placement keyed by region name (robust to index order):
-// a brain-shaped egg — cortical lobes around the outside (frontal→occipital,
-// motor/parietal on top), subcortical structures deep in the centre, and the
-// cerebellum tucked at the back-bottom. [x=front..back, y=down..up, z=depth].
-const BRAIN_ANATOMY: Record<string, [number, number, number]> = {
-  input: [3.7, 1.2, 0.5], // frontal
-  attention: [0.6, 3.0, 0.7], // parietal (top)
-  output: [-3.9, 0.9, -0.5], // occipital (back)
-  motor: [1.4, 2.9, -0.7], // motor cortex (top)
-  basal_ganglia: [0.4, 0.1, 0.2], // deep centre
-  hippocampus: [-1.3, -0.5, 0.9], // deep, central-back
-  insula: [1.3, -0.3, -1.3], // lateral, deep
-  cerebellum: [-3.7, -2.7, 0.1], // back-bottom
+// ── Anatomical frame ─────────────────────────────────────────────────────────
+// World axes: +x = anterior (face/eyes), −x = posterior (occipital pole),
+// +y = superior, ±z = the two hemispheres (longitudinal fissure at z = 0).
+//
+// Each cerebral hemisphere is a piecewise ellipsoid (longer behind than in
+// front, flatter underneath, flatter on the medial face). Cortical regions are
+// laid as patches ON that surface (cortex is a sheet), subcortical regions sit
+// deep inside, the cerebellum hangs back-and-below, and the eyes sit in front.
+
+const HEMI_CENTER: [number, number] = [0, 0.35]; // x, y (z = ±HEMI_Z)
+const HEMI_Z = 1.9;
+/** Semi-axes of a hemisphere, chosen per direction (piecewise ellipsoid). */
+function hemiAxes(dx: number, dy: number, dzMedial: boolean): [number, number, number] {
+  return [dx >= 0 ? 4.3 : 4.6, dy >= 0 ? 2.85 : 2.0, dzMedial ? 1.75 : 1.95];
+}
+/** Project p radially onto hemisphere `side` (±1), scaled by r (1 = surface). */
+function toHemiSurface(px: number, py: number, pz: number, side: number, r: number): Vec3 {
+  const hz = side * HEMI_Z;
+  let dx = px - HEMI_CENTER[0];
+  let dy = py - HEMI_CENTER[1];
+  let dz = pz - hz;
+  if (dx * dx + dy * dy + dz * dz < 1e-9) dy = 1;
+  const [ax, ay, az] = hemiAxes(dx, dy, dz * side < 0);
+  const s = Math.sqrt((dx / ax) ** 2 + (dy / ay) ** 2 + (dz / az) ** 2);
+  const k = r / s;
+  return { x: HEMI_CENTER[0] + dx * k, y: HEMI_CENTER[1] + dy * k, z: hz + dz * k };
+}
+
+const CEREB_C: [number, number, number] = [-3.25, -1.95, 1.05]; // z mirrored
+const CEREB_A: [number, number, number] = [1.25, 0.78, 1.1];
+
+/**
+ * How each named region is placed. `c` is the region centre in the +z
+ * hemisphere (mirrored for the other), `s` the jitter half-extent per axis
+ * (scaled mildly with region size), `kind` how points are settled:
+ *   cortex — pushed onto the hemisphere surface (a cortical sheet patch)
+ *   deep   — left where sampled (subcortical nucleus)
+ *   cereb  — settled onto the cerebellar lobes
+ */
+type RegionPlace = { kind: "cortex" | "deep" | "cereb"; c: [number, number, number]; s: [number, number, number] };
+const BRAIN_ANATOMY: Record<string, RegionPlace> = {
+  // prefrontal cortex: the region whose output drives motor (executive readout)
+  output: { kind: "cortex", c: [3.5, 1.3, 1.6], s: [0.75, 0.85, 0.7] },
+  // precentral gyrus: a strip arching over the top, just behind frontal lobe
+  motor: { kind: "cortex", c: [0.75, 2.9, 1.15], s: [0.22, 0.55, 1.15] },
+  // posterior parietal: the dorsal-stream / attention hub
+  attention: { kind: "cortex", c: [-1.85, 2.35, 1.55], s: [0.8, 0.55, 0.8] },
+  // inferior temporal association cortex: receives the ventral stream (V4)
+  input: { kind: "cortex", c: [-0.6, -1.15, 3.35], s: [1.05, 0.4, 0.4] },
+  // insula: folded deep under the lateral sulcus
+  insula: { kind: "deep", c: [0.9, 0.15, 2.85], s: [0.5, 0.35, 0.12] },
+  // striatum / basal ganglia: deep, either side of the midline
+  basal_ganglia: { kind: "deep", c: [0.75, 0.35, 1.0], s: [0.45, 0.4, 0.22] },
+  // hippocampus: medial temporal lobe, elongated front-to-back
+  hippocampus: { kind: "deep", c: [-0.75, -0.85, 1.75], s: [0.95, 0.16, 0.18] },
+  // cerebellum: back and below the occipital lobe
+  cerebellum: { kind: "cereb", c: CEREB_C, s: [1, 1, 1] },
 };
 
+// Visual pathway landmarks (anatomical waypoints; LGN + chiasm are routing
+// landmarks only — the model's visual stack has no separate relay stage).
+const EYE: [number, number, number] = [5.45, -0.75, 1.3]; // z mirrored
+const EYE_R = 0.5;
+const CHIASM: Vec3 = { x: 2.6, y: -1.35, z: 0 };
+const LGN: [number, number, number] = [-0.35, -0.2, 1.2]; // z mirrored (thalamus)
+/** Where each visual-cortex layer sits: centre, row axis, size, hemifield gap. */
+type VisPlace = { c: Vec3; v: Vec3; size: number; gap: number };
+const VIS_PLACE: Record<string, VisPlace> = {
+  // primary visual cortex on the occipital pole (calcarine, both hemispheres)
+  v1: { c: { x: -4.75, y: 0.15, z: 0 }, v: { x: 0, y: -1, z: 0 }, size: 1.5, gap: 0.22 },
+  // V2 wraps just in front of / below V1
+  v2: { c: { x: -4.2, y: -0.85, z: 0 }, v: { x: 0.55, y: -0.83, z: 0 }, size: 1.45, gap: 0.32 },
+  // V4 on the ventral occipito-temporal surface (ventral "what" stream)
+  v4: { c: { x: -2.85, y: -1.55, z: 0 }, v: { x: 1, y: 0, z: 0 }, size: 1.3, gap: 0.55 },
+};
+/** Anatomical site shown under each region's label in the tour. */
+const ANAT_SITE: Record<string, string> = {
+  output: "prefrontal",
+  motor: "motor strip",
+  attention: "parietal",
+  input: "inferior temporal",
+  insula: "insula",
+  basal_ganglia: "striatum",
+  hippocampus: "medial temporal",
+  cerebellum: "cerebellum",
+};
+const SIGHT_X = 6.6; // the image the eyes are looking at, in front of the face
+
 const VIS_COLOR = "#62e6ff"; // cyan — distinct from the region colours
+const SHELL_RGB = "160,174,210"; // faint cool grey for the anatomical shell
 
 /** Near clip plane (view-space z) — points closer than this are culled. */
 const NEAR = 0.2;
@@ -306,6 +384,138 @@ export class Brain3D {
     this.seed = opts.seed ?? 42;
     this.showVision = opts.showVision ?? true;
     this.showConnectome = opts.showConnectome ?? true;
+    this.buildShell();
+  }
+
+  // ── translucent anatomical shell: both cerebral hemispheres, cerebellum,
+  //    brainstem and the two eyes, as a sparse dot cloud with outward normals
+  //    (drawn brighter where the surface grazes the view → an x-ray silhouette),
+  //    plus the two landmark sulci (lateral + central) as faint curves. Static
+  //    geometry, built once (seeded); ~2k dots, a few dot-products each frame.
+  private shell: ShellPt[] = [];
+  private sulci: Vec3[][] = [];
+
+  private buildShell(): void {
+    const pts: ShellPt[] = [];
+    const GOLD = Math.PI * (3 - Math.sqrt(5));
+    // Fibonacci directions on the unit sphere — even coverage without clumping.
+    const fib = (n: number, f: (ux: number, uy: number, uz: number) => void) => {
+      for (let i = 0; i < n; i++) {
+        const uy = 1 - (2 * (i + 0.5)) / n;
+        const rr = Math.sqrt(1 - uy * uy);
+        const th = i * GOLD;
+        f(Math.cos(th) * rr, uy, Math.sin(th) * rr);
+      }
+    };
+    for (const side of [-1, 1]) {
+      // cerebral hemisphere (piecewise ellipsoid, gently wobbled like gyri)
+      fib(760, (ux, uy, uz) => {
+        const [ax, ay, az] = hemiAxes(ux, uy, uz * side < 0);
+        const wob = 1 + 0.025 * Math.sin(ux * 13 + uy * 7) * Math.sin(uz * 11 + uy * 5);
+        const x = HEMI_CENTER[0] + ux * ax * wob;
+        const y = HEMI_CENTER[1] + uy * ay * wob;
+        const z = side * HEMI_Z + uz * az * wob;
+        // the medial face is hidden against the other hemisphere: thin it out
+        const medial = uz * side < -0.55;
+        if (medial && (pts.length & 3) !== 0) return;
+        pts.push({ x, y, z, nx: ux / ax, ny: uy / ay, nz: uz / az, w: 1 });
+      });
+      // cerebellar lobe
+      fib(200, (ux, uy, uz) => {
+        pts.push({
+          x: CEREB_C[0] + ux * CEREB_A[0],
+          y: CEREB_C[1] + uy * CEREB_A[1],
+          z: side * CEREB_C[2] + uz * CEREB_A[2],
+          nx: ux / CEREB_A[0],
+          ny: uy / CEREB_A[1],
+          nz: uz / CEREB_A[2],
+          w: 0.8,
+        });
+      });
+      // eye
+      fib(80, (ux, uy, uz) => {
+        pts.push({
+          x: EYE[0] + ux * EYE_R,
+          y: EYE[1] + uy * EYE_R,
+          z: side * EYE[2] + uz * EYE_R,
+          nx: ux,
+          ny: uy,
+          nz: uz,
+          w: 1.1,
+        });
+      });
+    }
+    // brainstem: a short tilted cylinder from the thalamus down and back
+    for (let i = 0; i < 90; i++) {
+      const t = (i % 15) / 14;
+      const a = Math.floor(i / 15) * ((Math.PI * 2) / 6) + t * 0.5;
+      const cx = -1.0 - 1.0 * t;
+      const cy = -1.2 - 2.0 * t;
+      const r = 0.48 - 0.1 * t;
+      pts.push({ x: cx + Math.cos(a) * r * 0.6, y: cy, z: Math.sin(a) * r, nx: Math.cos(a), ny: 0, nz: Math.sin(a), w: 0.7 });
+    }
+    this.shell = pts;
+
+    // sulci on each hemisphere's lateral surface: lateral (Sylvian) fissure
+    // runs up-and-back from the temporal pole; the central sulcus runs from
+    // the top of the head down toward it, just behind the motor strip.
+    this.sulci = [];
+    for (const side of [-1, 1]) {
+      const lat: Vec3[] = [];
+      for (let i = 0; i <= 12; i++) {
+        const t = i / 12;
+        lat.push(toHemiSurface(2.0 - 3.8 * t, -0.35 + 0.95 * t, side * 4, side, 1.01));
+      }
+      const cen: Vec3[] = [];
+      for (let i = 0; i <= 12; i++) {
+        const t = i / 12;
+        const zz = side * (HEMI_Z * (1 - t) * 0.15 + 4 * t);
+        cen.push(toHemiSurface(0.2 + 0.55 * t, 3.5 - 3.3 * t, zz, side, 1.01));
+      }
+      this.sulci.push(lat, cen);
+    }
+  }
+
+  private drawShell(ctx: CanvasRenderingContext2D, vx: ViewXform): void {
+    const [px, py, pz] = vx.cam.pos;
+    for (let i = 0; i < this.shell.length; i++) {
+      const s = this.shell[i];
+      const p = projectWith(vx, s.x, s.y, s.z);
+      if (!p.vis) continue;
+      // view ray vs outward normal: grazing (silhouette) → brighter
+      const dx = s.x - px;
+      const dy = s.y - py;
+      const dz = s.z - pz;
+      const dl = Math.hypot(dx, dy, dz) || 1;
+      const nl = Math.hypot(s.nx, s.ny, s.nz) || 1;
+      const cosv = Math.abs((dx * s.nx + dy * s.ny + dz * s.nz) / (dl * nl));
+      const rim = 1 - cosv;
+      const fogv = Math.max(0.35, Math.min(1, 14 / p.depth - 0.2));
+      const a = (0.07 + 0.42 * rim * rim) * fogv * s.w;
+      if (a < 0.03) continue;
+      const sz = Math.max(0.9, Math.min(2.2, 16 / p.depth));
+      ctx.fillStyle = `rgba(${SHELL_RGB},${a.toFixed(3)})`;
+      ctx.fillRect(p.x - sz / 2, p.y - sz / 2, sz, sz);
+    }
+    // sulci: faint landmark curves
+    ctx.lineWidth = 1;
+    ctx.lineCap = "round";
+    ctx.strokeStyle = `rgba(${SHELL_RGB},0.16)`;
+    for (const line of this.sulci) {
+      ctx.beginPath();
+      let pen = false;
+      for (const q of line) {
+        const p = projectWith(vx, q.x, q.y, q.z);
+        if (!p.vis) {
+          pen = false;
+          continue;
+        }
+        if (pen) ctx.lineTo(p.x, p.y);
+        else ctx.moveTo(p.x, p.y);
+        pen = true;
+      }
+      ctx.stroke();
+    }
   }
 
   /** Install (or replace) the brain structure; rebuilds the neuron cloud. */
@@ -326,32 +536,68 @@ export class Brain3D {
     const scale = total > this.maxPoints ? this.maxPoints / total : 1;
 
     this.neuronPos = [];
+    this.hemiCenterCache = [];
     this.regionCenters = [];
     this.regionRange = [];
     const rand = makeRand(this.seed);
+    // uniform sample inside the unit ball (rejection), for blob-shaped jitter
+    const ball = (): [number, number, number] => {
+      for (;;) {
+        const a = rand();
+        const b = rand();
+        const c = rand();
+        if (a * a + b * b + c * c <= 1) return [a, b, c];
+      }
+    };
     for (let ri = 0; ri < regions.length; ri++) {
       const want = Math.max(1, Math.round(regions[ri].d_model * scale));
-      const [cx, cy, cz] = BRAIN_ANATOMY[regions[ri].name] ?? [
-        (ri % 4) * 3 - 4.5,
-        1.5 - Math.floor(ri / 4) * 3,
-        0,
-      ];
-      this.regionCenters[ri] = { x: cx, y: cy, z: cz };
+      const name = regions[ri].name;
+      const place: RegionPlace = BRAIN_ANATOMY[name] ?? {
+        // unknown region: a small deep nucleus, spaced through the core
+        kind: "deep",
+        c: [1.2 - (ri % 4) * 0.8, -0.3 - Math.floor(ri / 4) * 0.5, 0.6],
+        s: [0.3, 0.3, 0.2],
+      };
+      // grow mildly with the TRUE region size (so XL brains read bigger even
+      // when sub-sampled), but stay inside the region's anatomical footprint.
+      const g = Math.max(0.8, Math.min(1.3, Math.sqrt(regions[ri].d_model / 32)));
+      const [cx, cy, cz] = place.c;
+      // label anchor: the −z hemisphere (the side the default camera faces)
+      this.regionCenters[ri] =
+        place.kind === "cortex" ? toHemiSurface(cx, cy, -cz, -1, 1.03) : { x: cx, y: cy, z: -cz };
       this.regionRange[ri] = { start: this.neuronPos.length, count: want };
-      // spread keyed to the *true* region size (so big regions stay big even
-      // when sub-sampled), with a touch tighter packing for clearer separation.
-      const spread = Math.sqrt(regions[ri].d_model) * 0.34;
       for (let ni = 0; ni < want; ni++) {
-        const theta = rand() * Math.PI;
-        const phi = rand() * Math.PI * 2;
-        const rr = spread * (0.3 + 0.7 * Math.abs(rand()));
+        const hemi = ni % 2 === 0 ? -1 : 1; // bilateral: alternate hemispheres
+        const [bx, by, bz] = ball();
+        let x = cx + bx * place.s[0] * g;
+        let y = cy + by * place.s[1] * g;
+        let z = hemi * cz + bz * place.s[2] * g;
+        if (place.kind === "cortex") {
+          // cortical sheet: settle onto the surface, slight depth for layers
+          const q = toHemiSurface(x, y, z, hemi, 0.9 + 0.08 * Math.abs(rand()));
+          x = q.x;
+          y = q.y;
+          z = q.z;
+        } else if (place.kind === "cereb") {
+          // folia: points on / just under the surface of each cerebellar lobe
+          const n = Math.hypot(bx, by, bz) || 1;
+          const r = 0.75 + 0.22 * Math.abs(rand());
+          x = CEREB_C[0] + (bx / n) * CEREB_A[0] * r;
+          y = CEREB_C[1] + (by / n) * CEREB_A[1] * r;
+          z = hemi * CEREB_C[2] + (bz / n) * CEREB_A[2] * r;
+        } else if (name === "hippocampus") {
+          // seahorse curl: the tail rises as it runs posterior
+          const t = bx;
+          y += t < 0 ? 0.45 * t * t : 0.05 * t;
+        }
         this.neuronPos.push({
-          x: cx + rr * Math.sin(theta) * Math.cos(phi),
-          y: cy + rr * Math.cos(theta),
-          z: cz + rr * Math.sin(theta) * Math.sin(phi),
+          x,
+          y,
+          z,
           region: ri,
           // map back to a representative source index for activation lookup
           index: Math.min(regions[ri].d_model - 1, Math.floor((ni / want) * regions[ri].d_model)),
+          hemi,
         });
       }
     }
@@ -385,8 +631,13 @@ export class Brain3D {
         const fr = this.regionRange[f];
         if (!fr || fr.count === 0) continue;
         for (let k = 0; k < STRANDS_PER_EDGE; k++) {
-          const fa = fr.start + Math.floor(rand() * fr.count);
-          const fb = tr.start + Math.floor(rand() * tr.count);
+          // rand() is in [-1, 1): map to [0, 1) so endpoints stay in-region
+          const fa = fr.start + Math.floor(((rand() + 1) / 2) * fr.count);
+          let fb = tr.start + Math.floor(((rand() + 1) / 2) * tr.count);
+          // keep most fibres ipsilateral (same hemisphere); every 4th crosses
+          // the midline, like callosal / commissural fibres.
+          if (k % 4 !== 3 && tr.count > 1 && this.neuronPos[fb].hemi !== this.neuronPos[fa].hemi)
+            fb = fb + 1 < tr.start + tr.count ? fb + 1 : fb - 1;
           this.connStrands.push({ fa, fb, from: f, to: conn.to, phase: rand() });
         }
       }
@@ -512,6 +763,9 @@ export class Brain3D {
       regionAct[r] = rawMean[r] > 0 ? Math.max(0.06, Math.min(1, rawMean[r] / maxRegionMean)) : 0.06;
     }
 
+    // anatomical shell first (source-over, faint), so activity reads on top
+    this.drawShell(ctx, vx);
+
     ctx.globalCompositeOperation = "lighter";
 
     if (this.showConnectome) {
@@ -580,29 +834,27 @@ export class Brain3D {
       const short = name.length > 14 ? name.slice(0, 13) + "…" : name;
       const n = bref.regions[r]?.d_model ?? 0;
       this.drawLabel(ctx, vx, c, `${short} · ${n}`, this.regionColor(r), W, H, -10);
+      const site = ANAT_SITE[name];
+      if (site) this.drawLabel(ctx, vx, c, site, "#8b93a7", W, H, 4);
     }
 
-    // 2) vision pathway stages, anchored on the same plane drawVision lays out.
+    // 2) vision pathway stages, anchored where drawVision lays them out.
     if (this.showVision && vision && vision.length) {
-      const inIdx = bref.region_names.indexOf("input");
-      const ic = this.regionCenters[inIdx >= 0 ? inIdx : 0] ?? { x: 3.7, y: 1.2, z: 0.5 };
-      const nL = vision.length;
-      const SPC = 0.6;
       const niceName: Record<string, string> = {
-        sight: "what it sees",
         retina: "retina",
         v1: "V1",
         v2: "V2",
         v4: "V4",
       };
-      for (let li = 0; li < nL; li++) {
-        const m = vision[li];
-        const lx = ic.x + 1.0 + (nL - 1 - li) * SPC;
-        const ly = ic.y + 0.4;
-        const lz = ic.z;
-        const label = niceName[m.name.toLowerCase()] ?? m.name;
-        this.drawLabel(ctx, vx, { x: lx, y: ly, z: lz }, label, VIS_COLOR, W, H, -14);
+      for (const L of this.visLayout(vision)) {
+        if (L.kind === "sight") continue; // drawVision labels the image itself
+        const a = L.kind === "retina" ? L.place.c : Brain3D.halfAnchor(L.place, -1);
+        const label = niceName[L.m.name.toLowerCase()] ?? L.m.name;
+        this.drawLabel(ctx, vx, a, label, VIS_COLOR, W, H, -12);
       }
+      // anatomical routing landmarks (not model stages) in muted grey
+      this.drawLabel(ctx, vx, CHIASM, "optic chiasm", "#8b93a7", W, H, 14);
+      this.drawLabel(ctx, vx, { x: LGN[0], y: LGN[1], z: -LGN[2] }, "LGN", "#8b93a7", W, H, -6);
     }
 
     // 3) architectural callouts, anchored at meaningful world points.
@@ -717,9 +969,54 @@ export class Brain3D {
     }
   }
 
-  // ── visual cortex: sight → retina → V1 → V2 → V4 layers feeding `input`.
-  //    Each layer is a spatial plane (channels averaged), lit by what it sees,
-  //    wired forward into the brain — the eyes-to-cognition pathway. ──
+  // ── visual pathway, laid out anatomically ──
+  //   sight (the image in front of the face) → retina (back of each eye) →
+  //   optic nerves → chiasm → optic tracts → LGN (thalamus) → optic radiations
+  //   → V1 (occipital pole) → V2 → V4 (ventral occipito-temporal) → `input`
+  //   (inferior temporal). Bilateral: cortical maps are split by hemifield —
+  //   the map's left half sits in one hemisphere, its right half in the other.
+  //   Chiasm + LGN are routing landmarks; the model's stack has no relay stage.
+  private visLayout(vision: RetinaMap[]): { m: RetinaMap; kind: "sight" | "retina" | "cortex"; place: VisPlace }[] {
+    const out: { m: RetinaMap; kind: "sight" | "retina" | "cortex"; place: VisPlace }[] = [];
+    let extra = 0;
+    for (const m of vision) {
+      const key = m.name.toLowerCase();
+      if (key === "sight") {
+        out.push({
+          m,
+          kind: "sight",
+          place: { c: { x: SIGHT_X, y: -0.55, z: 0 }, v: { x: 0, y: -1, z: 0 }, size: 1.6, gap: 0 },
+        });
+      } else if (key === "retina") {
+        // anchored at the back of the (−z) eye; drawn in both eyes
+        out.push({
+          m,
+          kind: "retina",
+          place: { c: { x: EYE[0] - 0.32, y: EYE[1], z: -EYE[2] }, v: { x: 0, y: -1, z: 0 }, size: 0.62, gap: 0 },
+        });
+      } else {
+        const p = VIS_PLACE[key];
+        if (p) out.push({ m, kind: "cortex", place: p });
+        else {
+          // further ventral-stream stage: continue forward along the underside
+          extra++;
+          const b = VIS_PLACE.v4;
+          out.push({
+            m,
+            kind: "cortex",
+            place: { c: { x: b.c.x + 0.9 * extra, y: b.c.y - 0.05 * extra, z: 0 }, v: b.v, size: 1.1, gap: b.gap + 0.3 * extra },
+          });
+        }
+      }
+    }
+    return out;
+  }
+
+  /** Hemifield anchor of a cortical/vision plane: the centre of its `side` half. */
+  private static halfAnchor(p: VisPlace, side: number): Vec3 {
+    return { x: p.c.x, y: p.c.y, z: p.c.z + side * (p.gap + p.size / 4) };
+  }
+
   private drawVision(
     ctx: CanvasRenderingContext2D,
     bref: BrainRef,
@@ -729,43 +1026,48 @@ export class Brain3D {
     time: number,
   ): void {
     const VIS = VIS_COLOR;
-    const inIdx = bref.region_names.indexOf("input");
-    const ic = this.regionCenters[inIdx >= 0 ? inIdx : 0] ?? { x: 3.7, y: 1.2, z: 0.5 };
-    const nL = vision.length;
-    const SPC = 0.6; // layer-to-layer spacing
-    const centers: { x: number; y: number; act: number }[] = [];
+    const layout = this.visLayout(vision);
+    const acts: number[] = [];
 
-    for (let li = 0; li < nL; li++) {
-      const m = vision[li];
-      const isSight = m.name === "sight";
-      // sight (the eye's image) farthest out; retina→V4 step in toward input
-      const lx = ic.x + 1.0 + (nL - 1 - li) * SPC;
-      const ly = ic.y + 0.4;
-      const lz = ic.z;
+    // world position of cell (r, c) on a plane: columns run along ±z (split by
+    // hemifield gap), rows along the plane's `v` axis.
+    const cellPos = (p: VisPlace, m: RetinaMap, r: number, c: number, zOff: number): Vec3 => {
+      const sp = p.size / Math.max(m.h, m.w);
+      const col = (c - (m.w - 1) / 2) * sp;
+      const row = (r - (m.h - 1) / 2) * sp;
+      const g = p.gap * (col < 0 ? -1 : col > 0 ? 1 : 0);
+      return { x: p.c.x + p.v.x * row, y: p.c.y + p.v.y * row, z: p.c.z + zOff + col + g + p.v.z * row };
+    };
+
+    for (const L of layout) {
+      const { m, kind, place } = L;
       const hw = m.h * m.w;
-      const sp = isSight ? 0.28 : 0.2;
+      const sp = place.size / Math.max(m.h, m.w);
 
-      if (isSight) {
-        // ── the literal retinal image — what the model actually sees ──
+      if (kind === "sight") {
+        // ── the literal image the model sees, in front of the face ──
         ctx.globalCompositeOperation = "source-over";
-        // a faint frame so it reads as the eye's "screen"
-        const corner = (rr: number, cc: number) =>
-          proj(lx, ly + (rr - (m.h - 1) / 2) * sp, lz + (cc - (m.w - 1) / 2) * sp);
+        const corner = (rr: number, cc: number) => {
+          const q = cellPos(place, m, rr, cc, 0);
+          return proj(q.x, q.y, q.z);
+        };
         const c0 = corner(-0.6, -0.6),
           c1 = corner(-0.6, m.w - 0.4),
           c2 = corner(m.h - 0.4, m.w - 0.4),
           c3 = corner(m.h - 0.4, -0.6);
-        ctx.fillStyle = "rgba(10,12,20,0.72)";
-        ctx.beginPath();
-        ctx.moveTo(c0.x, c0.y);
-        ctx.lineTo(c1.x, c1.y);
-        ctx.lineTo(c2.x, c2.y);
-        ctx.lineTo(c3.x, c3.y);
-        ctx.closePath();
-        ctx.fill();
-        ctx.strokeStyle = hexA(VIS, 0.5);
-        ctx.lineWidth = 1.2;
-        ctx.stroke();
+        if (c0.depth >= 0.5 && c1.depth >= 0.5 && c2.depth >= 0.5 && c3.depth >= 0.5) {
+          ctx.fillStyle = "rgba(10,12,20,0.72)";
+          ctx.beginPath();
+          ctx.moveTo(c0.x, c0.y);
+          ctx.lineTo(c1.x, c1.y);
+          ctx.lineTo(c2.x, c2.y);
+          ctx.lineTo(c3.x, c3.y);
+          ctx.closePath();
+          ctx.fill();
+          ctx.strokeStyle = hexA(VIS, 0.45);
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
         for (let r = 0; r < m.h; r++) {
           for (let c = 0; c < m.w; c++) {
             const i = r * m.w + c;
@@ -777,20 +1079,20 @@ export class Brain3D {
             else if (G > 0.5 && R < 0.5) col = "#4fd17a"; // goal
             else if (R > 0.5 && G > 0.5 && B > 0.5) col = "#e9edf6"; // open
             else col = "#33384a"; // wall
-            const p = proj(lx, ly + (r - (m.h - 1) / 2) * sp, lz + (c - (m.w - 1) / 2) * sp);
+            const q = cellPos(place, m, r, c, 0);
+            const p = proj(q.x, q.y, q.z);
             if (!(p.depth >= 0.5)) continue;
-            const s = Math.max(1.5, (sp * fov) / p.depth) * 0.92;
+            const s = Math.max(1.2, (sp * fov) / p.depth) * 0.9;
             ctx.fillStyle = col;
             ctx.fillRect(p.x - s / 2, p.y - s / 2, s, s);
           }
         }
         ctx.globalCompositeOperation = "lighter";
-        const cp = proj(lx, ly, lz);
-        centers.push({ x: cp.x, y: cp.y, act: 1 });
+        acts.push(1);
         continue;
       }
 
-      // ── learned feature map (retina/V1/V2/V4): cyan response field ──
+      // ── learned feature map: cyan response field (channel-mean |act|) ──
       ctx.globalCompositeOperation = "lighter";
       let mx = 1e-6;
       const cell = new Array<number>(hw);
@@ -804,61 +1106,162 @@ export class Brain3D {
         cell[i] = c;
         if (c > mx) mx = c;
       }
+      // the retina is drawn once in each eye; cortical maps once, split L/R
+      const copies = kind === "retina" ? [0, 2 * EYE[2]] : [0];
       let lact = 0;
       for (let r = 0; r < m.h; r++) {
         for (let c = 0; c < m.w; c++) {
           const a = Math.min(1, cell[r * m.w + c] / mx);
           lact += a;
-          const p = proj(lx, ly + (r - (m.h - 1) / 2) * sp, lz + (c - (m.w - 1) / 2) * sp);
-          if (!(p.depth >= 0.5)) continue;
-          const size = Math.max(1, (8 / p.depth) * (0.9 + 2.0 * a));
-          if (a > 0.35) {
-            const gr = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, size * 2.6);
-            gr.addColorStop(0, hexA(VIS, 0.4 * a));
-            gr.addColorStop(1, hexA(VIS, 0));
-            ctx.fillStyle = gr;
+          for (const zOff of copies) {
+            const q = cellPos(place, m, r, c, zOff);
+            const p = proj(q.x, q.y, q.z);
+            if (!(p.depth >= 0.5)) continue;
+            const pix = (sp * fov) / p.depth;
+            const size = Math.max(0.7, pix * (0.1 + 0.2 * a));
+            if (a > 0.5) {
+              const gr = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, size * 2.6);
+              gr.addColorStop(0, hexA(VIS, 0.35 * a));
+              gr.addColorStop(1, hexA(VIS, 0));
+              ctx.fillStyle = gr;
+              ctx.beginPath();
+              ctx.arc(p.x, p.y, size * 2.6, 0, Math.PI * 2);
+              ctx.fill();
+            }
+            ctx.fillStyle = hexA(VIS, 0.2 + 0.7 * a);
             ctx.beginPath();
-            ctx.arc(p.x, p.y, size * 2.6, 0, Math.PI * 2);
+            ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
             ctx.fill();
           }
-          ctx.fillStyle = hexA(VIS, 0.22 + 0.72 * a);
-          ctx.beginPath();
-          ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
-          ctx.fill();
         }
       }
-      const cp = proj(lx, ly, lz);
-      centers.push({ x: cp.x, y: cp.y, act: Math.min(1, lact / hw) });
+      acts.push(Math.min(1, lact / hw));
     }
 
-    // feedforward pathway: retina → V1 → V2 → V4 → input region
-    const inP = proj(ic.x, ic.y, ic.z);
+    // ── fibres: smooth (quadratic) 3D curves, projected, with a travelling spark
     ctx.lineCap = "round";
-    for (let li = 0; li < centers.length; li++) {
-      const a = centers[li];
-      const b = li + 1 < centers.length ? centers[li + 1] : inP;
-      const g = 0.12 + 0.7 * a.act;
-      ctx.strokeStyle = hexA(VIS, g * 0.65);
-      ctx.lineWidth = 0.8 + 2.4 * a.act;
+    ctx.lineJoin = "round";
+    const fibre = (a: Vec3, k: Vec3 | null, b: Vec3, act: number, phase: number) => {
+      const N = 12;
+      const g = 0.12 + 0.7 * act;
+      ctx.strokeStyle = hexA(VIS, g * 0.55);
+      ctx.lineWidth = 0.7 + 1.8 * act;
       ctx.beginPath();
-      ctx.moveTo(a.x, a.y);
-      ctx.lineTo(b.x, b.y);
+      let pen = false;
+      let sx = 0;
+      let sy = 0;
+      let haveSpark = false;
+      const fr = (time * 0.5 + phase) % 1;
+      const kk = k ?? { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 };
+      for (let i = 0; i <= N; i++) {
+        const t = i / N;
+        const u = 1 - t;
+        const x = u * u * a.x + 2 * u * t * kk.x + t * t * b.x;
+        const y = u * u * a.y + 2 * u * t * kk.y + t * t * b.y;
+        const z = u * u * a.z + 2 * u * t * kk.z + t * t * b.z;
+        const p = proj(x, y, z);
+        if (!(p.depth >= 0.5)) {
+          pen = false;
+          continue;
+        }
+        if (pen) ctx.lineTo(p.x, p.y);
+        else ctx.moveTo(p.x, p.y);
+        pen = true;
+        if (!haveSpark && t >= fr) {
+          sx = p.x;
+          sy = p.y;
+          haveSpark = true;
+        }
+      }
       ctx.stroke();
-      const fr = (time * 0.5 + li * 0.15) % 1; // info flowing inward
-      ctx.fillStyle = hexA("#ffffff", 0.45 * a.act);
-      ctx.beginPath();
-      ctx.arc(a.x + (b.x - a.x) * fr, a.y + (b.y - a.y) * fr, 1.1 + 1.8 * a.act, 0, Math.PI * 2);
-      ctx.fill();
+      if (haveSpark && act > 0.05) {
+        ctx.fillStyle = hexA("#ffffff", 0.45 * act);
+        ctx.beginPath();
+        ctx.arc(sx, sy, 1.0 + 1.6 * act, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    };
+
+    const sightI = layout.findIndex((l) => l.kind === "sight");
+    const retI = layout.findIndex((l) => l.kind === "retina");
+    const retAct = retI >= 0 ? acts[retI] : 0.3;
+    const cortexI: number[] = [];
+    layout.forEach((l, i) => {
+      if (l.kind === "cortex") cortexI.push(i);
+    });
+    const inIdx = bref.region_names.indexOf("input");
+
+    for (const side of [-1, 1]) {
+      const eye: Vec3 = { x: EYE[0], y: EYE[1], z: side * EYE[2] };
+      // light from the scene onto each eye
+      if (sightI >= 0) {
+        const sc = layout[sightI].place.c;
+        fibre({ x: sc.x - 0.05, y: sc.y, z: sc.z }, null, { x: eye.x + EYE_R, y: eye.y, z: eye.z }, 0.25, 0);
+      }
+      // optic nerve: back of the eye → chiasm
+      fibre({ x: eye.x - EYE_R, y: eye.y, z: eye.z }, { x: 3.6, y: -1.2, z: side * 0.9 }, CHIASM, retAct, 0.1);
+      // optic tract: chiasm → LGN (thalamus)
+      const lgn: Vec3 = { x: LGN[0], y: LGN[1], z: side * LGN[2] };
+      fibre(CHIASM, { x: 1.2, y: -1.25, z: side * 1.25 }, lgn, retAct, 0.25);
+      // optic radiation: LGN → V1, flaring laterally (Meyer's loop)
+      let prev = lgn;
+      let prevAct = retAct;
+      let first = true;
+      for (let j = 0; j < cortexI.length; j++) {
+        const L = layout[cortexI[j]];
+        const at = Brain3D.halfAnchor(L.place, side);
+        const ctrl = first
+          ? { x: -2.3, y: -0.35, z: side * 2.15 }
+          : null;
+        fibre(prev, ctrl, at, prevAct, 0.4 + j * 0.15);
+        prev = at;
+        prevAct = acts[cortexI[j]];
+        first = false;
+      }
+      // last visual stage → the `input` region in the same hemisphere
+      const hc = inIdx >= 0 ? this.hemiCenter(inIdx, side) : null;
+      if (hc && cortexI.length) fibre(prev, null, hc, prevAct, 0.9);
     }
-    // label the pathway as the visual system (crisp, not additive)
-    if (centers.length) {
-      ctx.globalCompositeOperation = "source-over";
-      ctx.font = "600 9px ui-monospace, monospace";
-      ctx.textAlign = "center";
-      ctx.fillStyle = hexA(VIS, 0.85);
-      ctx.fillText("what it sees", centers[0].x, centers[0].y - 18);
-      ctx.textAlign = "left";
+
+    // label the scene image (crisp, not additive)
+    if (sightI >= 0) {
+      const sc = layout[sightI].place;
+      const p = proj(sc.c.x, sc.c.y + sc.size / 2 + 0.25, sc.c.z);
+      if (p.depth >= 0.5) {
+        ctx.globalCompositeOperation = "source-over";
+        ctx.font = "600 9px ui-monospace, monospace";
+        ctx.textAlign = "center";
+        ctx.fillStyle = hexA(VIS, 0.85);
+        ctx.fillText("what it sees", p.x, p.y);
+        ctx.textAlign = "left";
+      }
     }
+  }
+
+  /** Mean position of a region's neurons in one hemisphere (cached per layout). */
+  private hemiCenterCache: (Vec3 | null)[][] = [];
+  private hemiCenter(ri: number, side: number): Vec3 | null {
+    const k = side < 0 ? 0 : 1;
+    const row = this.hemiCenterCache[ri];
+    if (row && row[k] !== undefined) return row[k];
+    const rg = this.regionRange[ri];
+    let n = 0;
+    let x = 0;
+    let y = 0;
+    let z = 0;
+    if (rg) {
+      for (let i = rg.start; i < rg.start + rg.count; i++) {
+        const np = this.neuronPos[i];
+        if (np.hemi !== side) continue;
+        x += np.x;
+        y += np.y;
+        z += np.z;
+        n++;
+      }
+    }
+    const v = n ? { x: x / n, y: y / n, z: z / n } : null;
+    (this.hemiCenterCache[ri] ??= [])[k] = v;
+    return v;
   }
 }
 

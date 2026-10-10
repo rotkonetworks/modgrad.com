@@ -2,7 +2,7 @@
 title: Visual cortex
 section: Architecture
 order: 42
-description: The retina that turns raw pixels into spatial tokens — a retina → V1 → V2 → V4 convolutional cascade — and how the /play demo renders what the brain actually sees at each maze cell.
+description: The retina that turns raw pixels into spatial tokens — a retina → V1 → V2 → V4 convolutional cascade — and how the /play demo renders what the brain actually sees.
 ---
 
 # Visual cortex
@@ -61,20 +61,16 @@ layer's feature map (CHW). The demo prepends the literal RGB it fed in — label
 - a feedforward beam wiring those layers into the `input` region of the 3D brain,
   so you watch perception flow into cognition.
 
-The same feature maps are also collapsed into a single saliency grid
-(`visionSaliency`) and upsampled back onto the maze — a coarse "where the visual
-system is responding" overlay, distinct from the occlusion-attention heatmap.
 
 ## Limitations
 
-- The cortex used here is the **small** maze brain's, trained on 9×9 mazes; the
-  feature maps are correspondingly low-resolution and read best as activity fields,
-  not crisp edge detectors.
+- The cortex used here is the maze brain's, trained on 9×9 mazes, and it takes a
+  **fixed 9×9 input** (`input_h = input_w = 9` in the export), so the demo runs 9×9
+  only. The feature maps are correspondingly low-resolution and read best as
+  activity fields, not crisp edge detectors.
 - The cyan response fields are a **visualisation** — channels are averaged per
   location for display. They show *that* a layer responds, not the per-channel
   filters individually.
-- The saliency overlay is nearest-neighbour upsampled from a smaller feature map,
-  so it localises to roughly the right region of the maze, not to the exact cell.
 
-Next: how the eight regions consume these tokens and decide a move —
+Next: how the eight regions consume these tokens and predict a route —
 [the 8-region brain →](/docs/brain-composition).

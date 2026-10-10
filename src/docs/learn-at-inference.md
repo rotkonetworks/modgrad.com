@@ -49,21 +49,16 @@ edit its own weights in the field.
 
 ## How the demo uses it
 
-Honestly: **the shipped /play demo does not currently learn while playing.** The
-wasm exports `apply_plasticity` and `reset_plasticity`, and the worker's message
-schema reserves fields for it (`plasticDelta`, `signal` on the step result), but the
-worker's engine binding wires up only `run_brain_pixels` and `retina_maps`. No
-`signal` is computed from the brain's misses and no plasticity call is made on a
-step, so the readout weights are static across a run.
+Honestly: **the shipped /play demo does not learn.** It runs the brain once per
+maze on fixed, trained weights and draws the route it predicts. The worker binds
+only `load_brain_weights`, `run_brain_pixels` and `retina_maps`; no plasticity call
+is ever made, and the browser engine's `apply_plasticity` / `reset_plasticity`
+exports are currently no-ops kept for compatibility.
 
-What the demo *does* surface is the raw material such a rule would consume: the
-move distribution, and a per-step **verdict** (`ok` / `wall` / `astray` / `wait`)
-that classifies the brain's prediction against the true maze. That verdict is
-exactly the kind of pain/reward signal you would feed into `apply_plasticity` — a
-wall-bound or away-from-goal prediction is negative `signal`, an on-path one is
-positive. Wiring that loop in (compute the signal from the verdict, call
-`apply_plasticity(chosen, signal)`, surface `plasticDelta`) is the natural next step
-for the demo, not something it claims to do today.
+What the demo does surface is the raw material such a rule would consume: the
+brain's first-step distribution at every tick, and where its predicted route leaves
+the true shortest route or runs into a wall. Turning that into a signal for
+`apply_plasticity` is future work, not something the page claims to do.
 
 ## Limitations
 

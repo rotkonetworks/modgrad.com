@@ -125,10 +125,12 @@ are warm-started by splitting a trained standalone Value Iteration Network
 (Tamar et al., 2016) — `split_vin` — so they reproduce it bit-for-bit, then
 fine-tune. Each is a small bundle of `Linear`s; the generic per-region weights
 stay task-agnostic, with the planning circuit owned at the composition layer
-beside `connections`/`router`. The [/play demo](/play) runs exactly this, compiled
-to WebAssembly. (Today `plan()` composes the three heads to run the sweeps;
-running them *as* the hippocampus region's own tick dynamics — value flowing
-through a basal-ganglia↔hippocampus edge each tick — is the next integration.)
+beside `connections`/`router`. Today `plan()` composes the three heads to run
+the sweeps outside the regions' tick dynamics; running them *as* the hippocampus
+region's own ticks — value flowing through a basal-ganglia↔hippocampus edge each
+tick — is not done yet. The [/play demo](/play) does **not** use this planner: there,
+the brain's own output head predicts the route from the maze image and nothing
+else plans or decides.
 
 ## Inter-region synapses
 

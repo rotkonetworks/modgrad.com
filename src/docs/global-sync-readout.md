@@ -2,7 +2,7 @@
 title: Global-sync readout
 section: Architecture
 order: 44
-description: How the 8-region brain pools its regions into a single decision through a global synchronization read-out — and the honest reason that pooling lets the /play brain predict ~84.5% per move without reliably solving a maze end-to-end.
+description: How the 8-region brain pools its regions into a single decision through a global synchronization read-out — and the honest reason the /play brain gets the first steps of a maze right but rarely the whole route.
 ---
 
 # Global-sync readout
@@ -10,9 +10,9 @@ description: How the 8-region brain pools its regions into a single decision thr
 [Brain composition](/docs/brain-composition) covers how the eight regions are wired
 and what each one does. This page is about the step that turns all of them into a
 **single prediction** each tick — the **global synchronization read-out** — because
-it is also the honest explanation for the headline result on [/play](/play): the
-brain is right about **~84.5% of individual moves** yet does not reliably solve a
-9×9 maze end-to-end.
+it is also the honest explanation for what you see on [/play](/play): the brain
+almost always predicts the **first step** of a 9×9 maze correctly, yet its full
+predicted route is almost never right end-to-end.
 
 ## What it is
 
@@ -68,19 +68,17 @@ activations, per-tick global sync, the readout prediction.
 ## The honest limitation: pooled readout vs. end-to-end solving
 
 A single global readout is a **bottleneck by design**, and on a sequential task it
-shows. The brain pools its entire state into one vector and predicts the next move
-from it. That is enough to be right about most *individual* moves — hence
-**~84.5% per-move** on held-out 9×9 mazes — but per-move accuracy compounds badly
-over a full path: one wrong step into a wall stalls the whole rollout, so the
-end-to-end solve rate is near zero on 9×9.
+shows. The brain pools its entire state into one vector and predicts a whole
+20-step route from it. That is enough to get the first step right — 199 of 200
+random 9×9 mazes for the default brain — but each later step is a little less
+likely to be right, and errors compound: on average only the first ~4 of ~17 steps
+match the shortest route, and 0 of 200 predicted routes were correct to the goal.
 
-This is why the demo does **not** let the brain drive the agent. The agent walks the
-true shortest path (BFS, computed in the worker), and the brain **predicts alongside**
-it. The move bars show the brain's distribution; the maze flags where its call would
-miss (`✕ would hit a wall`, `→ away from goal`); and the running tally reports how
-often the brain agreed with the optimal step. Nothing is faked to make the brain look
-like it solves the maze — see the [/play framing](/play) for why honest prediction,
-not a staged solve, is the point.
+The demo shows exactly that and nothing more. The brain sees the maze image once,
+and the page draws its predicted route tick by tick next to the true shortest route
+(BFS, computed in the worker for reference only), marking where the prediction
+first leaves it and where it predicts a step into a wall. No planner or agent
+stands in for the brain.
 
 A larger preset with wider regions and a learned router (see the presets table in
 [brain composition](/docs/brain-composition)) raises these numbers; the small 187k

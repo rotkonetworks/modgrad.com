@@ -70,14 +70,18 @@ the system is more than this.
 
 ## Does the maze demo actually solve the maze, or is it scripted?
 
-It solves it. The brain reads the raw 9×9 grid through its visual retina,
-derives which cells are walls and where the goal is, and runs value iteration —
-flooding a value field outward from the goal through every traversable cell.
-The agent then walks the steepest-ascent path, which is the optimal route. None
-of that is hard-coded for a particular maze; press *New maze* and it solves a
-fresh one. The bars labelled "brain's prediction" are a separate, honest signal:
-the motor region's *learned* guess at each step, shown next to the optimal move
-so you can watch it agree more often as it learns.
+Neither, quite. Nothing is scripted, and nothing else plans or decides: a small
+8-region CTM brain looks at the 9×9 maze image (start in red, goal in green)
+through its retina and predicts a 20-step route over its internal ticks. The
+page draws that prediction tick by tick, with the true shortest route as a
+dashed reference line. No agent walks the maze and no solver corrects anything.
+
+It is early, and it usually does not solve the maze. On 200 random 9×9 mazes the
+default brain got the first step right in 199, matched the shortest route for
+about 4 of roughly 17 steps on average, and predicted a fully correct route in
+0 of 200. Most predictions end in a step into a wall, which the page marks.
+Earlier versions of the demo had a separate value-iteration planner pick every
+move; that planner is gone from the page.
 
 ## How does it "learn at inference" without backprop or forgetting?
 
@@ -86,20 +90,20 @@ the product of the presynaptic activity, the postsynaptic error (predicted move
 vs. the move actually taken), and a global neuromodulator (pain on a wall-hit,
 reward at the goal). No gradients flow backward through the network, no
 optimizer state accumulates — it is a local, momentum-free update applied as the
-agent moves. Forgetting is bounded two ways: only the small readout is plastic
+model acts. Forgetting is bounded two ways: only the small readout is plastic
 (the larger substrate stays fixed, the way a human cerebellum changes slowly
 while cortex adapts fast), and the weight change is clamped each step so the rule
-cannot blow up or drift far from the trained weights. *Reset learning* in the
-demo reverts the readout to those frozen weights.
+cannot blow up or drift far from the trained weights. This lives in the SDK; the
+/play demo does not run it — the brain there is fixed, trained weights.
 
 ## What does the brain actually "see" in the demo?
 
 Real model data, not a decorative render. The cyan grids in the 3D view are the
 literal feature maps coming out of the visual retina → V1 → V2 → V4 pathway for
-the current cell — the same tensors the rest of the brain reads. The coloured
+the current maze image — the same tensors the rest of the brain reads. The coloured
 dots are neurons, brightened when they spike that tick, and the lines are
-connectome edges lit when two regions fire together. If you pause on a step, what
-is on screen is what the network had to work with on that step.
+connectome edges lit when two regions fire together. If you scrub to a tick, what
+is on screen is the network's state and its predicted route at that tick.
 
 ## How do I get involved or get in touch?
 

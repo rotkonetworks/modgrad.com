@@ -89,6 +89,8 @@ nav.tabs a.on { color: var(--ink); border-color: var(--frame); background: var(-
 .panel svg.zoom { touch-action: pan-y; }
 .panel svg:focus { outline: none; }
 .panel .sub { font: 11px var(--mono); color: var(--muted); text-align: center; }
+.panel .sub.hint { visibility: hidden; }
+.panel:hover .sub.hint, .panel:focus-within .sub.hint, .bfocus .panel .sub.hint { visibility: visible; }
 table.legend { border-collapse: collapse; width: 100%; font: 11px var(--mono); margin-top: 2px; }
 table.legend td, table.legend th { padding: 0 4px; text-align: right; white-space: nowrap; }
 table.legend th { font-weight: 600; color: var(--muted); }

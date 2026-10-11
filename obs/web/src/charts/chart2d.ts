@@ -240,6 +240,7 @@ export function chart2d(parent: Element, o: Chart2DOpts): HTMLDivElement & { cha
     sub.textContent = view
       ? `showing ${xf(+x0.toPrecision(3))} to ${xf(+x1.toPrecision(3))}${view.y0 !== undefined ? `, y ${yf(+y0.toPrecision(3))} to ${yf(+y1.toPrecision(3))}` : ''}; double-click or Esc to reset`
       : 'drag to zoom, alt-drag box, shift-drag pan, click then wheel to zoom';
+    sub.classList.toggle('hint', !view); // the gesture hint shows on the chart in use, not under every chart
   }
 
   const me: Chart2D = {

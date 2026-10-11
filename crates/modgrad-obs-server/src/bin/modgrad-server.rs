@@ -210,5 +210,8 @@ async fn ssh_listener(args: &[String], root: &std::path::Path, state: &http::App
     let key = host_key(root).unwrap_or_else(|e| die(format!("ssh host key: {e}")));
     let lis = tokio::net::TcpListener::bind(&addr).await.unwrap_or_else(|e| die(format!("bind ssh {addr}: {e}")));
     eprintln!("modgrad-server: ssh on {addr} (host key {}; links to {public})", fingerprint(key.public_key()));
+    if flag("--public-url").is_none() && lis.local_addr().is_ok_and(|a| !a.ip().is_loopback()) {
+        eprintln!("modgrad-server: warning: ssh is reachable from other hosts but its links point at {public}; pass --public-url <https://your.host>");
+    }
     tokio::spawn(serve(lis, key, state.clone(), public, cfg));
 }

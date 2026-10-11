@@ -8,6 +8,7 @@ import { h, btn, svgEl } from '@/lib/dom';
 import { fmt, fmtTick, fmtTime, fmtStep } from '@/lib/fmt';
 import { PALETTE, cssv, hexToRgb, mixRgb } from '@/lib/color';
 import * as Dt from '@/logic/data';
+import { fitInWorker } from '@/logic/forecasts';
 import type { FitForecast, Forecast, Panel, QueryResult, RunEvent, Trace } from '@/logic/types';
 import { S } from '@/stores/runs';
 import {
@@ -39,6 +40,13 @@ const lastX = (t: { xs: ArrayLike<number> }): number => { for (let i = t.xs.leng
 const FC_LIVE_MS = 2000;
 const fcLast = new Map<string, { f: Forecast; at: number; n: number }>();
 const fcTimers = new Map<string, ReturnType<typeof setTimeout>>();
+/** one redraw per panel per frame when several worker fits land together */
+const fcRedraws = new Set<string>();
+function redrawSoon(id: string, redraw: () => void) {
+  if (fcRedraws.has(id)) return;
+  fcRedraws.add(id);
+  requestAnimationFrame(() => { fcRedraws.delete(id); redraw(); });
+}
 const niceRound = (v: number) => { const e = Math.pow(10, Math.floor(Math.log10(v)) - 1); return Math.round(v / e) * e; };
 
 export function drawPanel(c: DrawCtx): DrawOut {
@@ -84,7 +92,7 @@ export function drawPanel(c: DrawCtx): DrawOut {
       if (!p.view.fc.live && fr) f = fr;
       else {
         // keyed on what the fit reads (this trace's and the pooled traces' data), not on the query
-        // text: a display stage (log y, ema, colour, another series) must not refit (~0.3-0.8 s each)
+        // text: a display stage (log y, ema, colour, another series) must not refit (~10-35 ms each)
         // (the default horizon moves with the data, so only a horizon the viewer set is identity)
         const id = JSON.stringify([p.id, traceKey(t), fc.to || null, fc.method, p.view.fc.window, p.view.fc.band, p.view.fc.pool]);
         const ck = JSON.stringify([id, to, dataSig(t), pool.map(dataSig)]);
@@ -101,9 +109,17 @@ export function drawPanel(c: DrawCtx): DrawOut {
             f = prev.f;
             if (!fcTimers.has(p.id)) fcTimers.set(p.id, setTimeout(() => { fcTimers.delete(p.id); c.redraw!(); }, FC_LIVE_MS - (now - prev.at) + 20));
           } else {
-            f = Dt.forecastTrace(t, to, { method: fc.method, window: p.view.fc.window, band: p.view.fc.band, pool });
-            if (fcCache.size > 400) fcCache.clear();
-            fcCache.set(ck, f); fcLast.set(id, { f, at: now, n });
+            const opts = { method: fc.method, window: p.view.fc.window, band: p.view.fc.band, pool };
+            const keep = (r: Forecast) => { if (fcCache.size > 400) fcCache.clear(); fcCache.set(ck, r); fcLast.set(id, { f: r, at: Date.now(), n }); };
+            if (c.redraw) {
+              // fit in the worker; meanwhile draw this trace's last fit (or a "fitting" badge)
+              const redraw = c.redraw;
+              fitInWorker(ck, t, to, opts, (r) => { keep(r); redrawSoon(p.id, redraw); });
+              f = prev ? prev.f : { none: 'fitting…' };
+            } else {
+              f = Dt.forecastTrace(t, to, opts);
+              keep(f);
+            }
           }
         }
       }

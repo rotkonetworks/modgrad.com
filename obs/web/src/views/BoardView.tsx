@@ -40,17 +40,17 @@ export function BoardToolbar() {
         <option value="all">all metrics</option>
         <option value="blank">blank</option>
       </select></label>
-      <button type="button" title="rebuild the default board (auto, else history of the selected runs); undoable" aria-label="reset the board to default" onClick={resetDefault}>reset to default</button>
+      <button type="button" class="wideonly" title="rebuild the default board (auto, else history of the selected runs); undoable" aria-label="reset the board to default" onClick={resetDefault}>reset to default</button>
       <button type="button" disabled={!undoTop()} title={undoTop() ? `undo: ${undoTop()} (ctrl+z inside the board)` : 'nothing to undo'} aria-label={undoTop() ? `undo ${undoTop()}` : 'nothing to undo'} onClick={undo}>undo</button>
-      <button type="button" title="download this board as JSON" aria-label="export the board as JSON" onClick={exportBoard}>export</button>
-      <button type="button" title="load a board JSON file" aria-label="import a board JSON file" onClick={openImport}>import</button>
+      <button type="button" class="wideonly" title="download this board as JSON" aria-label="export the board as JSON" onClick={exportBoard}>export</button>
+      <button type="button" class="wideonly" title="load a board JSON file" aria-label="import a board JSON file" onClick={openImport}>import</button>
       <input ref={fileInput} type="file" accept=".json,application/json" style={{ display: 'none' }} aria-hidden="true" tabindex="-1"
         onChange={(e) => { const f = e.currentTarget.files && e.currentTarget.files[0]; if (f) importBoard(f); e.currentTarget.value = ''; }} />
-      <button type="button" title="command palette (Ctrl+K)" aria-label="open the command palette" onClick={() => setPaletteOpen(true)}>commands</button>
-      <button type="button" title="builder settings" aria-label="builder settings" onClick={(e) => openPopover(e.currentTarget, () => <SettingsPop />)}>settings</button>
-      <button type="button" classList={{ on: inspector() }} aria-pressed={inspector()} title="panel settings for the selected panel" aria-label="toggle the inspector" onClick={() => setInspector(!inspector())}>inspector</button>
-      <button type="button" classList={{ on: anomaliesOpen() }} aria-pressed={anomaliesOpen()} title="loss / grad-norm spikes and NaN/inf in the selected runs, with jump-to-step" aria-label="toggle the anomaly list" onClick={() => setAnomaliesOpen(!anomaliesOpen())}>anomalies</button>
-      <span class="msg">{board.panels.length} panel{board.panels.length === 1 ? '' : 's'}</span>
+      <button type="button" class="wideonly" title="command palette (Ctrl+K)" aria-label="open the command palette" onClick={() => setPaletteOpen(true)}>commands</button>
+      <button type="button" class="wideonly" title="builder settings" aria-label="builder settings" onClick={(e) => openPopover(e.currentTarget, () => <SettingsPop />)}>settings</button>
+      <button type="button" class="wideonly" classList={{ on: inspector() }} aria-pressed={inspector()} title="panel settings for the selected panel" aria-label="toggle the inspector" onClick={() => setInspector(!inspector())}>inspector</button>
+      <button type="button" class="wideonly" classList={{ on: anomaliesOpen() }} aria-pressed={anomaliesOpen()} title="loss / grad-norm spikes and NaN/inf in the selected runs, with jump-to-step" aria-label="toggle the anomaly list" onClick={() => setAnomaliesOpen(!anomaliesOpen())}>anomalies</button>
+      <span class="msg wideonly">{board.panels.length} panel{board.panels.length === 1 ? '' : 's'}</span>
     </div>
   );
 }

@@ -128,6 +128,8 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
     const p = model(); if (!p) return;
     openMenu(anchor, [
       { label: 'rename', run: rename },
+      { label: editing().has(id) ? 'close the text editor' : 'edit the query as text', run: () => toggleEditing(id) },
+      { label: p.view.follow ? 'pause following' : 'follow the newest data', run: () => toggleFollow(p) },
       { label: 'inspect (settings)', run: () => { setSelPanel(id); setInspector(true); } },
       { label: 'duplicate', run: () => duplicatePanel(p) },
       { label: 'move up', run: () => movePanel(p, 'up') },
@@ -196,14 +198,14 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
         <button type="button" class="bt" ref={(el) => { titleBtn = el; draggable(el, () => ({ type: 'panel', pid: id, label: `panel "${title()}"` })); }}
           title={`panel "${title()}": drag to reorder (drop on a panel edge) or merge (drop on its middle); double-click to rename`}
           aria-label={`panel ${title()}: drag to reorder or merge, double-click to rename`} onDblClick={rename}>{title()}</button>
-        <button type="button" class="mini" classList={{ on: props.panel.view.follow }} aria-pressed={props.panel.view.follow}
+        <button type="button" class="mini wideonly" classList={{ on: props.panel.view.follow }} aria-pressed={props.panel.view.follow}
           title={props.panel.view.follow ? 'following the newest data; click to pause' : 'follow the newest data (keeps the zoom width, slides to the end)'}
           aria-label="follow the newest data" onClick={() => { const p = model(); if (p) toggleFollow(p); }}>{props.panel.view.follow ? '|| follow' : '> follow'}</button>
-        <button type="button" class="mini" classList={{ on: editing().has(id) }} aria-pressed={editing().has(id)} title="edit the query as text" aria-label="edit the query as text" onClick={() => toggleEditing(id)}>text</button>
-        <button type="button" class="mini" title="panel settings in the inspector" aria-label="inspect panel settings" onClick={() => { setSelPanel(id); setInspector(true); }}>inspect</button>
+        <button type="button" class="mini wideonly" classList={{ on: editing().has(id) }} aria-pressed={editing().has(id)} title="edit the query as text" aria-label="edit the query as text" onClick={() => toggleEditing(id)}>text</button>
+        <button type="button" class="mini wideonly" title="panel settings in the inspector" aria-label="inspect panel settings" onClick={() => { setSelPanel(id); setInspector(true); }}>inspect</button>
         <button type="button" class="mini" title="panel menu" aria-label="panel menu" onClick={(e) => panelMenu(e.currentTarget)}>menu</button>
         <Show when={!props.inFocus}>
-          <button type="button" class="mini" title="expand this panel into the focus view" aria-label="expand this panel" onClick={() => openFocus(id)}>expand</button>
+          <button type="button" class="mini wideonly" title="expand this panel into the focus view" aria-label="expand this panel" onClick={() => openFocus(id)}>expand</button>
         </Show>
         <button type="button" class="mini" title={`delete panel "${title()}"`} aria-label={`delete panel ${title()}`} onClick={() => { const p = model(); if (p) deletePanel(p); }}>x</button>
       </div>

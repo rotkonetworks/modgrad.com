@@ -279,7 +279,15 @@ body.bdragging, body.bdragging * { cursor: grabbing !important; }
   body { padding: 8px 16px 32px; }
   input[type=range] { width: 120px; }
   .droptools .hint { display: none; }
+  /* secondary actions live in the header's "more" menu; tabs stay one (scrollable) row */
+  .wideonly { display: none !important; }
+  header.top { gap: 4px 8px; margin-bottom: 6px; }
+  nav.tabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  nav.tabs a { padding: 4px 7px 3px; white-space: nowrap; flex: none; }
+  .btool { margin-bottom: 4px; gap: 6px; }
+  .btool select { width: 8.5em; }
 }
+@media (min-width: 601px) { .narrowonly { display: none !important; } }
 
 /* board panels share the row: as many ~420px+ columns as fit, each stretching */
 .bcanvas .panel { max-width: none; }

@@ -1,0 +1,2 @@
+{"step":0,"t":0.0,"text":"LlmWeights (safetensors): loaded 290 tensors, 1308 MB host RAM"}
+{"step":0,"t":0.0,"text":"hf_llama: safetensors → f32 in 1.0s"}

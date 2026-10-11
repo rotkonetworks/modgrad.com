@@ -1,0 +1,96 @@
+modgrad-obs ingest API v1
+=========================
+
+$OBS is the server URL (e.g. http://127.0.0.1:8794). $OBS_TOKEN is a bearer token.
+Bodies are JSON whatever the Content-Type, so plain `curl -d` works. NDJSON
+(one JSON object per line) is accepted wherever an array of rows is.
+
+Quick start (no account)
+------------------------
+  curl -X POST $OBS/api/v1/projects
+      -> {"project": "anon-…", "token": "obsp_…", "board": "<url>", "claim": "<url>", "expires_unix": …}
+  curl -X POST $OBS/api/v1/runs/my-run/log -H "Authorization: Bearer $OBS_TOKEN" -d '{"loss": 0.52}'
+      -> {"run": "anon-…/my-run", "created": true, "dashboard": "<url>", "rows": 1, …}
+  Open the board URL; the graph updates live.
+
+Tokens
+------
+  Authorization: Bearer <token>
+  obsp_…  project token: creates and writes any run in its project. A run id
+          without "/" is put in the project: "my-run" -> "<project>/my-run".
+  obsr_…  run token: writes one run. Returned once, when a run is created.
+  Anonymous project tokens expire (default 30 days, see expires_unix).
+  Dev servers (obs-server --dev) also accept writes without a token.
+  Reads need no token. Anonymous projects are listed only by their board URL.
+
+Write
+-----
+  POST /api/v1/projects
+      New anonymous project. No body, no auth.
+
+  POST /api/v1/runs/<id>/log
+      Log to run <id>. The run is created on first write (no create call needed).
+      Body is one of:
+        a row        {"step": 10, "loss": 0.52, "acc": "71.5%"}
+        many rows    [{"step": 10, "loss": 0.52}, {"step": 11, "loss": 0.50}]   (or NDJSON)
+        an envelope  {"rows": [...], "events": ["checkpoint saved"], "config": {"lr": 3e-4},
+                      "summary": {"best_loss": 0.4}, "finish": true | {"exit_code": 0}}
+      Row rules:
+        step     optional; missing = one past the run's last step (0 for a new run).
+                 "_step" (W&B) is accepted too. Must be a non-negative integer.
+        t        optional seconds since run start; default = server arrival time.
+        values   numbers, or numeric strings ("3.4", "7.5%", "1e-3"); null, "nan",
+                 "inf" are stored as gaps; true/false = 1/0.
+                 Nested objects are flattened with "/": {"train": {"loss": 1}} -> "train/loss".
+                 {"histogram": {"edges": [...], "counts": [...]}} and
+                 {"tensor": {"shape": [...], "data": [...]}} are arrays.
+                 Other values (text) are skipped and listed under "ignored".
+      Idempotent: re-sending a row is harmless. Rows are append-only on disk and
+      every read merges rows by step, last write wins per (step, key).
+      Response: {"run", "created", "dashboard", "rows", "events", "finished", "token"?, "ignored"?}
+
+  POST /api/v1/runs/<id>/text
+      Raw log text (e.g. a training script's stdout). Each line is parsed for
+      metrics ("step 1250: loss 3.48 acc 7.5%", "iter 100 | loss=2.31 | lr 3e-4",
+      "[epoch 2/10] train_loss: 0.45", tqdm postfixes, {'loss': 0.4} dicts).
+      A line without a step takes the last step seen in the same body, else "next".
+      ?events=unparsed also stores the lines without metrics as events.
+      Response: {"run", "dashboard", "lines", "rows", "unparsed", "unparsed_sample"}
+
+  POST /api/v1/runs/<id>/finish
+      Optional body: an object merged into the run summary, e.g. {"exit_code": 0}.
+
+  POST /api/v1/runs
+      Explicit create, optional: {"name"?, "project"?, "config"?, "meta"?: {"git", "hostname", …}}.
+      201 {"run", "token", "dashboard", "log", "text"} for a new run, 200 for a resume.
+      Without a name the id is run-<UTC yyyymmdd-hhmmss>-<4 hex>.
+
+  Run ids: 1 to 3 "/"-separated segments of [A-Za-z0-9_.-]. Write them plainly
+  in the URL (/api/v1/runs/proj/run-1/log) or with "/" as %2F.
+
+Read
+----
+  GET /api/index[?project=<p>]                    run list (same schema as the static index.json)
+  GET /api/v1/runs/<id>/history?keys=a,b&from=&to=&stride=
+                                                  {"steps", "t", "columns": {key: [...]}}
+  GET /api/v1/runs/<id>/config | /summary | /events
+  GET /api/runs/<id %2F-encoded>/metrics/<key>?max_points=N   {"step": [...], "value": [...]}
+
+Live (Server-Sent Events)
+-------------------------
+  GET /api/v1/stream[?runs=a,b | ?project=<p>]    all public runs, some runs, or one project
+  GET /api/v1/runs/<id>/stream                    one run
+  Events (data is JSON, always with "run" and "unix" except hello):
+    hello    {"runs": [{"run", "finished", "updated_unix"}], "unix"}
+    run      {"entry": <index entry>}            a run appeared
+    rows     {"rows": [{"step", "t", key: value, ...}]}
+    events   {"events": [{"step", "t", "text"}]}
+    summary  {"finished", "summary"}
+    resync   {}                                  you fell behind: refetch
+
+Errors
+------
+  Every error is JSON {"error", "example", "help", "message"}: what was wrong, a
+  corrected request, and both as one plain-text paragraph.
+  400 bad body, 401 missing/unknown/expired token, 403 token does not cover
+  this run, 409 run exists with its own token, 503/504 overloaded (retry).

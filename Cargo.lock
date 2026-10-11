@@ -4885,12 +4885,15 @@ dependencies = [
 name = "modgrad-obs-server"
 version = "0.1.0"
 dependencies = [
+ "async-stream",
  "axum",
  "base64 0.22.1",
+ "futures-util",
  "modgrad-obs",
  "proptest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
  "tokio",
  "tower 0.5.3",

@@ -19,11 +19,19 @@ use tower::{Layer, Service, ServiceBuilder, ServiceExt};
 
 #[derive(Debug, Clone)]
 pub enum IngestRequest {
-    CreateRun { name: String, project: Option<String>, config: Value },
+    CreateRun { name: String, project: Option<String>, config: Value, meta: Option<Value> },
     Log { run: String, step: u64, t: Option<f64>, items: Vec<(String, Item)> },
     LogArray { run: String, step: u64, t: Option<f64>, key: String, kind: String, shape: Vec<usize>, data: Vec<f32>, labels: Option<Vec<f32>> },
     Event { run: String, step: u64, t: Option<f64>, text: String },
+    /// Several records for one run, kept in order and committed in one
+    /// batch with one reply (what the v1 HTTP API sends; order matters for
+    /// [`crate::state::AUTO_STEP`]).
+    Rows { run: String, records: Vec<Record> },
     Finish { run: String, summary: Value },
+    /// Mid-run summary merge (barrier, like `Finish`).
+    Summary { run: String, summary: Value },
+    /// Config merge (barrier).
+    Config { run: String, config: Value },
 }
 
 impl IngestRequest {
@@ -33,21 +41,31 @@ impl IngestRequest {
             IngestRequest::Log { .. } => "log",
             IngestRequest::LogArray { .. } => "log_array",
             IngestRequest::Event { .. } => "event",
+            IngestRequest::Rows { .. } => "rows",
             IngestRequest::Finish { .. } => "finish",
+            IngestRequest::Summary { .. } => "summary",
+            IngestRequest::Config { .. } => "config",
         }
     }
     pub fn run(&self) -> &str {
         match self {
             IngestRequest::CreateRun { name, .. } => name,
-            IngestRequest::Log { run, .. } | IngestRequest::LogArray { run, .. } | IngestRequest::Event { run, .. } | IngestRequest::Finish { run, .. } => run,
+            IngestRequest::Log { run, .. }
+            | IngestRequest::LogArray { run, .. }
+            | IngestRequest::Event { run, .. }
+            | IngestRequest::Rows { run, .. }
+            | IngestRequest::Finish { run, .. }
+            | IngestRequest::Summary { run, .. }
+            | IngestRequest::Config { run, .. } => run,
         }
     }
-    /// Split into (run, record) for batchable requests.
-    fn into_record(self) -> Result<(String, Record), IngestRequest> {
+    /// Split into (run, records) for batchable requests.
+    fn into_records(self) -> Result<(String, Vec<Record>), IngestRequest> {
         match self {
-            IngestRequest::Log { run, step, t, items } => Ok((run, Record::Log { step, t, items })),
-            IngestRequest::LogArray { run, step, t, key, kind, shape, data, labels } => Ok((run, Record::Array { step, t, key, kind, shape, data, labels })),
-            IngestRequest::Event { run, step, t, text } => Ok((run, Record::Event { step, t, text })),
+            IngestRequest::Log { run, step, t, items } => Ok((run, vec![Record::Log { step, t, items }])),
+            IngestRequest::LogArray { run, step, t, key, kind, shape, data, labels } => Ok((run, vec![Record::Array { step, t, key, kind, shape, data, labels }])),
+            IngestRequest::Event { run, step, t, text } => Ok((run, vec![Record::Event { step, t, text }])),
+            IngestRequest::Rows { run, records } => Ok((run, records)),
             other => Err(other),
         }
     }
@@ -59,6 +77,8 @@ pub enum IngestResponse {
     /// The record is on disk (its batch committed).
     Accepted,
     Finished { run: String },
+    /// A summary or config merge committed.
+    Updated { run: String },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -137,14 +157,14 @@ struct Pending {
 }
 
 impl Pending {
-    fn push(&mut self, run: String, rec: Record, reply: Reply) {
+    fn push(&mut self, run: String, recs: Vec<Record>, reply: Reply) {
         if !self.by_run.contains_key(&run) {
             self.order.push(run.clone());
         }
         let e = self.by_run.entry(run).or_default();
-        e.0.push(rec);
+        self.items += recs.len().max(1);
+        e.0.extend(recs);
         e.1.push(reply);
-        self.items += 1;
     }
     async fn flush<S>(&mut self, state: &mut S)
     where
@@ -175,19 +195,25 @@ where
         let deadline = tokio::time::Instant::now() + cfg.max_latency;
         loop {
             let Some((req, reply)) = next.take() else { break };
-            match req.into_record() {
-                Ok((run, rec)) => pending.push(run, rec, reply),
+            match req.into_records() {
+                Ok((run, recs)) => pending.push(run, recs, reply),
                 Err(barrier) => {
                     pending.flush(&mut state).await;
                     let res = match barrier {
-                        IngestRequest::CreateRun { name, project, config } => {
-                            call_state(&mut state, StateRequest::CreateRun { name, project, config }).await.map(|r| match r {
+                        IngestRequest::CreateRun { name, project, config, meta } => {
+                            call_state(&mut state, StateRequest::CreateRun { name, project, config, meta }).await.map(|r| match r {
                                 StateResponse::Created { run } => IngestResponse::Created { run },
                                 _ => IngestResponse::Accepted,
                             })
                         }
                         IngestRequest::Finish { run, summary } => {
                             call_state(&mut state, StateRequest::Finish { run: run.clone(), summary }).await.map(|_| IngestResponse::Finished { run })
+                        }
+                        IngestRequest::Summary { run, summary } => {
+                            call_state(&mut state, StateRequest::Summary { run: run.clone(), summary }).await.map(|_| IngestResponse::Updated { run })
+                        }
+                        IngestRequest::Config { run, config } => {
+                            call_state(&mut state, StateRequest::Config { run: run.clone(), config }).await.map(|_| IngestResponse::Updated { run })
                         }
                         _ => unreachable!(),
                     };

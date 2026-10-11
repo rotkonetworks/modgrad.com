@@ -75,6 +75,10 @@ impl ReadState {
     pub fn snapshot(&self) -> Arc<Snapshot> {
         self.rx.borrow().clone()
     }
+    /// A receiver that wakes on every published snapshot (for [`crate::Live`]).
+    pub fn subscribe(&self) -> watch::Receiver<Arc<Snapshot>> {
+        self.rx.clone()
+    }
 }
 
 fn load(c: &RunCommit) -> Result<RunData, ReadError> {

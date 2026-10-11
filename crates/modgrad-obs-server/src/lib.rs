@@ -5,21 +5,29 @@
 //! * [`ReadState`] — clonable reads over immutable snapshots.
 //! * [`ingest_service`] — the client write API with batching and load
 //!   shedding layers.
-//! * [`http`] — a thin axum adapter translating HTTP into these requests.
+//! * [`http`] — a thin axum adapter translating HTTP into these requests;
+//!   [`v1`] is the documented, authenticated ingest API on top of it.
+//! * [`Authed`] — write tokens in front of the ingest stack.
+//! * [`Live`] — the change feed behind the SSE endpoints.
 //!
 //! The server stores and selects; all analysis runs in the browser (wasm).
 
+pub mod auth;
 pub mod error;
 pub mod http;
 pub mod ingest;
+pub mod live;
 pub mod read;
 pub mod state;
+pub mod v1;
 pub mod wire;
 
+pub use auth::{Auth, AuthError, Authed, AuthedRequest, AuthedResponse};
+pub use live::{Live, LiveKind, LiveMsg};
 pub use error::{BoxError, IngestError, ReadError, StateError};
 pub use ingest::{BatchConfig, BatchLayer, Batcher, IngestConfig, IngestRequest, IngestResponse, IngestService, TraceLayer, ingest_service};
 pub use read::{ArrayBlock, HistoryBlock, ReadRequest, ReadResponse, ReadState};
-pub use state::{Record, RunCommit, Snapshot, State, StateRequest, StateResponse, valid_run_name};
+pub use state::{AUTO_STEP, Record, RunCommit, Snapshot, State, StateRequest, StateResponse, valid_run_name};
 
 /// Open a store and wire the services: `State` behind a `Buffer`, the
 /// ingest stack on top, and a `ReadState` on the snapshot channel.

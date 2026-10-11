@@ -1,12 +1,17 @@
-import { createMemo, createResource, createSignal, For, Show } from 'solid-js';
+import { createEffect, createMemo, createResource, createSignal, For, Show } from 'solid-js';
 import { fmt } from '@/lib/fmt';
 import { S, runsVersion, selection, setSelection, eventsOf, fmtConfig } from '@/stores/runs';
 import { liveBadge } from '@/stores/live';
-import type { Run } from '@/logic/types';
+import { lineage, parentDraft, setParentDraft } from '@/stores/lineage';
+import { openLineage, setRunParent } from '@/stores/board';
+import { draggable } from '@/board/dnd';
+import { lineageOf, resolveRun } from '@/logic/data';
+import { STAGE_NAMES } from '@/logic/board';
+import type { Lineage, Run } from '@/logic/types';
 
 type Col = [string, ((r: Run) => string | number) | null];
 const COLS: Col[] = [
-  ['', null], ['id', (r) => r.id], ['source', (r) => r.source], ['project', (r) => r.project || ''],
+  ['', null], ['id', (r) => r.id], ['continues from', (r) => lineageOf(r, lineage())?.parent || ''], ['source', (r) => r.source], ['project', (r) => r.project || ''],
   ['last step', (r) => r.last_step ?? -1], ['brain params', (r) => (typeof r.config.brain_params === 'number' ? r.config.brain_params : NaN)],
   ['metrics', (r) => Object.keys(r.metrics).length], ['arrays', (r) => Object.keys(r.arrays).length],
   ['state', (r) => (r.finished ? 'finished' : 'running/died')], ['unparsed', (r) => r.unparsed.length],
@@ -21,7 +26,10 @@ const [filter, setFilter] = createSignal('');
 const [sort, setSort] = createSignal<{ k: string; dir: number }>({ k: 'id', dir: 1 });
 const [detail, setDetail] = createSignal<string | null>(null);
 
-/** the runs table: filter, sort, select (feeds presets and the other tabs), details */
+/** "parent@step (stage)" for the lineage column */
+const lineageText = (l: Lineage): string => `${l.parent}${typeof l.step === 'number' ? '@' + fmt(l.step) : ''}${l.stage ? ` (${l.stage})` : ''}`;
+
+/** the runs table: filter, sort, select (feeds presets and the other tabs), lineage, details */
 export default function RunsView() {
   const rows = createMemo(() => {
     runsVersion(); selection();
@@ -37,6 +45,7 @@ export default function RunsView() {
         <button type="button" title="clear the selection" aria-label="clear the run selection" onClick={() => setSelection((s) => s.clear())}>clear</button>
         <span class="note">{selection().size} of {(runsVersion(), S.runs.length)} selected, {rows().length} shown</span>
       </div>
+      <Show when={parentDraft()} keyed>{(d) => <ParentEditor run={d.run} parent={d.parent} />}</Show>
       <div class="tablewrap"><table class="runs">
         <thead><tr>
           <For each={COLS}>{([name, f]) => (
@@ -50,6 +59,9 @@ export default function RunsView() {
         <tbody>
           <For each={rows()}>{(r) => {
             const b = () => liveBadge(r.id);
+            const lin = () => lineageOf(r, lineage());
+            // a run with a parent or with children has a lineage to show
+            const inLineage = () => { runsVersion(); const l = lineage(); return !!lin() || S.runs.some((o) => { const p = lineageOf(o, l); return !!p && resolveRun(S.runs, p.parent) === r; }); };
             return (
               <tr data-run={r.id}>
                 <td><input type="checkbox" checked={selection().has(r.id)} aria-label={'select run ' + r.id} onChange={(e) => { const on = e.currentTarget.checked; setSelection((s) => { if (on) s.add(r.id); else s.delete(r.id); }); }} /></td>
@@ -58,6 +70,15 @@ export default function RunsView() {
                   <Show when={r.config.synthetic}> <span class="tag">synthetic</span></Show>
                   <Show when={r.local}> <span class="tag" title="parsed in this browser from a dropped file; not uploaded">local</span></Show>
                   <Show when={b().text}><span class="live-badge" classList={{ on: b().on }} title={b().title}>{b().text}</span></Show>
+                </td>
+                <td class="lin">
+                  <Show when={lin()}>{(l) => <span title={lineage()[r.id] ? 'set in this browser (saved with the board)' : 'from the run config'}>{lineageText(l())}{lineage()[r.id] ? ' ' : ''}<Show when={lineage()[r.id]}><span class="tag">board</span></Show> </span>}</Show>
+                  <Show when={inLineage()}>
+                    <button type="button" class="mini" title={`new panel: the loss of ${r.id} and all its ancestors on one axis`} aria-label={'whole lineage of ' + r.id} onClick={() => openLineage(r.id)}>whole lineage</button>
+                  </Show>
+                  <button type="button" class="mini" ref={(el) => draggable(el, () => ({ type: 'run', run: r.id, label: r.id }))}
+                    title={`set the run ${r.id} continues from; or drag this onto another run's row`} aria-label={'set parent of ' + r.id}
+                    onClick={() => setParentDraft({ run: r.id, parent: lin()?.parent ?? null })}>set parent</button>
                 </td>
                 <td>{r.source}</td><td>{r.project || ''}</td>
                 <td class="num">{(runsVersion(), r.last_step ?? '-')}</td>
@@ -73,6 +94,47 @@ export default function RunsView() {
       </table></div>
       <Show when={detail() ? S.byId.get(detail()!) : undefined} keyed>{(r) => <Details run={r} />}</Show>
     </section>
+  );
+}
+
+/** "<run> continues from <parent> at step <n>, stage <s>": the browser-side lineage of one run */
+function ParentEditor(props: { run: string; parent: string | null }) {
+  const cur = () => lineage()[props.run] || null;
+  const own = () => { const r = S.byId.get(props.run); return r ? lineageOf(r) : null; };
+  const [parent, setParent] = createSignal(props.parent || '');
+  const [step, setStep] = createSignal('');
+  const [stage, setStage] = createSignal('');
+  createEffect(() => {
+    // prefill from what the run has now (browser lineage over its config); a dragged parent wins
+    const l = cur() || own();
+    if (l && (!props.parent || props.parent === l.parent) && typeof l.step === 'number') setStep(String(l.step));
+    setStage((l && l.stage) || '');
+  });
+  const pr = () => S.byId.get(parent());
+  const save = () => {
+    const p = parent(); if (!p) return;
+    const st = step().trim() === '' ? null : Number(step());
+    if (st !== null && !Number.isFinite(st)) return;
+    setRunParent(props.run, { parent: p, ...(st !== null ? { step: st } : {}), ...(stage() ? { stage: stage() } : {}) });
+    setParentDraft(null);
+  };
+  return (
+    <div class="lineage-edit" role="group" aria-label={'set the parent of ' + props.run}>
+      <span><b>{props.run}</b> continues from</span>
+      <select aria-label="parent run" value={parent()} onChange={(e) => { setParent(e.currentTarget.value); setStep(''); }}>
+        <option value="">(choose a run)</option>
+        <For each={(runsVersion(), S.runs.filter((r) => r.id !== props.run))}>{(r) => <option value={r.id}>{r.id}</option>}</For>
+      </select>
+      <label>at step <input type="number" min="0" size="8" aria-label="parent step" placeholder={pr() && typeof pr()!.last_step === 'number' ? `last (${pr()!.last_step})` : 'last'} value={step()} onInput={(e) => setStep(e.currentTarget.value)} /></label>
+      <label>stage <select aria-label="stage" value={stage()} onChange={(e) => setStage(e.currentTarget.value)}>
+        <option value="">(none)</option>
+        <For each={[...new Set([...STAGE_NAMES, ...(stage() ? [stage()] : [])])]}>{(s) => <option value={s}>{s}</option>}</For>
+      </select></label>
+      <button type="button" class="mini" disabled={!parent()} title="save: stored in the board (exported with it), not on the server" aria-label="save the parent" onClick={save}>save</button>
+      <Show when={cur()}><button type="button" class="mini" title="remove the parent set in this browser" aria-label="clear the parent set in this browser" onClick={() => { setRunParent(props.run, null); setParentDraft(null); }}>clear</button></Show>
+      <button type="button" class="mini" title="close without changes" aria-label="cancel" onClick={() => setParentDraft(null)}>cancel</button>
+      <Show when={own() && !cur()}><span class="note">its config says {lineageText(own()!)}; saving overrides that on this board</span></Show>
+    </div>
   );
 }
 

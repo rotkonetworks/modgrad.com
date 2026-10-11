@@ -9,7 +9,7 @@ import { fmt, fmtTick, fmtTime, fmtStep } from '@/lib/fmt';
 import { PALETTE, cssv, hexToRgb, mixRgb } from '@/lib/color';
 import * as Dt from '@/logic/data';
 import { fitInWorker } from '@/logic/forecasts';
-import type { FitForecast, Forecast, Panel, QueryFix, QueryResult, RunEvent, Trace } from '@/logic/types';
+import type { FitForecast, Forecast, Panel, QueryFix, QueryResult, RunEvent, StitchSpan, Trace } from '@/logic/types';
 import { S } from '@/stores/runs';
 import {
   fcCache, fcHist, fresh, hiddenTrace, settings, commit, setStage, placeTarget, soloTrace, toggleY2, removeTrace, pauseFollow,
@@ -164,7 +164,10 @@ export function drawPanel(c: DrawCtx): DrawOut {
     if (Number.isFinite(lo)) yrange = [lo, hi];
   }
   const wrap = split ? h('div', { class: 'bcells' }, host) : host;
-  const group = split ? 'bsplit:' + p.id : settings.linkX ? 'b:' + meta.x_label : `b:${meta.x_label}:${p.id}`;
+  // a stitched axis is a different coordinate from an unstitched one of the same name: never linked
+  const stitch = meta.stitch && meta.stitch.length ? meta.stitch : null;
+  const xkey = meta.x_label + (stitch ? ':stitch' : '');
+  const group = split ? 'bsplit:' + p.id : settings.linkX ? 'b:' + xkey : `b:${xkey}:${p.id}`;
   // follow: keep the zoom width, slide the window to the newest x
   if (p.view.follow) {
     const g = zoomGroup(group);
@@ -189,6 +192,8 @@ export function drawPanel(c: DrawCtx): DrawOut {
         band: t.band ? { lo: t.lo, hi: t.hi } : null, hidden: hiddenTrace(p, t), y2: p.view.y2 === t.label,
         ghost: f && f.none === undefined ? { xs: f.xs, ys: f.ys, lo: f.lo, hi: f.hi } : null,
         fresh: t.runs.some((r) => now - (fresh.get(p.id + '\u0001' + r) || 0) < 20000),
+        // stitched: the axis is the lineage's; the run's own step is in the hover
+        note: stitch ? (k: number) => `own step ${fmtStep(t.steps[k])}` : undefined, ownRange: !!stitch,
       };
     });
     if (!series.length) continue;
@@ -201,7 +206,7 @@ export function drawPanel(c: DrawCtx): DrawOut {
       legendHead: series.length > 6 ? `${series.length} series` : '',
       decorateLegend: (tbl, ss) => decorateLegend(p.id, tbl, ss, cbox),
       onview: () => { const mp = findPanel(p.id); if (mp && mp.view.follow) pauseFollow(mp); },
-      overlay: (api) => drawOverlay(p, api, series as unknown as ChartSeries[], fcs, isStep, fc, c.events),
+      overlay: (api) => drawOverlay(p, api, series as unknown as ChartSeries[], fcs, isStep, fc, c.events, stitch),
     });
   }
   if (key) {
@@ -227,6 +232,7 @@ export function drawPanel(c: DrawCtx): DrawOut {
     }
     if (p.view.fc.window) h('div', { class: 'bnote' }, foot, `forecast fitted on step ${Math.abs(p.view.fc.window[0]) < 1e300 ? fmtStep(p.view.fc.window[0]) : 'start'} to ${Math.abs(p.view.fc.window[1]) < 1e300 ? fmtStep(p.view.fc.window[1]) : 'end'}`);
   } else if (meta.forecast && !isStep) h('div', { class: 'bnote' }, foot, 'forecasts are drawn on the step axis only');
+  if (stitch) h('div', { class: 'bnote' }, foot, `stitched: each run starts where its parent forked (${stitch.length} run${stitch.length === 1 ? '' : 's'}; ${stitch.filter((s) => s.parent).length} boundar${stitch.filter((s) => s.parent).length === 1 ? 'y' : 'ies'}); hover shows a run's own step`);
   if (meta.downsampled) h('div', { class: 'bnote' }, foot, `long series block-averaged to ${MAX_POINTS} points (longest ${meta.downsampled}); legend statistics are over block means`);
   for (const w of meta.warnings) h('div', { class: 'bnote' }, foot, w);
   fixLine(p.id, meta.fixes, foot);
@@ -323,7 +329,7 @@ function decorateLegend(pid: string, tbl: HTMLTableElement | null, ss0: ChartSer
 }
 
 /** overlay: event and spike markers, previous forecasts, and the forecast handles */
-function drawOverlay(p: Panel, api: OverlayApi, series: ChartSeries[], fcs: Map<string, Forecast>, isStep: boolean, fc: { to?: number | null; method?: string } | null, events: Map<string, RunEvent[]>): void {
+function drawOverlay(p: Panel, api: OverlayApi, series: ChartSeries[], fcs: Map<string, Forecast>, isStep: boolean, fc: { to?: number | null; method?: string } | null, events: Map<string, RunEvent[]>, stitch: StitchSpan[] | null): void {
   const { g, X, Y, L, T, pw, ph, x0, x1, ty } = api;
   const el = <K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<string, string | number>, parent: Element = g) => svgEl(tag, attrs, parent);
   const clipX = (px: number) => Math.min(L + pw, Math.max(L, px));
@@ -331,9 +337,12 @@ function drawOverlay(p: Panel, api: OverlayApi, series: ChartSeries[], fcs: Map<
   const dataX = (px: number) => x0 + ((px - L) / pw) * (x1 - x0);
   const dataY = (py: number) => { const v = api.y0 + ((T + ph - py) / ph) * (api.y1 - api.y0); return ty(10) === 1 ? Math.pow(10, v) : v; };
   const vis = (series as DSeries[]).filter((s) => !s.hidden);
+  if (stitch) drawStages(api, stitch);
   if (isStep && settings.events) {
+    // on a stitched axis a run's events move with it
+    const shift = new Map((stitch || []).map((s) => [s.run, s.step_off]));
     const evs = new Map<number, string[]>();
-    for (const s of vis) for (const r of s.trace.runs) for (const e of events.get(r) || []) { const k = e.step; if (!evs.has(k)) evs.set(k, []); evs.get(k)!.push(`${r}: ${e.text}`); }
+    for (const s of vis) for (const r of s.trace.runs) for (const e of events.get(r) || []) { const k = e.step + (shift.get(r) || 0); if (!evs.has(k)) evs.set(k, []); evs.get(k)!.push(`${r}: ${e.text}${shift.get(r) ? ` (own step ${e.step})` : ''}`); }
     for (const [step, texts] of evs) {
       const px = X(step); if (!inPlot(px)) continue;
       el('line', { x1: px, x2: px, y1: T, y2: T + ph, style: 'stroke:var(--c4);stroke-width:1;stroke-dasharray:1 3;pointer-events:none' });
@@ -405,6 +414,31 @@ function drawOverlay(p: Panel, api: OverlayApi, series: ChartSeries[], fcs: Map<
     const tt = el('text', { x: L + 6, y: T + 12, style: 'font:10px var(--mono);fill:var(--accent);pointer-events:none' }); tt.textContent = '+ target';
     el('title', {}, trr).textContent = 'place a target line for an ETA readout (also in the forecast settings)';
     trr.addEventListener('click', () => placeTarget(findPanel(p.id)!));
+  }
+}
+/** `| stitch`: a shaded band per run whose depth in the lineage is odd (under the lines), a dashed
+ *  boundary where a run leaves its parent, and the stage name at the top of each run's span */
+function drawStages(api: OverlayApi, spans: StitchSpan[]): void {
+  const { g, svg, X, L, T, pw, ph } = api;
+  const byRun = new Map(spans.map((s) => [s.run, s]));
+  const depth = (s: StitchSpan) => { let d = 0; const seen = new Set<string>(); for (let c: StitchSpan | undefined = s; c && c.parent && !seen.has(c.run); c = byRun.get(c.parent)) { seen.add(c.run); d++; } return d; };
+  // bands go into the chart layer before the clipped plot group, so lines stay on top
+  const plot = svg.querySelector(':scope > g > g[clip-path]');
+  const under = plot ? svgEl('g', { style: 'pointer-events:none' }) : g;
+  if (plot) plot.parentNode!.insertBefore(under, plot);
+  const rows: number[] = []; // right edge of the last label in each text row
+  for (const s of [...spans].filter((s) => Number.isFinite(s.x0) && Number.isFinite(s.x1)).sort((a, b) => a.x0 - b.x0)) {
+    const a = Math.max(L, X(s.x0)), b = Math.min(L + pw, X(s.x1));
+    if (b < L || a > L + pw) continue;
+    if (depth(s) % 2 === 1) svgEl('rect', { x: a, y: T, width: Math.max(0, b - a), height: ph, style: 'fill:var(--rule);fill-opacity:0.5' }, under);
+    if (s.parent && X(s.x0) >= L) svgEl('line', { x1: a, x2: a, y1: T, y2: T + ph, style: 'stroke:var(--muted);stroke-width:1;stroke-dasharray:3 3', 'shape-rendering': 'crispEdges' }, under);
+    const w = 6.2 * s.stage.length + 6, lx = Math.max(L, Math.min(a, L + pw - w)); // a label near the right edge stays inside
+    let row = rows.findIndex((r) => r < lx); if (row < 0) { row = rows.length; rows.push(0); }
+    if (row > 3) continue;
+    rows[row] = lx + w;
+    const t = svgEl('text', { x: lx + 3, y: T + 11 + row * 11, style: 'font:10px var(--mono);fill:var(--muted);paint-order:stroke;stroke:var(--bg);stroke-width:3px;stroke-linejoin:round' }, g);
+    t.textContent = s.stage;
+    svgEl('title', {}, t).textContent = `${s.run}: ${s.stage}${s.parent ? `, continues ${s.parent}` : ''}`;
   }
 }
 /** drag an SVG handle with pointer capture; onMove(pt) returns the value, onEnd(value) commits */

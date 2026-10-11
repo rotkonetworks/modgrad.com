@@ -10,6 +10,7 @@ import { fmt, nums } from '@/lib/fmt';
 import type { ArrayFile, Index, Run, RunEvent } from '@/logic/types';
 import { catalogText } from '@/logic/data';
 import { dataURL } from '@/lib/base';
+import { lineage } from '@/stores/lineage';
 
 export const S = { api: false, dev: false, index: null as Index | null, runs: [] as Run[], byId: new Map<string, Run>() };
 
@@ -17,11 +18,12 @@ const [runsVersion, setRunsVersion] = createSignal(0);
 const [catalogVersion, setCatalogVersion] = createSignal(0);
 export { runsVersion, catalogVersion };
 export const touchRuns = (): void => { setRunsVersion((v) => v + 1); };
-let catalogCache: { v: number; text: string } = { v: -1, text: '' };
-/** the query catalog (tab-separated), recomputed when the catalog version changes */
+let catalogCache: { v: number; l: unknown; text: string } = { v: -1, l: null, text: '' };
+/** the query catalog (tab-separated), recomputed when the catalog version or the browser-set
+ *  lineage (stores/lineage.ts) changes */
 export function catalog(): string {
-  const v = catalogVersion();
-  if (catalogCache.v !== v) catalogCache = { v, text: catalogText(S.runs) };
+  const v = catalogVersion(), l = lineage();
+  if (catalogCache.v !== v || catalogCache.l !== l) catalogCache = { v, l, text: catalogText(S.runs, l) };
   return catalogCache.text;
 }
 function bumpCatalog(): void { setCatalogVersion((v) => v + 1); setRunsVersion((v) => v + 1); }

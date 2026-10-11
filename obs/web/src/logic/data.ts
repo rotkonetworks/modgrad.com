@@ -1,20 +1,52 @@
 // Series resolution, query evaluation and forecast/ETA computations: pure functions, no DOM. The
 // wasm module does the numeric work; loaders are injected so this runs the same in a worker.
 import { A } from '@/lib/wasm';
-import type { FitForecast, Forecast, QueryMeta, QueryResult, Run, Trace } from '@/logic/types';
+import type { FitForecast, Forecast, Lineage, QueryMeta, QueryResult, Run, Trace } from '@/logic/types';
 
 export const STATS = ['mean', 'min', 'max', 'rms'];
 /** pseudo-metric in the query catalog for runs with text samples: `samples:text{run=...}` is a samples panel */
 export const SAMPLES_METRIC = 'samples:text';
 const clean = (s: unknown) => String(s).replace(/[\t\n\r]/g, ' ');
 
-/** the catalog the query engine matches against (see query.rs Catalog) */
-export function catalogText(runs: Run[]): string {
+/** config keys that say where a run started (query.rs "Lineage") */
+export const LINEAGE_KEYS = ['parent_run', 'parent_step', 'parent_tokens', 'stage'];
+/** a run's lineage: the browser's (board) over its own config; null when it names no parent */
+export function lineageOf(r: Run, set?: Record<string, Lineage>): Lineage | null {
+  const b = set && set[r.id];
+  if (b) return b;
+  const c = r.config || {};
+  if (c.parent_run === undefined || c.parent_run === null || c.parent_run === '') return null;
+  const step = typeof c.parent_step === 'number' ? c.parent_step : typeof c.parent_step === 'string' && c.parent_step.trim() !== '' && Number.isFinite(+c.parent_step) ? +c.parent_step : null;
+  return { parent: String(c.parent_run), step, stage: c.stage === undefined || c.stage === null ? null : String(c.stage) };
+}
+/** the run a parent name means (as query.rs Catalog::resolve: exact id, unique /suffix, unique name) */
+export function resolveRun(runs: Run[], name: string): Run | undefined {
+  const one = (xs: Run[]) => (xs.length === 1 ? xs[0] : undefined);
+  return runs.find((r) => r.id === name) || one(runs.filter((r) => r.id.endsWith('/' + name))) || one(runs.filter((r) => r.name === name));
+}
+/** the run and its ancestors, root first (stops at a missing parent or a cycle) */
+export function ancestry(runs: Run[], id: string, set?: Record<string, Lineage>): Run[] {
+  const out: Run[] = [];
+  let r = runs.find((x) => x.id === id);
+  while (r && !out.includes(r)) { out.unshift(r); const l = lineageOf(r, set); r = l ? resolveRun(runs, l.parent) : undefined; }
+  return out;
+}
+
+/** the catalog the query engine matches against (see query.rs Catalog); `lineage` (the board's,
+ *  set in the browser) replaces a run's own parent_run / parent_step / parent_tokens / stage */
+export function catalogText(runs: Run[], lineage: Record<string, Lineage> = {}): string {
   const out: string[] = [];
   for (const r of runs) {
     out.push('R\t' + clean(r.id));
     for (const k of ['name', 'source', 'project'] as const) if (r[k] !== undefined && r[k] !== null) out.push(`I\t${k}\t${clean(r[k])}`);
-    for (const [k, v] of Object.entries(r.config || {})) if (v !== null && typeof v !== 'object') out.push(`C\t${clean(k)}\t${clean(v)}`);
+    if (typeof r.last_step === 'number') out.push(`I\tlast_step\t${r.last_step}`);
+    const l = lineage[r.id];
+    if (l) {
+      out.push(`C\tparent_run\t${clean(l.parent)}`);
+      if (typeof l.step === 'number' && Number.isFinite(l.step)) out.push(`C\tparent_step\t${l.step}`);
+      if (l.stage) out.push(`C\tstage\t${clean(l.stage)}`);
+    }
+    for (const [k, v] of Object.entries(r.config || {})) if (v !== null && typeof v !== 'object' && !(l && (k === 'stage' ? !!l.stage : LINEAGE_KEYS.includes(k)))) out.push(`C\t${clean(k)}\t${clean(v)}`);
     for (const m of Object.keys(r.metrics || {})) out.push('M\t' + clean(m));
     for (const [k, a] of Object.entries(r.arrays || {})) if ((a.n_steps || 0) >= 2) for (const s of STATS) out.push(`M\t${clean(k)}.${s}`);
     if (r.n_samples) out.push('M\t' + SAMPLES_METRIC);

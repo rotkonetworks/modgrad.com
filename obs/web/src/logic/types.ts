@@ -40,7 +40,10 @@ export interface ForecastView {
 }
 export interface PanelView { follow: boolean; hidden: string[]; solo: string | null; y2: string | null; fc: ForecastView; samplesK?: number }
 export interface Panel { id: string; title: string; q: string; view: PanelView }
-export interface Board { version: number; panels: Panel[] }
+/** where a run started, set in the browser (Runs view) for runs that never declared it; the
+ *  query engine reads it as the run's config parent_run / parent_step / stage (query.rs "Lineage") */
+export interface Lineage { parent: string; step?: number | null; stage?: string | null }
+export interface Board { version: number; panels: Panel[]; lineage?: Record<string, Lineage> }
 
 // ------------------------------------------------------------ query engine (query.rs)
 export interface Chip { kind: string; text: string; letter?: string | null; entry: number | null }
@@ -57,8 +60,10 @@ export interface HeatmapMeta { run: string; family: string; layers: number[]; me
 export interface LayerHeatmap extends HeatmapMeta { cols: Float64Array; z: Float64Array }
 export interface QueryMeta {
   traces: TraceMeta[]; heatmaps?: HeatmapMeta[]; warnings: string[]; fixes?: QueryFix[]; cells: string[]; x_label: string; ylog: boolean;
-  by?: string | null; by_numeric?: boolean; forecast?: { to?: number | null; method?: string } | null; downsampled?: number | null; [k: string]: unknown;
+  by?: string | null; by_numeric?: boolean; forecast?: { to?: number | null; method?: string } | null; downsampled?: number | null; stitch?: StitchSpan[]; [k: string]: unknown;
 }
+/** `| stitch`: one plotted run's place on the axis (query.rs StitchSpan) */
+export interface StitchSpan { run: string; parent: string | null; stage: string; x0: number; x1: number; step_off: number; x_off: number }
 export type QueryResult = { ok: true; meta: QueryMeta; traces: Trace[]; heatmaps: LayerHeatmap[]; streams: number } | { ok: false; error: string; start?: number; end?: number };
 
 export interface FitForecast {

@@ -8,12 +8,13 @@
 import { createMemo, createRoot, createSignal } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
 import * as Bd from '@/logic/board';
-import { fieldsOf, hasReplicates, metricCounts, layerFamilies, heatmapQuery, SAMPLES_METRIC, type Stream } from '@/logic/data';
-import type { Board, FitForecast, Forecast, Panel, QueryResult, Run } from '@/logic/types';
+import { fieldsOf, hasReplicates, metricCounts, layerFamilies, heatmapQuery, ancestry, SAMPLES_METRIC, type Stream } from '@/logic/data';
+import type { Board, FitForecast, Forecast, Lineage, Panel, QueryResult, Run } from '@/logic/types';
 import { lsGet, lsSet } from '@/lib/storage';
 import { hash, setHash } from '@/lib/hash';
 import { S, selectedRuns, getJSON, err, onRunsChanged } from '@/stores/runs';
 import { showToast } from '@/stores/ui';
+import { mirrorLineage } from '@/stores/lineage';
 
 const LS_BOARD = 'obs-builder-board-v2';
 const LS_SET = 'obs-builder-settings-v1';
@@ -65,12 +66,13 @@ export const fresh = new Map<string, number>(); // panel \u0001 run -> time it n
 const clone = <T>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
 function sync(): void {
   setBoardStore(reconcile(clone(M.board), { key: 'id' }));
+  mirrorLineage(M.board.lineage);
   const t = M.undo.peek(); setUndoTop(t ? t.what : null);
 }
 /** an untouched default board is saved with auto: true, so it keeps following the data after a reload */
 function save(): void {
   if (shared()) return;
-  lsSet(M.key, M.autoBoard ? JSON.stringify({ version: Bd.BOARD_VERSION, auto: true, panels: M.board.panels }, null, 1) : Bd.serialize(M.board));
+  lsSet(M.key, M.autoBoard ? JSON.stringify({ version: Bd.BOARD_VERSION, auto: true, panels: M.board.panels, lineage: M.board.lineage }, null, 1) : Bd.serialize(M.board));
 }
 /** the board is still the untouched default (it follows the data) */
 export const boardIsAuto = (): boolean => M.autoBoard && !shared();
@@ -95,7 +97,53 @@ export function undo(): void {
   const u = M.undo.pop(); if (!u) return;
   M.board = Bd.validBoard(u.board); save(); sync(); showToast(`undid: ${u.what}`);
 }
-export function setBoard(b: Board, what = 'set board'): void { commit(what, () => { M.board = Bd.validBoard(b); setSelPanel(null); }); }
+export function setBoard(b: Board, what = 'set board'): void { commit(what, () => { M.board = keepLineage(Bd.validBoard(b)); setSelPanel(null); }); }
+/** a new board for the same runs keeps the lineage set in the browser (a board's own entries win) */
+function keepLineage(b: Board, from: Board = M.board): Board {
+  const l = { ...(from.lineage || {}), ...(b.lineage || {}) };
+  return Object.keys(l).length ? { ...b, lineage: l } : b;
+}
+
+// ------------------------------------------------------------ lineage set in the browser
+/** set (or with null clear) where a run started; undoable, saved and exported with the board. A
+ *  default board stays the default: lineage is about the runs, not the layout. */
+export function setRunParent(id: string, l: Lineage | null): void {
+  const auto = M.autoBoard;
+  const what = l ? `${id} continues from ${l.parent}${typeof l.step === 'number' ? '@' + l.step : ''}` : `clear the parent of ${id}`;
+  const ok = commit(what, () => {
+    const cur = { ...(M.board.lineage || {}) };
+    if (l) {
+      if (l.parent === id) throw new Error('a run cannot continue from itself');
+      if (ancestry(S.runs, l.parent, cur).some((r) => r.id === id)) throw new Error(`${l.parent} already descends from ${id}`);
+      cur[id] = l;
+    } else delete cur[id];
+    if (Object.keys(cur).length) M.board.lineage = cur; else delete M.board.lineage;
+  }, { toast: what });
+  if (ok && auto) { M.autoBoard = true; save(); }
+}
+const TRAIN_LOSS = /^(train_?)?loss$|^train[_/]loss|^loss[_/]train/i;
+/** the metric that shows a run's whole lineage: a training loss most of its ancestors also log */
+export function lineageMetric(id: string): string | null {
+  const chain = ancestry(S.runs, id, M.board.lineage);
+  const leaf = chain[chain.length - 1]; if (!leaf) return null;
+  const names = Object.keys(leaf.metrics || {}).filter((m) => (leaf.metrics[m].n ?? 0) >= 2 || chain.length > 1);
+  if (!names.length) return null;
+  const cover = (m: string) => chain.filter((r) => r.metrics && r.metrics[m]).length;
+  const best = Math.max(...names.map(cover));
+  const top = names.filter((m) => cover(m) === best);
+  return top.filter((m) => TRAIN_LOSS.test(m)).sort()[0] || Bd.rankMetrics(top, 1)[0];
+}
+/** a new panel with the run's ancestry stitched, opened in the focus view */
+export function openLineage(id: string): void {
+  const m = lineageMetric(id);
+  if (!m) { showToast(`${id} has no metric to graph`); return; }
+  const n = ancestry(S.runs, id, M.board.lineage).length;
+  let p: Panel | undefined;
+  if (!commit(`whole lineage of ${id}`, () => { p = Bd.newPanel(Bd.lineageQuery(m, id), `lineage of ${id}`); M.board.panels.push(p); setSelPanel(p.id); })) return;
+  showToast(`lineage of ${id}: ${m} over ${n} run${n === 1 ? '' : 's'}`, true);
+  setHash({ view: null, panel: null });
+  openFocus(p!.id);
+}
 
 // ------------------------------------------------------------ presets
 const PREFERRED = ['brain_heldout_nll', 'train_loss_ema', 'brain_heldout_acc_pct', 'nat_brain_minus_none', 'brain_indist_nll', 's_per_step'];
@@ -148,9 +196,9 @@ export const defaultBoard = (): Board => autoPreset() || historyPreset();
 export function applyPreset(name: string): void {
   const sel = selectedRuns();
   const b = name === 'auto' ? defaultBoard() : name === 'history' ? historyPreset() : name === 'all' ? Bd.presetAll([...metricCounts(sel).keys()].sort(), sel.map((r) => r.id)) : { version: Bd.BOARD_VERSION, panels: [] };
-  commit(`apply preset ${name}`, () => { M.board = b; setSelPanel(null); }, { toast: `board: ${name}` });
+  commit(`apply preset ${name}`, () => { M.board = keepLineage(b); setSelPanel(null); }, { toast: `board: ${name}` });
 }
-export function resetDefault(): void { commit('reset to default', () => { M.board = defaultBoard(); setSelPanel(null); }, { toast: 'board reset to default' }); }
+export function resetDefault(): void { commit('reset to default', () => { M.board = keepLineage(defaultBoard()); setSelPanel(null); }, { toast: 'board reset to default' }); }
 
 // ------------------------------------------------------------ import / export / shared boards
 export function exportBoard(): void {
@@ -161,7 +209,7 @@ export function exportBoard(): void {
 export function importBoard(file: File): void {
   file.text().then((txt) => {
     let b: Board; try { b = Bd.validBoard(fromAnyBoard(JSON.parse(txt))); } catch (e) { showToast('import failed: ' + ((e as Error).message || e)); return; }
-    commit('import board', () => { M.board = b; setSelPanel(null); }, { toast: `imported ${b.panels.length} panels from ${file.name}` });
+    commit('import board', () => { M.board = keepLineage(b); setSelPanel(null); }, { toast: `imported ${b.panels.length} panels from ${file.name}` });
   });
 }
 /** a board file from the MCP make_board tool ({panels: [{query}]}) or an exported board */
@@ -224,14 +272,14 @@ export async function initBoard(): Promise<void> {
   if (!b || savedAuto) {
     // rebuild the default from today's data; keep the saved auto board if nothing matches yet
     const d = defaultBoard();
-    M.board = d.panels.length || !b ? d : b;
+    M.board = d.panels.length || !b ? (b ? keepLineage(d, b) : d) : b;
   } else M.board = b;
   sync();
   onRunsChanged(() => {
     // until the viewer edits it, the default board follows the data (e.g. a live run's first metrics)
     if (!M.autoBoard || shared()) return;
     const nb = defaultBoard(), qs = (x: Board) => x.panels.map((p) => p.q).join('\n');
-    if (qs(nb) !== qs(M.board)) { M.board = nb; save(); sync(); }
+    if (qs(nb) !== qs(M.board)) { M.board = keepLineage(nb); save(); sync(); }
   });
 }
 const settingsInit: Settings = { palette: true, events: true, spikes: true, linkX: true };

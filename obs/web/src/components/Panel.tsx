@@ -1,11 +1,13 @@
 import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from 'solid-js';
-import type { Chip, Panel as PanelT, QueryResult, RunEvent } from '@/logic/types';
+import type { Chip, Panel as PanelT, QueryResult, Run, RunEvent } from '@/logic/types';
 import * as Bd from '@/logic/board';
-import { evalQuery, planOf, varyingFields, fieldsOf, hasReplicates, layerFamilies, SAMPLES_METRIC } from '@/logic/data';
+import { evalQuery, planOf, varyingFields, fieldsOf, hasReplicates, layerFamilies, lineageOf, SAMPLES_METRIC } from '@/logic/data';
+import { lineage } from '@/stores/lineage';
 import SamplesPanel from '@/components/SamplesPanel';
 import { A } from '@/lib/wasm';
 import { themeVersion } from '@/lib/theme';
 import { catalog, catalogVersion, runVersion, eventsOf } from '@/stores/runs';
+import { lineageVersion } from '@/stores/lineage';
 import {
   findPanel, titleOf, parseQ, selPanel, setSelPanel, editing, toggleEditing, settings, results, seen, fresh, commit,
   setStage, setQuery, renamePanel, toggleFollow, deletePanel, duplicatePanel, movePanel, mergePanel, showAll, openFocus,
@@ -18,6 +20,9 @@ import { draggable } from '@/board/dnd';
 import { loader } from '@/board/loader';
 import ForecastControls from '@/components/ForecastControls';
 import ErrLine from '@/components/ErrLine';
+
+/** some run of the panel names a parent (its config, or lineage set in the browser) */
+const stitchable = (runs: Run[]): boolean => runs.some((r) => !!lineageOf(r, lineage()));
 
 export const CHIP_LABEL = (c: Chip): string => {
   if (c.kind === 'matcher') { const m = c.text.match(/^run(=~|=|!=|!~)"?(.*?)"?$/); if (m) return `${m[1].startsWith('!') ? 'not ' : ''}runs: ${m[2]}`; return c.text.replace(/"/g, ''); }
@@ -47,7 +52,7 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
   const dataKey = createMemo(() => {
     const cat = catalog();
     const runs = [...new Set(planOf(props.panel.q, cat).map(([r]) => r))].sort();
-    return catalogVersion() + ':' + runs.map((r) => r + '@' + runVersion(r)).join(',');
+    return catalogVersion() + '.' + lineageVersion() + ':' + runs.map((r) => r + '@' + runVersion(r)).join(',');
   });
   // follow is left out: pausing it (a zoom on the chart) must not rebuild the chart mid-gesture;
   // switching it on redraws once below so the window jumps to the newest data
@@ -169,6 +174,7 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
       ...when(nRuns > 1, [{ label: 'split by run', run: st('split', 'split run') }]),
       ...vf.slice(0, 4).map((f) => ({ label: `split by ${f}`, run: st('split', `split ${f}`) })),
       ...when(runMetrics.has('elapsed_min'), [{ label: 'x axis: time', run: st('x', 'x time') }]),
+      ...when(stitchable(runs), [{ label: 'stitch: after its ancestors (lineage)', run: st('stitch', 'stitch') }]),
       ...when(tokens, [{ label: 'x axis: tokens', run: st('x', 'x tokens') }]),
       { label: 'forecast', run: st('forecast', 'forecast') },
       { label: 'log y', run: st('log', 'log') },

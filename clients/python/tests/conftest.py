@@ -27,11 +27,23 @@ OBS_BIN = Path(os.environ.get("OBS_BIN") or _built("modgrad"))
 
 
 def free_port() -> int:
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
+    """A free loopback port: any, or one in PYTEST_OBS_PORTS ("18940-18949")
+    on machines where test servers must stay in a fixed range."""
+    lo_hi = os.environ.get("PYTEST_OBS_PORTS")
+    candidates = [0]
+    if lo_hi:
+        lo, hi = (int(x) for x in lo_hi.split("-"))
+        candidates = list(range(lo, hi + 1))
+    for c in candidates:
+        s = socket.socket()
+        try:
+            s.bind(("127.0.0.1", c))
+            return s.getsockname()[1]
+        except OSError:
+            continue
+        finally:
+            s.close()
+    raise RuntimeError(f"no free port in PYTEST_OBS_PORTS={lo_hi}")
 
 
 class Server:

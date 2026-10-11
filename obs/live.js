@@ -145,6 +145,17 @@ export function attachLive(D) {
   let chartTimer = null, fullTimer = null, lastFull = 0, tableTimer = null;
   // the run table (last step, metric count) is cheap to rebuild; do it at most every 2 s
   function scheduleTable() { if (!tableTimer) tableTimer = setTimeout(() => { tableTimer = null; D.renderRuns(); badges(); }, 2000); }
+  // graph-builder panels re-evaluate on 'obs:runs-changed'; batch live rows into at most one per second
+  const builderPending = new Set(); let builderTimer = null;
+  function notifyBuilder(run) {
+    builderPending.add(run);
+    if (builderTimer) return;
+    builderTimer = setTimeout(() => {
+      builderTimer = null;
+      const updated = [...builderPending]; builderPending.clear();
+      document.dispatchEvent(new CustomEvent('obs:runs-changed', { detail: { added: [], updated } }));
+    }, 1000);
+  }
   function scheduleCharts() { if (!chartTimer) chartTimer = setTimeout(() => { chartTimer = null; updateCharts(); }, 300); }
   function scheduleFull(minGapMs = 0) {
     if (fullTimer) return;
@@ -219,7 +230,7 @@ export function attachLive(D) {
     r.n_rows = (r.n_rows || 0) + rows.length;
     scheduleTable();
     if (newKeys) { D.refreshMetricSelect(); if (ensureMetrics()) scheduleFull(); }
-    Promise.all(patches).then(() => { if (S.sel.has(run)) scheduleCharts(); });
+    Promise.all(patches).then(() => { if (S.sel.has(run)) scheduleCharts(); notifyBuilder(run); });
   });
 
   client.addEventListener('events', (e) => { const r = S.byId.get(e.detail.run); if (r) r.n_events = (r.n_events || 0) + e.detail.events.length; });

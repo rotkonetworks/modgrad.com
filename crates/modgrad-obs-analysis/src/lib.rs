@@ -13,7 +13,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 use libm::{cos, floor, log10, pow, round, sin, sqrt};
 
+pub mod curve;
+pub mod expr;
 pub mod forecast;
+pub mod query;
 
 #[cfg(feature = "wasm")]
 pub mod wasm;
@@ -52,6 +55,24 @@ pub fn legend_stats(v: &[f64]) -> [f64; 4] {
         }
     }
     if n == 0 { [f64::NAN; 4] } else { [mx, sum / n as f64, mn, cur] }
+}
+
+/// Summary of one logged array record as scalars, so an array logged over
+/// steps can be plotted as series: `[mean, min, max, rms]` over the finite
+/// elements, all `NaN` when there are none.
+pub fn array_stats(data: &[f32]) -> [f64; 4] {
+    let (mut sum, mut sq, mut mn, mut mx, mut n) = (0.0, 0.0, f64::INFINITY, f64::NEG_INFINITY, 0usize);
+    for &x in data {
+        let x = x as f64;
+        if x.is_finite() {
+            sum += x;
+            sq += x * x;
+            mn = mn.min(x);
+            mx = mx.max(x);
+            n += 1;
+        }
+    }
+    if n == 0 { [f64::NAN; 4] } else { [sum / n as f64, mn, mx, sqrt(sq / n as f64)] }
 }
 
 /// Block-reduce a series to at most `max_points` points. Each block reports
@@ -353,6 +374,12 @@ mod tests {
         let e = ema(&[5.0, 5.0, f64::NAN, 5.0], 0.9);
         assert!((e[0] - 5.0).abs() < 1e-12 && (e[1] - 5.0).abs() < 1e-12 && (e[3] - 5.0).abs() < 1e-12);
         assert!(e[2].is_nan());
+    }
+
+    #[test]
+    fn array_summary() {
+        assert_eq!(array_stats(&[3.0, f32::NAN, -1.0]), [1.0, -1.0, 3.0, libm::sqrt(5.0)]);
+        assert!(array_stats(&[]).iter().all(|x| x.is_nan()));
     }
 
     #[test]

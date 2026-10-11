@@ -111,6 +111,10 @@ input[type=range] { width: 160px; }
 <div class="tablewrap"><table class="runs" id="runtable"></table></div>
 <div id="details"></div>
 
+<h2>Workspace</h2>
+<div class="note">Each panel is a query (shown as chips; "text" edits it directly). Drag series from the list onto the board or a panel, or use their + buttons; drag a panel title onto another panel to merge, onto its edge to reorder. "expand" opens a panel full-screen. Ctrl+K: commands. Saved in this browser; export to share. "Reset to default" builds a board from metric naming conventions, else from the History view below.</div>
+<div id="builder"></div>
+
 <h2>History</h2>
 <div class="controls">
   <label>metrics <select id="metrics" multiple></select></label>
@@ -270,10 +274,28 @@ function kvTable(parent, pairs) {
 // Zoom: drag = x range (y refits to what is visible), alt-drag = box, shift-drag = pan,
 // wheel = zoom at the cursor (once the chart has focus; ctrl/cmd + wheel always), double-click or Esc = reset. Charts that share
 // o.group share their x range. Legend Max/Avg/Min/Cur cover the visible window only.
+// o.ylog: log10 y axis (non-positive values become gaps). A series with y2: true gets its own
+// fitted range and right-hand axis (one per chart). o.decorateLegend(table, series) runs after
+// every legend render. Series options: hidden (legend row only), band {lo, hi} (filled envelope).
+// o.yrange fixes the default y range (locked small multiples); o.onview(view) fires on user zoom;
+// o.overlay(api) draws extra interactive layers above the plot after every render.
 const ZOOM_GROUPS = new Map(); // name -> { view, charts: Set }
+function fitY(visible, all) { // y range of the visible values, else of everything, padded when flat
+  let [a, b] = finiteRange(visible);
+  if (!Number.isFinite(a)) [a, b] = finiteRange(all.map((s) => s.Y));
+  if (!Number.isFinite(a)) { a = 0; b = 1; }
+  if (b === a) { const d = Math.abs(a) * 0.05 || 0.5; a -= d; b += d; }
+  return [a, b];
+}
+function logTicks(a, b) { // ticks in log10 space: whole decades when the range spans one, else nice linear values
+  if (b - a >= 1 && b - a < 3) { const t = []; for (let k = Math.floor(a); k <= Math.ceil(b); k++) for (const m of [1, 2, 5]) { const v = k + Math.log10(m); if (v >= a - 1e-9 && v <= b + 1e-9) t.push(v); } return t; } // 1-2-5 per decade
+  if (b - a >= 1) { const st = Math.max(1, Math.ceil((Math.floor(b) - Math.ceil(a) + 1) / 6)); const t = []; for (let k = Math.ceil(a); k <= Math.floor(b); k += st) t.push(k); return t; }
+  return Array.from(A.nice_ticks(Math.pow(10, a), Math.pow(10, b), 5)).filter((v) => v > 0).map(Math.log10);
+}
 let clipSeq = 0;
 function chart2d(parent, o) {
-  const W = 540, H = 210, L = 58, R = 14, T = 10, B = 28;
+  const hasY2 = o.series.some((s) => s.y2) && o.series.some((s) => !s.y2);
+  const W = 540, H = 210, L = 58, R = hasY2 ? 52 : 14, T = 10, B = 28;
   const pw = W - L - R, ph = H - T - B;
   const panel = h('div', { class: 'panel' }, parent);
   h('div', { class: 'ptitle' }, panel, o.title);
@@ -281,38 +303,47 @@ function chart2d(parent, o) {
   const sub = h('div', { class: 'sub' }, panel);
   const tx = o.xlog ? (x) => (x > 0 ? Math.log10(x) : NaN) : (x) => x;
   const xf = o.xlog ? (t) => fmtTick(Math.pow(10, t)) : (o.xfmt || fmtTick);
-  const series = o.series.map((s) => ({ ...s, X: Array.from(s.xs, tx), Y: Array.from(s.ys), S: nums(s.raw || s.ys) }));
+  const ty = o.ylog ? (y) => (y > 0 ? Math.log10(y) : NaN) : (y) => y;
+  const yf = o.ylog ? (t) => fmtTick(+Math.pow(10, t).toPrecision(4)) : fmtTick;
+  const series = o.series.map((s, si) => ({ ...s, si, y2: hasY2 && !!s.y2, X: Array.from(s.xs, tx), Y: Array.from(s.ys, ty), V: Array.from(s.ys), S: nums(s.raw || s.ys), BL: s.band ? Array.from(s.band.lo, ty) : null, BH: s.band ? Array.from(s.band.hi, ty) : null }));
+  const shown = series.filter((s) => !s.hidden);
   // ghost forecast: drawn dashed with a band, kept out of the legend stats; its x extends the
   // default range, its mean (not its band) takes part in the y fit
   for (const s of series) {
     if (!s.ghost) continue;
     let k = s.X.length - 1; while (k >= 0 && !(Number.isFinite(s.X[k]) && Number.isFinite(s.Y[k]))) k--;
     const a = k >= 0 ? [[s.X[k]], [s.Y[k]]] : [[], []];
-    s.G = { X: a[0].concat(Array.from(s.ghost.xs, tx)), Y: a[1].concat(Array.from(s.ghost.ys)), LO: a[1].concat(Array.from(s.ghost.lo)), HI: a[1].concat(Array.from(s.ghost.hi)), n0: a[0].length };
+    s.G = { X: a[0].concat(Array.from(s.ghost.xs, tx)), Y: a[1].concat(Array.from(s.ghost.ys, ty)), LO: a[1].concat(Array.from(s.ghost.lo, ty)), HI: a[1].concat(Array.from(s.ghost.hi, ty)), n0: a[0].length };
   }
   const ghosts = series.filter((s) => s.G);
   let [fx0, fx1] = finiteRange(series.map((s) => s.X).concat(ghosts.map((s) => s.G.X)));
   if (!Number.isFinite(fx0)) { fx0 = 0; fx1 = 1; }
   if (fx1 === fx0) { fx0 -= 0.5; fx1 += 0.5; }
   const cid = 'clip' + (++clipSeq);
-  let layer = null, legend = null, x0, x1, y0, y1;
+  let layer = null, legend = null, ov = null, x0, x1, y0, y1, z0, z1;
   const group = o.group ? (ZOOM_GROUPS.get(o.group) || ZOOM_GROUPS.set(o.group, { view: null, charts: new Set() }).get(o.group)) : null;
   let view = group ? group.view : null; // {x0, x1, y0?, y1?} in transformed x
   const inX = (x) => x >= x0 && x <= x1;
 
   function render() {
     x0 = view ? view.x0 : fx0; x1 = view ? view.x1 : fx1;
+    // fit y to the visible points plus the nearest point either side, so lines leaving the window stay in frame
+    const nearOf = (s, A) => A.filter((_, i) => inX(s.X[i]) || (s.X[i] < x0 && !(s.X[i + 1] < x0)) || (s.X[i] > x1 && !(s.X[i - 1] > x1)));
+    const near = (s) => nearOf(s, s.Y);
     if (view && view.y0 !== undefined) { y0 = view.y0; y1 = view.y1; }
+    else if (o.yrange) { [y0, y1] = o.yrange.map(ty); if (!(y1 > y0)) { y0 -= 0.5; y1 += 0.5; } }
     else {
-      // fit y to the visible points plus the nearest point either side, so lines leaving the window stay in frame
-      const near = (s) => s.Y.filter((_, i) => inX(s.X[i]) || (s.X[i] < x0 && !(s.X[i + 1] < x0)) || (s.X[i] > x1 && !(s.X[i - 1] > x1)));
-      [y0, y1] = finiteRange(series.map(near).concat(ghosts.map((s) => near(s.G))));
-      if (!Number.isFinite(y0)) [y0, y1] = finiteRange(series.map((s) => s.Y));
-      if (!Number.isFinite(y0)) { y0 = 0; y1 = 1; }
-      if (y1 === y0) { const d = Math.abs(y0) * 0.05 || 0.5; y0 -= d; y1 += d; }
+      const prim = shown.filter((s) => !s.y2);
+      const bands = prim.filter((s) => s.BL).flatMap((s) => [nearOf(s, s.BL), nearOf(s, s.BH)]);
+      [y0, y1] = fitY(prim.map(near).concat(ghosts.filter((s) => !s.hidden).map((s) => near(s.G)), bands), prim.length ? prim : series);
     }
-    let yt = Array.from(A.nice_ticks(y0, y1, 5));
-    if (yt.length > 1 && !(view && view.y0 !== undefined)) { // widen to whole tick steps so the frame starts and ends on a gridline
+    if (hasY2) {
+      const sec = series.filter((s) => s.y2);
+      [z0, z1] = fitY(sec.map(near), sec);
+      if (!o.ylog) { const zt = Array.from(A.nice_ticks(z0, z1, 5)); if (zt.length > 1) { const st = zt[1] - zt[0]; z0 = Math.floor(z0 / st + 1e-9) * st; z1 = Math.ceil(z1 / st - 1e-9) * st; } }
+    }
+    let yt = o.ylog ? logTicks(y0, y1) : Array.from(A.nice_ticks(y0, y1, 5));
+    if (!o.ylog && yt.length > 1 && !(view && view.y0 !== undefined)) { // widen to whole tick steps so the frame starts and ends on a gridline
       const st = yt[1] - yt[0];
       y0 = Math.floor(y0 / st + 1e-9) * st; y1 = Math.ceil(y1 / st - 1e-9) * st;
       yt = Array.from(A.nice_ticks(y0, y1, 5));
@@ -320,6 +351,7 @@ function chart2d(parent, o) {
     const xt = Array.from(A.nice_ticks(x0, x1, 6));
     const X = (x) => L + ((x - x0) / (x1 - x0)) * pw;
     const Y = (y) => T + ph - ((y - y0) / (y1 - y0)) * ph;
+    for (const s of series) s.D = s.y2 ? s.Y.map((v) => y0 + ((v - z0) / (z1 - z0)) * (y1 - y0)) : s.Y; // y2 drawn in primary coordinates
     const next = svgEl('g', {});
     const cp = svgEl('clipPath', { id: cid }, svgEl('defs', {}, next));
     svgEl('rect', { x: L, y: T, width: pw, height: ph }, cp);
@@ -327,29 +359,45 @@ function chart2d(parent, o) {
     for (const t of yt) if (t >= y0 - 1e-12 && t <= y1 + 1e-12) svgEl('line', { x1: L, x2: L + pw, y1: Y(t), y2: Y(t), style: 'stroke:var(--grid);stroke-dasharray:1 2' }, g);
     for (const t of xt) if (inX(t)) svgEl('line', { x1: X(t), x2: X(t), y1: T, y2: T + ph, style: 'stroke:var(--grid);stroke-dasharray:1 2' }, g);
     const lab = svgEl('g', { style: 'font:10px var(--mono);fill:var(--ink)' }, next);
-    for (const t of yt) if (t >= y0 - 1e-12 && t <= y1 + 1e-12) { const e = svgEl('text', { x: L - 4, y: Y(t) + 3, 'text-anchor': 'end' }, lab); e.textContent = fmtTick(t); }
+    for (const t of yt) if (t >= y0 - 1e-12 && t <= y1 + 1e-12) { const e = svgEl('text', { x: L - 4, y: Y(t) + 3, 'text-anchor': 'end' }, lab); e.textContent = yf(t); }
+    if (hasY2) {
+      const s2 = series.find((s) => s.y2), Z = (z) => T + ph - ((z - z0) / (z1 - z0)) * ph;
+      const zt = o.ylog ? logTicks(z0, z1) : Array.from(A.nice_ticks(z0, z1, 5));
+      for (const t of zt) if (t >= z0 - 1e-12 && t <= z1 + 1e-12) {
+        svgEl('line', { x1: L + pw, x2: L + pw + 4, y1: Z(t), y2: Z(t), style: `stroke:var(${s2.color})`, 'shape-rendering': 'crispEdges' }, lab);
+        const e = svgEl('text', { x: L + pw + 6, y: Z(t) + 3, 'text-anchor': 'start', style: `fill:var(${s2.color})` }, lab); e.textContent = yf(t);
+      }
+    }
     for (const t of xt) if (inX(t)) { const e = svgEl('text', { x: X(t), y: T + ph + 13, 'text-anchor': 'middle' }, lab); e.textContent = xf(t); }
     if (o.xlabel) { const e = svgEl('text', { x: L + pw, y: H - 3, 'text-anchor': 'end', style: 'fill:var(--muted)' }, lab); e.textContent = o.xlabel; }
     if (o.ylabel) { const e = svgEl('text', { x: 10, y: T + ph / 2, transform: `rotate(-90 10 ${T + ph / 2})`, 'text-anchor': 'middle', style: 'fill:var(--muted)' }, lab); e.textContent = o.ylabel; }
     const plot = svgEl('g', { 'clip-path': `url(#${cid})` }, next);
     const segs = (s) => { // contiguous finite runs
       const out = []; let cur = [];
+      const SY = s.D || s.Y;
       for (let i = 0; i < s.X.length; i++) {
-        if (Number.isFinite(s.X[i]) && Number.isFinite(s.Y[i])) cur.push([X(s.X[i]), Y(s.Y[i])]);
+        if (Number.isFinite(s.X[i]) && Number.isFinite(SY[i])) cur.push([X(s.X[i]), Y(SY[i])]);
         else if (cur.length) { out.push(cur); cur = []; }
       }
       if (cur.length) out.push(cur);
       return out;
     };
     const dots = view && series.every((s) => s.X.filter(inX).length <= 60); // zoomed in far enough: mark samples
-    for (const s of series.filter((s) => s.area)) {
+    for (const s of shown.filter((s) => s.BL)) { // envelope bands (e.g. mean±sd over seeds)
+      const idx = s.X.map((_, i) => i).filter((i) => Number.isFinite(s.X[i]) && Number.isFinite(s.BL[i]) && Number.isFinite(s.BH[i]));
+      const map = (A) => (s.y2 ? A.map((v) => y0 + ((v - z0) / (z1 - z0)) * (y1 - y0)) : A);
+      const BL = map(s.BL), BH = map(s.BH);
+      if (idx.length > 1) svgEl('path', { 'data-si': s.si, d: 'M' + idx.map((i) => X(s.X[i]).toFixed(1) + ',' + Y(BH[i]).toFixed(1)).join('L') + 'L' + idx.slice().reverse().map((i) => X(s.X[i]).toFixed(1) + ',' + Y(BL[i]).toFixed(1)).join('L') + 'Z', style: `fill:var(${s.color});fill-opacity:0.16;stroke:var(${s.color});stroke-opacity:0.35;stroke-width:0.5` }, plot);
+      else for (const i of idx) svgEl('line', { 'data-si': s.si, x1: X(s.X[i]), x2: X(s.X[i]), y1: Y(BL[i]), y2: Y(BH[i]), style: `stroke:var(${s.color});stroke-width:1` }, plot);
+    }
+    for (const s of shown.filter((s) => s.area)) {
       for (const sg of segs(s)) {
         if (sg.length === 1) { svgEl('rect', { x: sg[0][0] - 2.5, y: sg[0][1] - 2.5, width: 5, height: 5, style: `fill:var(${s.color})` }, plot); continue; }
         const d = 'M' + sg.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join('L') + `L${sg[sg.length - 1][0].toFixed(1)},${T + ph}L${sg[0][0].toFixed(1)},${T + ph}Z`;
-        svgEl('path', { d, style: `fill:var(${s.color});stroke:none` }, plot);
+        svgEl('path', { 'data-si': s.si, d, style: `fill:var(${s.color});stroke:none` }, plot);
       }
     }
-    for (const s of ghosts) { // band, then dashed mean line
+    for (const s of ghosts.filter((s) => !s.hidden)) { // band, then dashed mean line
       const G = s.G, f = (i) => Number.isFinite(G.X[i]) && Number.isFinite(G.LO[i]) && Number.isFinite(G.HI[i]);
       const idx = G.X.map((_, i) => i).filter(f);
       if (idx.length > 1) {
@@ -361,21 +409,22 @@ function chart2d(parent, o) {
         svgEl('path', { d: 'M' + sg.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join('L'), style: `fill:none;stroke:var(${s.color});stroke-width:1.2;stroke-opacity:0.55;stroke-dasharray:4 3` }, plot);
       }
     }
-    for (const s of series.filter((s) => !s.area)) {
+    for (const s of shown.filter((s) => !s.area)) {
       for (const sg of segs(s)) {
-        if (sg.length === 1) { svgEl('rect', { x: sg[0][0] - 2.5, y: sg[0][1] - 2.5, width: 5, height: 5, style: `fill:none;stroke:var(${s.color});stroke-width:1` }, plot); continue; }
-        svgEl('path', { d: 'M' + sg.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join('L'), style: `fill:none;stroke:var(${s.color});stroke-width:1` }, plot);
+        if (sg.length === 1) { svgEl('rect', { 'data-si': s.si, x: sg[0][0] - 2.5, y: sg[0][1] - 2.5, width: 5, height: 5, style: `fill:none;stroke:var(${s.color});stroke-width:1` }, plot); continue; }
+        svgEl('path', { 'data-si': s.si, d: 'M' + sg.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join('L'), style: `fill:none;stroke:var(${s.color});stroke-width:1` }, plot);
       }
     }
-    if (dots) for (const s of series) for (const sg of segs(s)) for (const p of sg) svgEl('rect', { x: p[0] - 1.5, y: p[1] - 1.5, width: 3, height: 3, style: `fill:var(--bg);stroke:var(${s.area ? '--frame' : s.color});stroke-width:1` }, plot);
+    if (dots) for (const s of shown) for (const sg of segs(s)) for (const p of sg) svgEl('rect', { x: p[0] - 1.5, y: p[1] - 1.5, width: 3, height: 3, style: `fill:var(--bg);stroke:var(${s.area ? '--frame' : s.color});stroke-width:1` }, plot);
     if (o.marker) for (const m of o.marker) svgEl('line', { x1: X(tx(m)), x2: X(tx(m)), y1: T, y2: T + ph, style: 'stroke:var(--c3);stroke-width:1;stroke-dasharray:3 2' }, plot);
     svgEl('rect', { x: L + 0.5, y: T + 0.5, width: pw - 1, height: ph, style: 'fill:none;stroke:var(--frame);stroke-width:1', 'shape-rendering': 'crispEdges' }, next);
     if (layer) layer.replaceWith(next); else svg.insertBefore(next, svg.firstChild);
     layer = next;
+    if (o.overlay && ov) { while (ov.firstChild) ov.removeChild(ov.firstChild); o.overlay({ g: ov, svg, X, Y, L, T, pw, ph, W, H, x0, x1, y0, y1, tx, ty, view, local, setView: (v) => me.setView(v) }); }
     // legend: statistics over the visible window
     const rows = series.map((s) => {
       const vis = []; for (let i = 0; i < s.S.length; i++) if (inX(s.X[i])) vis.push(s.S[i]);
-      return { name: s.name, color: s.color, area: s.area, stats: Array.from(A.legend_stats(nums(vis))) };
+      return { name: s.name + (s.y2 ? '  (right axis)' : ''), color: s.color, area: s.area, stats: Array.from(A.legend_stats(nums(vis))) };
     });
     const nl = legendTable(h('div', {}), rows, o.legendHead).parentNode;
     if (o.ghostNotes && o.ghostNotes.length) {
@@ -388,8 +437,9 @@ function chart2d(parent, o) {
     }
     if (legend) legend.replaceWith(nl); else panel.appendChild(nl);
     legend = nl;
+    if (o.decorateLegend) o.decorateLegend(nl.querySelector('table.legend'), series);
     sub.textContent = view
-      ? `showing ${xf(+x0.toPrecision(3))} to ${xf(+x1.toPrecision(3))}${view.y0 !== undefined ? `, y ${fmtTick(+y0.toPrecision(3))} to ${fmtTick(+y1.toPrecision(3))}` : ''}; double-click or Esc to reset`
+      ? `showing ${xf(+x0.toPrecision(3))} to ${xf(+x1.toPrecision(3))}${view.y0 !== undefined ? `, y ${yf(+y0.toPrecision(3))} to ${yf(+y1.toPrecision(3))}` : ''}; double-click or Esc to reset`
       : 'drag to zoom, alt-drag box, shift-drag pan, click then wheel to zoom';
   }
 
@@ -409,6 +459,7 @@ function chart2d(parent, o) {
     setView(v, fromGroup) {
       if (v && v.x0 <= fx0 && v.x1 >= fx1 && v.y0 === undefined) v = null;
       view = v; render();
+      if (!fromGroup && o.onview) o.onview(v);
       if (group && !fromGroup) {
         group.view = v ? { x0: v.x0, x1: v.x1 } : null;
         for (const c of [...group.charts]) {
@@ -425,6 +476,7 @@ function chart2d(parent, o) {
   const hair = svgEl('line', { y1: T, y2: T + ph, style: 'stroke:var(--muted);stroke-width:1;display:none', 'shape-rendering': 'crispEdges' }, svg);
   const band = svgEl('rect', { style: 'fill:var(--hl);fill-opacity:0.6;stroke:var(--muted);stroke-width:1;stroke-dasharray:2 2;display:none', 'shape-rendering': 'crispEdges' }, svg);
   const hit = svgEl('rect', { x: L, y: T, width: pw, height: ph, style: 'fill:transparent;cursor:crosshair' }, svg);
+  if (o.overlay) ov = svgEl('g', { class: 'overlay' }, svg);
   const pt = svg.createSVGPoint();
   const local = (ev) => { pt.x = ev.clientX; pt.y = ev.clientY; return pt.matrixTransform(svg.getScreenCTM().inverse()); };
   const clampX = (p) => Math.min(L + pw, Math.max(L, p));
@@ -463,10 +515,10 @@ function chart2d(parent, o) {
     const xv = dataX(p.x);
     const lines = [];
     let best = null;
-    for (const s of series) {
+    for (const s of shown) {
       let bi = -1, bd = Infinity;
       for (let i = 0; i < s.X.length; i++) { const d = Math.abs(s.X[i] - xv); if (d < bd && Number.isFinite(s.Y[i]) && inX(s.X[i])) { bd = d; bi = i; } }
-      if (bi >= 0) { lines.push(`${s.name.slice(0, 28).padEnd(28)} ${fmt(s.Y[bi]).padStart(9)}`); if (best === null) best = s.X[bi]; }
+      if (bi >= 0) { lines.push(`${s.name.slice(0, 28).padEnd(28)} ${fmt(s.V[bi]).padStart(9)}`); if (best === null) best = s.X[bi]; }
     }
     for (const s of ghosts) { // past a run's last real point its row shows the forecast and band
       const G = s.G; if (G.n0 && !(xv > G.X[0])) continue;
@@ -474,7 +526,8 @@ function chart2d(parent, o) {
       for (let i = G.n0; i < G.X.length; i++) { const d = Math.abs(G.X[i] - xv); if (d < bd && Number.isFinite(G.Y[i]) && inX(G.X[i])) { bd = d; bi = i; } }
       if (bi < 0) continue;
       if (best === null || bd < Math.abs(best - xv)) best = G.X[bi];
-      lines.push(`${(s.name.slice(0, 19) + ' forecast').padEnd(28)} ${fmt(G.Y[bi]).padStart(9)}  [${fmt(G.LO[bi])}, ${fmt(G.HI[bi])}]`);
+      const un = o.ylog ? (v) => Math.pow(10, v) : (v) => v;
+      lines.push(`${(s.name.slice(0, 19) + ' forecast').padEnd(28)} ${fmt(un(G.Y[bi])).padStart(9)}  [${fmt(un(G.LO[bi]))}, ${fmt(un(G.HI[bi]))}]`);
     }
     if (best === null) return;
     const hx = L + ((best - x0) / (x1 - x0)) * pw;
@@ -791,6 +844,7 @@ function localSeries(m) {
 const localJSON = { array: (run, key) => run.local.arrays[key], events: (run) => run.local.events || [] };
 async function metricSeries(run, key) {
   if (run.local) return run.local.metrics[key] ? localSeries(run.local.metrics[key]) : null;
+  if (run.data && run.data[key]) return { steps: run.data[key].step, values: nums(run.data[key].value) }; // inline rows (live feed, other modules)
   if (!S.api && run.has_small) {
     const sm = await getJSON(run.path + '/metrics.small.json');
     return { steps: sm.step, values: nums(sm.keys[key] || []) };
@@ -1215,12 +1269,14 @@ function addRuns(runs, { select = true } = {}) {
   if (fresh.length) { for (const o of sel.options) o.selected = on.has(o.value); $('xmetric').value = fresh[0]; }
   refreshArrayRuns(); rerenderAll();
   document.dispatchEvent(new CustomEvent('runsChanged'));
+  document.dispatchEvent(new CustomEvent('obs:runs-changed', { detail: { added: runs.map((r) => r.id), updated: [] } }));
 }
 function removeRuns(pred) {
   S.runs = S.runs.filter((r) => !pred(r)); S.byId.clear(); for (const r of S.runs) S.byId.set(r.id, r);
   for (const id of [...S.sel]) if (!S.byId.has(id)) S.sel.delete(id);
   renderRuns(); refreshMetricSelect(); refreshArrayRuns(); rerenderAll();
   document.dispatchEvent(new CustomEvent('runsChanged'));
+  document.dispatchEvent(new CustomEvent('obs:runs-changed', { detail: { added: [], updated: [] } }));
 }
 
 // ------------------------------------------------------------ wiring
@@ -1253,6 +1309,7 @@ async function main() {
     try { S.index = S.api ? await (await fetch(indexURL())).json() : await getJSON('index.json'); } catch (e) { err(String(e)); return; }
     S.runs = S.index.runs.concat(S.runs.filter((r) => r.local)); S.byId.clear(); for (const r of S.runs) S.byId.set(r.id, r);
     renderRuns(); refreshMetricSelect(); refreshArrayRuns(); rerenderAll();
+    document.dispatchEvent(new CustomEvent('obs:runs-changed', { detail: { added: [], updated: S.runs.map((r) => r.id) } }));
   });
   $('selall').addEventListener('click', () => { for (const r of S.runs.filter((r) => matches(r, $('filter').value))) S.sel.add(r.id); onSelection(); });
   $('selnone').addEventListener('click', () => { S.sel.clear(); onSelection(); });
@@ -1273,6 +1330,30 @@ async function main() {
   $('atick').addEventListener('input', () => renderArrays(true));
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', rerenderAll);
   if (S.api) attachLive({ S, A, $, src, renderRuns, refreshMetricSelect, renderHistory, onSelection });
+  // ---------------------------------------------------------- shared API for other modules
+  window.OBS = { S, A, chart2d, metricSeries, getJSON, src, f32, h, svgEl, cssv, fmt, fmtTick, fmtTime, nums, err, hideTip, selectedRuns, PALETTE, zoomGroup: (name) => ZOOM_GROUPS.get(name) || ZOOM_GROUPS.set(name, { view: null, charts: new Set() }).get(name) };
+  window.obsAddRuns = obsAddRuns;
+  import('./builder.js').then((m) => { window.OBS.builder = m.mount(window.OBS); }).catch((e) => err('graph builder failed to load: ' + e));
+}
+// Register new runs or replace existing ones (by id), e.g. from a local file drop or a live feed.
+// Each run needs at least {id, metrics: {key: {file, n}}}; missing fields get defaults. Cached
+// fetches under an updated run's path are dropped so its data is re-read. Fires the document
+// event 'obs:runs-changed' with detail {added: [ids], updated: [ids]}.
+function obsAddRuns(runs, opts = {}) {
+  const added = [], updated = [];
+  for (const r0 of [].concat(runs)) {
+    const r = { source: 'added', project: '', config: {}, summary: {}, metrics: {}, arrays: {}, unparsed: [], meta: {}, n_rows: 0, n_events: 0, ...r0 };
+    const i = S.runs.findIndex((x) => x.id === r.id);
+    if (i >= 0) {
+      S.runs[i] = r; updated.push(r.id);
+      for (const k of [...S.cache.keys()]) if ((r.path && k.startsWith(r.path + '/')) || k.startsWith(`api/runs/${enc(r.id)}/`)) S.cache.delete(k);
+    } else { S.runs.push(r); added.push(r.id); }
+    S.byId.set(r.id, r);
+    if (opts.select !== false && !r.config.synthetic) S.sel.add(r.id);
+  }
+  renderRuns(); refreshMetricSelect(); refreshArrayRuns(); rerenderAll();
+  document.dispatchEvent(new CustomEvent('obs:runs-changed', { detail: { added, updated } }));
+  return { added, updated };
 }
 main();
 </script>

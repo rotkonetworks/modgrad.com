@@ -350,13 +350,17 @@ def check_diverged(a, d):
 
 def check_continue_yes(a, d):
     yes = re.search(r"\byes\b|worth continuing|keep (?:it )?(?:going|training|running)|continue|still improving", a, re.I) is not None
-    no = re.search(r"^\s*no\b|not worth|\bstop\b(?! improving)|(?<!no )(?<!not )(?<!without a )plateau", a, re.I) is not None
+    # "no plateau", "hasn't plateaued" are fine; a "no"/"stop" verdict is not
+    no = re.search(r"^\W*no\b|not worth|isn't worth|\bstop (?:the |this )?(?:run|training)\b|(?:has|is|it's|it has) plateau", a, re.I) is not None
     return yes and not no, "want: yes, long/a is still clearly improving"
 
 
 def check_continue_no(a, d):
     honest = re.search(HONEST, a, re.I) is not None
-    yes = re.search(r"^\s*(?:\*\*)?yes\b|\bworth continuing\b(?! is doubtful)", a, re.I) is not None and re.search(r"not worth|isn't worth|is not worth|no longer worth", a, re.I) is None
+    # a "yes" verdict: leading yes, "final answer: yes", or "it is worth continuing" without a negation
+    yes = re.search(r"^\W*yes\b|final answer\W*yes\b", a, re.I) is not None or (
+        re.search(r"(?:it is|it's|is) worth continuing", a, re.I) is not None and re.search(r"not worth|isn't worth|unlikely to be worth|not be worth|no longer worth", a, re.I) is None
+    )
     return honest and not yes, "want: no / plateaued, forecast has no skill"
 
 

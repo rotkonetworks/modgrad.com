@@ -126,7 +126,14 @@ pub fn resolve_runs(store: &dyn Store, spec: &str) -> Result<Vec<String>, String
             let pat = item.strip_prefix("runs/").unwrap_or(item);
             let hits: Vec<&String> = names.iter().filter(|n| glob(pat, n)).collect();
             if hits.is_empty() {
-                return Err(format!("Pattern {item:?} matches no run. Call list_runs() to see names; e.g. compare(runs=\"bkk07/*\", metric=\"loss\")."));
+                let words: Vec<String> = pat.split(['*', '?', '/']).filter(|w| w.len() >= 2).map(|w| w.to_lowercase()).collect();
+                let near: Vec<&String> = names.iter().filter(|n| words.iter().any(|w| n.to_lowercase().contains(w.as_str()))).take(8).collect();
+                return Err(if near.is_empty() {
+                    format!("Pattern {item:?} matches no run. Call list_runs() to see names; e.g. compare(runs=\"bkk07/*\", metric=\"loss\").")
+                } else {
+                    let list = near.iter().map(|s| s.as_str()).collect::<Vec<_>>();
+                    format!("Pattern {item:?} matches no run. Runs with similar names: {}. Use the full names, e.g. runs=\"{}\" (or in a board query run=~\"{}\").", list.join(", "), list.join(","), list.join("|"))
+                });
             }
             hits.into_iter().for_each(|h| push(h.clone(), &mut out));
             continue;
@@ -822,7 +829,20 @@ pub fn summarize(store: &dyn Store, a: &Args) -> ToolResult {
     let Some(rq) = a.str(RUN) else {
         return Err(format!("Missing run name. Example: {ex}, or with a target: summarize(run=\"bkk07/small\", metric=\"loss\", target=4.5). list_runs() shows the names."));
     };
-    let run = resolve_run(store, &rq)?;
+    let mut picked_note = None;
+    let run = if rq.contains('*') || rq.contains('?') || rq.contains(',') {
+        let rs = resolve_runs(store, &rq)?;
+        if rs.len() > 1 {
+            picked_note = Some(format!(
+                "(summarize reads one run; {rq:?} matches {} runs, so this is {}. Its seed group is summarized below when it has one. To compare groups against seed noise use compare(runs=\"{rq}\", metric=\"…\").)",
+                rs.len(),
+                rs[0]
+            ));
+        }
+        rs.into_iter().next().ok_or_else(|| format!("{rq:?} matches no run. Call list_runs()."))?
+    } else {
+        resolve_run(store, &rq)?
+    };
     let rd = load(store, &run)?;
     let keys = rd.metric_keys();
     if keys.is_empty() {
@@ -860,6 +880,9 @@ pub fn summarize(store: &dyn Store, a: &Args) -> ToolResult {
     ));
     if let Some(n) = note {
         out.push(format!("({n})"));
+    }
+    if let Some(n) = picked_note {
+        out.push(n);
     }
     if a.str(METRIC).is_none() {
         out.push(format!("Key metrics: {} (pass metric=\"…\" for another; all: {}{}).", metrics.join(", "), keys.iter().take(12).cloned().collect::<Vec<_>>().join(", "), if keys.len() > 12 { ", …" } else { "" }));
@@ -1178,6 +1201,30 @@ fn parse_panel(store: &dyn Store, q: &str) -> Result<Panel, String> {
     Ok(Panel { metric, runs })
 }
 
+/// Split a board query into panels at `;`, newlines, and commas that are
+/// outside `{…}` and quotes (`loss{run=~"a"}, kl{run=~"a"}` is two panels;
+/// `loss{run=~"a,b"}` is one).
+fn split_panels(q: &str) -> Vec<String> {
+    let (mut out, mut cur, mut depth, mut quote) = (Vec::new(), String::new(), 0i32, None::<char>);
+    for ch in q.chars() {
+        match (ch, quote) {
+            ('"' | '\'', None) => quote = Some(ch),
+            (c, Some(q)) if c == q => quote = None,
+            ('{', None) => depth += 1,
+            ('}', None) => depth = (depth - 1).max(0),
+            (';' | '\n', None) | (',', None) if depth == 0 => {
+                out.push(std::mem::take(&mut cur));
+                continue;
+            }
+            _ => {}
+        }
+        cur.push(ch);
+    }
+    out.push(cur);
+    // a bare comma list of metrics with no selectors ("loss, kl") is several panels too
+    out
+}
+
 fn fnv(s: &str) -> u64 {
     s.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
 }
@@ -1190,7 +1237,7 @@ pub fn make_board(store: &dyn Store, a: &Args) -> ToolResult {
     // a weak model may pass runs separately: make_board(query="loss", runs="a,b")
     let extra_runs = a.str(&["runs", "run"]);
     let mut panels = Vec::new();
-    for part in q.split([';', '\n']).map(str::trim).filter(|s| !s.is_empty()).take(8) {
+    for part in split_panels(&q).iter().map(|s| s.trim()).filter(|s| !s.is_empty()).take(8) {
         let part = match (&extra_runs, part.contains('{')) {
             (Some(r), false) => format!("{part}{{run=~\"{}\"}}", r.replace([',', ' '], "|")),
             _ => part.to_string(),
@@ -1200,6 +1247,15 @@ pub fn make_board(store: &dyn Store, a: &Args) -> ToolResult {
     if panels.is_empty() {
         return Err(format!("Empty query. Example: {ex}"));
     }
+    // one panel per metric: `reward{run=a}, reward{run=b}` is one chart of both runs
+    let mut merged: Vec<Panel> = Vec::new();
+    for p in panels {
+        match merged.iter_mut().find(|m| m.metric == p.metric) {
+            Some(m) => p.runs.into_iter().for_each(|r| if !m.runs.contains(&r) { m.runs.push(r) }),
+            None => merged.push(p),
+        }
+    }
+    let panels = merged;
     let canon: Vec<String> = panels.iter().map(|p| format!("{}{{run=~\"{}\"}}", p.metric, p.runs.join("|"))).collect();
     let title = canon.join("; ");
     let mut slug = norm_key(&format!("{} {}", panels[0].metric, short_names(&panels[0].runs).join(" ")));

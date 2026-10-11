@@ -12,6 +12,9 @@
 //! * `arrays/<file>.json` — `{"key","kind","step":[…],"shape":[[…]],"edges":[[…]]?,"b64":[…]}`,
 //!   each record downsampled to at most [`ARRAY_ELEMS`] elements and at
 //!   most [`ARRAY_STEPS`] records (evenly strided, last always kept).
+//!   `trajectory`, `points` and `volume` records are capped at
+//!   [`STATE_ELEMS`] instead; no analysis (PCA, smoothing, surfaces) happens
+//!   here — the dashboard does it in wasm (modgrad-obs-analysis).
 //! * `events.json` — the last 200 events.
 //!
 //! The dashboard fetches only the keys it plots.
@@ -26,6 +29,9 @@ pub const SMALL_THRESHOLD: usize = 2000;
 pub const SMALL_ROWS: usize = 1000;
 pub const ARRAY_ELEMS: usize = 4096;
 pub const ARRAY_STEPS: usize = 200;
+/// Cap for `trajectory` / `points` / `volume` records (raw state goes to
+/// the browser, which runs PCA in wasm).
+pub const STATE_ELEMS: usize = 65536;
 
 /// Filesystem-safe name for a key.
 pub fn key_file(key: &str) -> String {
@@ -164,20 +170,32 @@ pub fn export_run(obs: &Path, dir: &Path) -> io::Result<Value> {
             v.dedup();
             v
         };
-        let (mut steps, mut shapes, mut b64s, mut edges) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let kind = recs[0].kind.clone();
+        let (mut steps, mut shapes, mut b64s, mut edges, mut labels) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for &i in &pick {
             let r = recs[i];
-            let (shape, data) = if r.kind == "histogram" { (r.shape.clone(), r.data.clone()) } else { downsample(&r.shape, &r.data, ARRAY_ELEMS) };
+            let (shape, data) = match r.kind.as_str() {
+                "histogram" => (r.shape.clone(), r.data.clone()),
+                // high-dim states go out raw (PCA runs in the browser, wasm)
+                "trajectory" | "points" | "volume" => downsample(&r.shape, &r.data, STATE_ELEMS),
+                _ => downsample(&r.shape, &r.data, ARRAY_ELEMS),
+            };
             steps.push(r.step);
             shapes.push(shape);
             b64s.push(encode_f32(&data));
             edges.push(r.edges.clone().map(|e| json!(e)).unwrap_or(Value::Null));
+            labels.push(r.labels.as_ref().map(|l| json!(encode_f32(l))).unwrap_or(Value::Null));
         }
-        let kind = recs[0].kind.clone();
         let file = format!("arrays/{}.json", key_file(&k));
         let mut v = json!({ "key": k, "kind": kind, "step": steps, "shape": shapes, "b64": b64s });
-        if kind == "histogram" {
-            v["edges"] = json!(edges);
+        match kind.as_str() {
+            "histogram" => v["edges"] = json!(edges),
+            "trajectory" | "points" => {
+                if labels.iter().any(|l| !l.is_null()) {
+                    v["labels_b64"] = json!(labels);
+                }
+            }
+            _ => {}
         }
         write_json(&dir.join(&file), &v)?;
         array_index.insert(k.clone(), json!({ "file": file, "kind": kind, "shape": recs[n - 1].shape, "n_steps": n }));

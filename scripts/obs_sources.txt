@@ -1,0 +1,8 @@
+# modgrad-obs collector sources: <label> <kind> <rsync source>
+#   kind = dir : the source is a directory of run directories (one level)
+#   kind = run : the source is itself one run directory (named by its basename)
+# Remote sources use rsync's host:path syntax (SSH aliases work).
+bkk07   dir  bkk07:/root/ctmlm/runs/
+local   run  /tmp/claude-1000/-steam-rotko-modgrad-com/8c9931a3-172e-43d1-a94b-8bd379d361ed/scratchpad/pilotA
+local   run  /tmp/claude-1000/-steam-rotko-modgrad-com/8c9931a3-172e-43d1-a94b-8bd379d361ed/scratchpad/pilotB
+local   run  /tmp/claude-1000/-steam-rotko-modgrad-com/8c9931a3-172e-43d1-a94b-8bd379d361ed/scratchpad/pilot1

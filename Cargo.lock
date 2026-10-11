@@ -4851,8 +4851,17 @@ name = "modgrad-obs"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "modgrad-obs-analysis",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "modgrad-obs-analysis"
+version = "0.1.0"
+dependencies = [
+ "libm",
+ "wasm-bindgen",
 ]
 
 [[package]]

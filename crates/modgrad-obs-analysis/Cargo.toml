@@ -1,0 +1,18 @@
+[package]
+name = "modgrad-obs-analysis"
+version = "0.1.0"
+edition = "2024"
+description = "no_std analysis kernels for modgrad-obs (EMA, downsampling, legend stats, cross-run surfaces, PCA, 3-D projection), compiled to wasm for the dashboard"
+license = "MIT"
+
+# The wasm artifact is built with `cargo rustc --crate-type cdylib --features
+# wasm` (scripts/build_obs_wasm.sh) so the plain rlib stays no_std-buildable.
+
+[features]
+default = []
+# wasm-bindgen exports for the browser dashboard (implies std).
+wasm = ["dep:wasm-bindgen"]
+
+[dependencies]
+libm = "0.2"
+wasm-bindgen = { version = "0.2.126", optional = true }

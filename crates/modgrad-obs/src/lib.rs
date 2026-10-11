@@ -26,7 +26,8 @@
 //! them in [`RunData::skipped`].
 //!
 //! No network, no background threads. Dependencies: serde, serde_json,
-//! base64.
+//! base64, and the sibling no_std crate modgrad-obs-analysis (kernels).
+//!
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -342,18 +343,60 @@ impl Run {
     }
 
     pub fn log_array_with_time(&mut self, step: u64, t: f64, key: &str, shape: &[usize], data: &[f32]) -> Result<(), ObsError> {
+        self.log_kind(step, t, key, "tensor", shape, data, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn log_kind(&mut self, step: u64, t: f64, key: &str, kind: &str, shape: &[usize], data: &[f32], labels: Option<&[f32]>) -> Result<(), ObsError> {
         if shape.iter().product::<usize>() != data.len() {
             return Err(ObsError::ShapeMismatch { key: key.into(), shape: shape.to_vec(), len: data.len() });
         }
         if data.len() > MAX_ARRAY_ELEMS {
             return Err(ObsError::TooLarge { key: key.into(), elems: data.len(), cap: MAX_ARRAY_ELEMS });
         }
-        let line = json!({
-            "step": step, "t": round6(t), "key": key, "kind": "tensor", "shape": shape,
+        let mut line = json!({
+            "step": step, "t": round6(t), "key": key, "kind": kind, "shape": shape,
             "dtype": "f32le", "b64": encode_f32(data),
         });
+        if let Some(l) = labels {
+            line["labels_b64"] = json!(encode_f32(l));
+        }
         write_line(&mut self.arrays, line.to_string())?;
         Ok(())
+    }
+
+    /// Thinking trajectory: neuron state per tick for a few samples,
+    /// `shape = [samples, ticks, neurons]` (or `[ticks, neurons]` for one
+    /// sample). The exporter projects all states jointly onto their top 3
+    /// principal components ([`pca3`]); keep `neurons` small (e.g. 256
+    /// top-variance neurons, see [`top_variance_columns`]).
+    pub fn log_trajectory(&mut self, step: u64, key: &str, shape: &[usize], data: &[f32]) -> Result<(), ObsError> {
+        if shape.len() != 2 && shape.len() != 3 {
+            return Err(ObsError::ShapeMismatch { key: key.into(), shape: shape.to_vec(), len: data.len() });
+        }
+        let t = self.elapsed();
+        self.log_kind(step, t, key, "trajectory", shape, data, None)
+    }
+
+    /// Point cloud `[n, d]` (episode keys, slots …), optionally with one
+    /// numeric label per point (e.g. 0 = stored, 1 = lure). Projected to 3D
+    /// by PCA at export.
+    pub fn log_points(&mut self, step: u64, key: &str, shape: &[usize], data: &[f32], labels: Option<&[f32]>) -> Result<(), ObsError> {
+        if shape.len() != 2 || labels.is_some_and(|l| l.len() != shape[0]) {
+            return Err(ObsError::ShapeMismatch { key: key.into(), shape: shape.to_vec(), len: data.len() });
+        }
+        let t = self.elapsed();
+        self.log_kind(step, t, key, "points", shape, data, labels)
+    }
+
+    /// Volume `[ticks, h, w]` (e.g. maze path probability per tick), drawn
+    /// as stacked slices.
+    pub fn log_volume(&mut self, step: u64, key: &str, shape: &[usize], data: &[f32]) -> Result<(), ObsError> {
+        if shape.len() != 3 {
+            return Err(ObsError::ShapeMismatch { key: key.into(), shape: shape.to_vec(), len: data.len() });
+        }
+        let t = self.elapsed();
+        self.log_kind(step, t, key, "volume", shape, data, None)
     }
 
     /// One histogram record (`kind: "histogram"`, counts as the f32 array
@@ -463,48 +506,8 @@ pub fn decode_f32(b64: &str) -> Option<Vec<f32>> {
     Some(bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
 }
 
-/// Reduce a row-major N-d array to at most `max_elems` elements by
-/// repeatedly mean-pooling the currently longest axis by a factor of 2
-/// (the last odd element is kept as its own bin). Returns the new shape
-/// and data. Mean-pooling (not striding) keeps sparse spikes visible as
-/// reduced-amplitude blobs instead of dropping them.
-///
-/// ```
-/// let (shape, data) = modgrad_obs::downsample(&[4, 1000], &vec![1.0; 4000], 1000);
-/// assert!(shape.iter().product::<usize>() <= 1000);
-/// assert_eq!(shape, vec![4, 250]);
-/// assert!(data.iter().all(|&x| x == 1.0));
-/// ```
-pub fn downsample(shape: &[usize], data: &[f32], max_elems: usize) -> (Vec<usize>, Vec<f32>) {
-    assert_eq!(shape.iter().product::<usize>(), data.len(), "shape/data mismatch");
-    let max_elems = max_elems.max(1);
-    let mut shape = shape.to_vec();
-    let mut data = data.to_vec();
-    while data.len() > max_elems {
-        let (ax, &len) = shape.iter().enumerate().max_by_key(|&(_, l)| *l).unwrap();
-        if len <= 1 {
-            break;
-        }
-        let outer: usize = shape[..ax].iter().product();
-        let inner: usize = shape[ax + 1..].iter().product();
-        let new_len = len.div_ceil(2);
-        let mut out = vec![0f32; outer * new_len * inner];
-        for o in 0..outer {
-            for j in 0..new_len {
-                let (a, b) = (2 * j, (2 * j + 1).min(len - 1));
-                let n = if a == b { 1.0 } else { 2.0 };
-                for i in 0..inner {
-                    let va = data[(o * len + a) * inner + i];
-                    let vb = if a == b { 0.0 } else { data[(o * len + b) * inner + i] };
-                    out[(o * new_len + j) * inner + i] = (va + vb) / n;
-                }
-            }
-        }
-        shape[ax] = new_len;
-        data = out;
-    }
-    (shape, data)
-}
+/// Analysis kernels shared with the wasm dashboard (re-exported).
+pub use modgrad_obs_analysis::{downsample, pca3, select_columns, top_variance_columns};
 
 // ---------------------------------------------------------------- reader
 
@@ -526,6 +529,8 @@ pub struct ArrayRecord {
     pub kind: String,
     /// Histogram bin edges (`len == data.len() + 1`).
     pub edges: Option<Vec<f64>>,
+    /// Per-point labels for `kind == "points"`.
+    pub labels: Option<Vec<f32>>,
 }
 
 #[derive(Debug, Clone)]
@@ -672,6 +677,7 @@ pub fn read_run(dir: &Path) -> io::Result<RunData> {
                 data,
                 kind: v.get("kind").and_then(|k| k.as_str()).unwrap_or("tensor").to_string(),
                 edges: v.get("edges").and_then(|e| e.as_array()).map(|e| e.iter().map(num).collect()),
+                labels: v.get("labels_b64").and_then(|b| b.as_str()).and_then(decode_f32),
             })
         })();
         match rec {

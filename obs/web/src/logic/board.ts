@@ -217,10 +217,10 @@ const AUTO: [string, RegExp, string][] = [
   ['entropy', /entropy/i, ''],
   ['response length', /resp(onse)?_?len/i, ''],
 ];
-export interface AutoLLM { families?: { family: string; metrics: string[] }[]; samples?: boolean; heatmapQuery?: (family: string, filter: string) => string; samplesMetric?: string }
+export interface AutoLLM { families?: { family: string; metrics: string[] }[]; samples?: boolean; heatmapQuery?: (family: string, filter: string) => string; samplesMetric?: string; runsOf?: (metric: string) => string[] }
 /** families that earn a heatmap on the default board, most useful first */
 const HEATMAP_RANK = (f: string): number => (/grad_?norm/i.test(f) ? 0 : /act(ivation)?s?_?rms|rms/i.test(f) ? 1 : /update|weight_?norm|norm/i.test(f) ? 2 : 9);
-export function autoBoard(metrics: Map<string, number>, { replicates = false, hasTokens = null as string | null, filter = '', families = [], samples = false, heatmapQuery, samplesMetric = 'samples:text' } = {} as { replicates?: boolean; hasTokens?: string | null; filter?: string } & AutoLLM): Board | null {
+export function autoBoard(metrics: Map<string, number>, { replicates = false, hasTokens = null as string | null, filter = '', families = [], samples = false, heatmapQuery, samplesMetric = 'samples:text', runsOf } = {} as { replicates?: boolean; hasTokens?: string | null; filter?: string } & AutoLLM): Board | null {
   // per-layer metrics belong to their family's heatmap, not to a single-metric panel
   const layered = new Set(families.flatMap((f) => f.metrics));
   const names = [...metrics.keys()].filter((m) => !layered.has(m));
@@ -229,12 +229,23 @@ export function autoBoard(metrics: Map<string, number>, { replicates = false, ha
   for (const [title, re, extra] of AUTO) {
     const hits = names.filter((m) => re.test(m) && !used.has(m)).sort((a, b) => metrics.get(b)! - metrics.get(a)! || a.localeCompare(b));
     if (!hits.length) continue;
-    for (const m of hits.slice(0, title === 'eval loss' || title === 'accuracy' ? 2 : 1)) {
-      used.add(m);
-      let q = m + filter;
+    // one quantity under several names in different runs (loss / train/loss, val_loss / eval/loss,
+    // a dropped CSV's loss next to train_loss_ema) is one panel: names whose runs do not overlap
+    // the panel's runs join it (up to 3); accuracies are different benchmarks and stay apart
+    const groups: string[][] = [];
+    for (const m of hits) {
+      const rs = runsOf ? runsOf(m) : [];
+      const g = runsOf && title !== 'accuracy' ? groups.find((g) => g.length < 3 && !g.some((o) => runsOf(o).some((r) => rs.includes(r)))) : undefined;
+      if (g) g.push(m); else groups.push([m]);
+    }
+    for (const g of groups.slice(0, title === 'eval loss' || title === 'accuracy' ? 2 : 1)) {
+      for (const m of g) used.add(m);
+      let q = g.map((m) => m + filter).join('; ');
       if (extra) q += ` | ${extra}`;
       if (replicates && /loss|nll|reward|acc/.test(title)) q += ' | mean±sd over seed';
-      if (hasTokens && /loss|nll/.test(title)) q += ` | x ${hasTokens}`;
+      // tokens on x only when every run of the panel logs them (a run without would draw nothing)
+      const tokOk = (m: string) => !runsOf || runsOf(m).every((r) => runsOf(hasTokens!).includes(r));
+      if (hasTokens && /loss|nll/.test(title) && g.every(tokOk)) q += ` | x ${hasTokens}`;
       panels.push(newPanel(q));
     }
   }

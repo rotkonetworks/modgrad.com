@@ -118,7 +118,8 @@ export function autoPreset(): Board | null {
   else if (t.project) filter = `{run=~${Bd.quote(t.project + '/*')}}`;
   const tok = [...counts.keys()].find((m) => /tokens?_seen|^tokens$|num_tokens|consumed_tokens/.test(m));
   const families = layerFamilies([...counts.keys()], 2);
-  return Bd.autoBoard(counts, { replicates: hasReplicates(runs), hasTokens: tok || null, filter, families, heatmapQuery, samples: runs.some((r) => (r.n_samples || 0) > 0), samplesMetric: SAMPLES_METRIC });
+  const runsOf = (m: string) => runs.filter((r) => r.metrics?.[m]).map((r) => r.id);
+  return Bd.autoBoard(counts, { replicates: hasReplicates(runs), hasTokens: tok || null, filter, families, heatmapQuery, samples: runs.some((r) => (r.n_samples || 0) > 0), samplesMetric: SAMPLES_METRIC, runsOf });
 }
 export const defaultBoard = (): Board => autoPreset() || historyPreset();
 export function applyPreset(name: string): void {

@@ -17,7 +17,7 @@ jmap = ["dep:ureq"]
 [dependencies]
 modgrad-obs = { path = "../modgrad-obs", default-features = false }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }
 tower = { version = "0.5", features = ["buffer", "limit", "load-shed", "timeout", "util"] }

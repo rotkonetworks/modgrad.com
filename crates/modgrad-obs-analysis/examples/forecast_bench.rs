@@ -4,6 +4,8 @@
 //!     cargo run --release -p modgrad-obs-analysis --example forecast_bench
 //!     cargo run --release -p modgrad-obs-analysis --example forecast_bench -- --golden
 //!
+//! `--json` prints the cases (for timing the wasm build in a browser).
+//! `--only <case>` runs one case.
 //! `--golden` prints the outputs in the form tests/forecast_golden.rs pins.
 
 #[path = "../tests/common/forecast_cases.rs"]
@@ -13,7 +15,24 @@ use std::time::Instant;
 
 fn main() {
     let golden = std::env::args().any(|a| a == "--golden");
+    if std::env::args().any(|a| a == "--json") {
+        // the cases as JSON, for timing the wasm build in a browser
+        let arr = |v: &[f64]| format!("[{}]", v.iter().map(|x| format!("{x:e}")).collect::<Vec<_>>().join(","));
+        let items: Vec<String> = forecast_cases::cases()
+            .iter()
+            .map(|c| {
+                let pool: Vec<String> = c.pool.iter().map(|(s, v)| format!("[{},{}]", arr(s), arr(v))).collect();
+                format!("{{\"name\":{:?},\"steps\":{},\"vals\":{},\"pool\":[{}],\"horizon\":{:e},\"max_points\":{}}}", c.name, arr(&c.steps), arr(&c.vals), pool.join(","), c.horizon, c.max_points)
+            })
+            .collect();
+        println!("[{}]", items.join(","));
+        return;
+    }
+    let only: Option<String> = std::env::args().skip_while(|a| a != "--only").nth(1);
     for c in forecast_cases::cases() {
+        if only.as_deref().is_some_and(|o| o != c.name) {
+            continue;
+        }
         if golden {
             let f = forecast_cases::run(&c).expect(c.name);
             let eta = modgrad_obs_analysis::curve::eta(&f.steps, &f.mean, &f.lo, &f.hi, c.target);

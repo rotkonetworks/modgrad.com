@@ -2,7 +2,7 @@
 //! tests/common/forecast_cases.rs, recorded from the original (unoptimised)
 //! implementation before the speed-up. The selected configuration, skill
 //! badge, family bests and backtest horizon must match exactly; MAEs,
-//! forecast values, band edges and the ETA readout to a relative 1e-6
+//! forecast values, band edges and the ETA readout to a relative 1e-9
 //! (float reassociation in the Gram/rollout algebra, not a model change).
 //! Regenerate only on a deliberate model change:
 //!     cargo run --release -p modgrad-obs-analysis --example forecast_bench -- --golden
@@ -37,7 +37,7 @@ struct G {
     hi: &'static [(usize, f64)],
 }
 
-const REL: f64 = 1e-6;
+const REL: f64 = 1e-9;
 
 fn close(what: &str, got: f64, want: f64) {
     if want.is_nan() {

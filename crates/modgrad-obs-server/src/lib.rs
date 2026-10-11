@@ -17,6 +17,7 @@ pub mod error;
 pub mod http;
 pub mod ingest;
 pub mod live;
+pub mod mcp_http;
 pub mod read;
 pub mod state;
 pub mod v1;

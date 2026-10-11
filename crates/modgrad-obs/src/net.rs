@@ -1,4 +1,4 @@
-//! Minimal HTTP client for the obs CLI, std only: plain `http://` over a
+//! Minimal HTTP client for the obs CLI and `obs mcp --url`, std only: plain `http://` over a
 //! `TcpStream` (HTTP/1.1, `Connection: close`), and `https://` through the
 //! `curl` binary so no TLS stack is linked. (A QUIC/HTTP3 transport with
 //! a long-lived stream per run is the planned replacement; see
@@ -116,7 +116,7 @@ fn curl(method: &str, url: &str, token: Option<&str>, body: Option<&[u8]>, ctype
     }
     let tmp = match body {
         Some(b) => {
-            let p = std::env::temp_dir().join(format!("obs-curl-{}-{:x}", std::process::id(), modgrad_obs::now_unix().to_bits()));
+            let p = std::env::temp_dir().join(format!("obs-curl-{}-{:x}", std::process::id(), crate::now_unix().to_bits()));
             let mut o = std::fs::OpenOptions::new();
             o.write(true).create_new(true);
             #[cfg(unix)]

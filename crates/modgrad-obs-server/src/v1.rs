@@ -16,7 +16,7 @@ use axum::extract::{Path, Query, State as AxState};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use modgrad_obs::Item;
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
@@ -32,6 +32,7 @@ pub const EX_LOG: &str = r#"curl -X POST "$OBS/api/v1/runs/my-run/log" -H "Autho
 pub const EX_TOKEN: &str = r#"curl -X POST "$OBS/api/v1/projects"   # -> {"token": "obsp_..."}; then send -H "Authorization: Bearer obsp_...""#;
 pub const EX_TEXT: &str = r#"python train.py 2>&1 | curl -X POST "$OBS/api/v1/runs/my-run/text" -H "Authorization: Bearer $OBS_TOKEN" --data-binary @-"#;
 pub const EX_SAMPLES: &str = r#"curl -X POST "$OBS/api/v1/runs/my-run/samples" -H "Authorization: Bearer $OBS_TOKEN" -d '{"step": 100, "key": "eval/gsm8k", "prompt": "2+2=", "completion": "4", "reward": 1.0}'"#;
+pub const EX_BOARD: &str = r#"curl -X PUT "$OBS/api/v1/boards/my-board" -H "Authorization: Bearer $OBS_TOKEN" -d '{"title": "loss", "panels": [{"query": "loss{run=~\"my-run\"}", "metric": "loss", "runs": ["my-run"]}]}'"#;
 pub const EX_CREATE: &str = r#"curl -X POST "$OBS/api/v1/runs" -H "Authorization: Bearer $OBS_TOKEN" -d '{"name": "my-run", "config": {"lr": 0.0003}}'"#;
 
 fn bad(m: impl Into<String>) -> ApiError {
@@ -306,7 +307,7 @@ pub fn parse_text(text: &str) -> (Vec<Record>, usize, Vec<String>) {
     (recs, lines, unparsed)
 }
 
-fn bearer(h: &HeaderMap) -> Option<String> {
+pub(crate) fn bearer(h: &HeaderMap) -> Option<String> {
     let v = h.get(header::AUTHORIZATION)?.to_str().ok()?;
     let t = v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer ")).unwrap_or(v).trim();
     (!t.is_empty()).then(|| t.to_string())
@@ -575,22 +576,53 @@ async fn samples(st: &AppState, run: String, q: &HashMap<String, String>) -> Api
     }
 }
 
-async fn api_text() -> Response {
-    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], API_TEXT).into_response()
+// ----------------------------------------------------------------- boards
+
+/// `PUT /api/v1/boards/<name>`: store a board (any JSON object; the
+/// dashboard reads `{title, panels: [{query, metric, runs}]}`). A project
+/// token stores it as `<project>/<name>`; a tokenless write needs `--dev`.
+/// The server only keeps the JSON; it never evaluates the queries.
+async fn put_board(AxState(st): AxState<AppState>, Path(name): Path<String>, h: HeaderMap, body: Bytes) -> ApiResult {
+    let teach = |status, error: String| ApiError::Teach { status, error, example: EX_BOARD };
+    let Some(dir) = st.boards.clone() else { return Err(teach(StatusCode::NOT_FOUND, "this server does not store boards".into())) };
+    if name.contains('/') || !crate::state::valid_run_name(&name) {
+        return Err(teach(StatusCode::BAD_REQUEST, format!("board name {name:?} must be one segment of [A-Za-z0-9_.-]")));
+    }
+    let id = match st.auth.cred(bearer(&h).as_deref()).map_err(ApiError::Auth)? {
+        crate::auth::Cred::Project(p) => format!("{p}/{name}"),
+        crate::auth::Cred::None if st.auth.dev() => name.clone(),
+        crate::auth::Cred::None => return Err(ApiError::Auth(crate::AuthError::Unauthorized)),
+        crate::auth::Cred::Run(_) => return Err(ApiError::Auth(crate::AuthError::Forbidden("boards need a project token (obsp_…), not a run token".into()))),
+    };
+    let b = parse_body(&body)?;
+    if !b.is_object() {
+        return Err(teach(StatusCode::BAD_REQUEST, format!("a board body is a JSON object, got {}", if b.is_null() { "nothing".into() } else { b.to_string().chars().take(80).collect::<String>() })));
+    }
+    let path = dir.join(format!("{id}.json"));
+    let write = || -> std::io::Result<()> {
+        std::fs::create_dir_all(path.parent().unwrap_or(&dir))?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(&b).unwrap_or_default())?;
+        std::fs::rename(&tmp, &path)
+    };
+    write().map_err(|e| ApiError::Bad(format!("cannot store board {id}: {e}")))?;
+    let base = base_url(&h);
+    Ok(axum::Json(json!({ "board": id, "url": format!("{base}/#board={id}"), "get": format!("{base}/api/v1/boards/{id}") })).into_response())
 }
 
-/// `GET /api/v1/boards/<name>`: a saved board file as written by the MCP
-/// `make_board` tool. Names are letters, digits, `.`, `_`, `~`, `-` (no
-/// leading dot), so the lookup cannot leave the boards directory.
-async fn board(AxState(st): AxState<AppState>, Path(name): Path<String>) -> Result<Response, ApiError> {
-    let ok = !name.is_empty() && !name.starts_with('.') && name.len() <= 200 && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"._~-".contains(&b));
-    let (Some(dir), true) = (st.boards_dir.clone(), ok) else { return Err(ApiError::NotFound) };
-    let path = dir.join(format!("{name}.json"));
-    let bytes = tokio::task::spawn_blocking(move || std::fs::read(path)).await.map_err(|e| ApiError::Bad(e.to_string()))?;
-    match bytes {
-        Ok(b) => Ok(([(header::CONTENT_TYPE, "application/json")], b).into_response()),
-        Err(_) => Err(ApiError::NotFound),
+/// `GET /api/v1/boards/<name | project/name>`: the stored board JSON.
+async fn get_board(AxState(st): AxState<AppState>, Path(id): Path<String>) -> ApiResult {
+    let Some(dir) = st.boards.clone() else { return Err(ApiError::NotFound) };
+    if id.split('/').count() > 2 || !crate::state::valid_run_name(&id) {
+        return Err(ApiError::NotFound);
     }
+    let b = std::fs::read(dir.join(format!("{id}.json"))).map_err(|_| ApiError::NotFound)?;
+    let v: Value = serde_json::from_slice(&b).map_err(|_| ApiError::NotFound)?;
+    Ok(axum::Json(v).into_response())
+}
+
+async fn api_text() -> Response {
+    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], API_TEXT).into_response()
 }
 
 pub fn routes() -> Router<AppState> {
@@ -599,10 +631,10 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/", get(api_text))
         .route("/api/v1/projects", post(new_project))
         .route("/api/v1/claim/:claim", get(claim))
-        .route("/api/v1/boards/:name", get(board))
         .route("/api/v1/runs", post(create))
         .route("/api/v1/stream", get(stream_all))
         .route("/api/v1/runs/*path", post(post_dispatch).get(get_dispatch))
+        .route("/api/v1/boards/*name", put(put_board).get(get_board))
 }
 
 #[cfg(test)]

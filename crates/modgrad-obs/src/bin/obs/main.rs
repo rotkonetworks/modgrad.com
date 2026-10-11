@@ -24,7 +24,7 @@
 
 use std::path::{Path, PathBuf};
 
-mod net;
+use modgrad_obs::net;
 mod run;
 mod sys;
 mod tail;
@@ -37,8 +37,10 @@ const USAGE: &str = "usage:
   obs legacy <log.txt> <out_run_dir> [--name N] [--source S]
   obs export <obs_dir>
   obs show <run_dir>
-  obs mcp [--dir <obs_dir>] [--base-url URL]   MCP server on stdio for coding agents
-env: OBS_URL (default http://127.0.0.1:8790), OBS_TOKEN, OBS_PROJECT";
+  obs mcp [--dir <obs_dir>] [--base-url URL]   MCP server on stdio for coding agents (local data)
+  obs mcp --url <server> [--token T]           same tools against an obs-server (analysis stays local)
+env: OBS_URL (default http://127.0.0.1:8790), OBS_TOKEN, OBS_PROJECT,
+     OBS_DIR (obs mcp data dir), OBS_MCP_URL (obs mcp server, same as --url)";
 
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
@@ -171,11 +173,12 @@ fn main() {
         }
         Some("mcp") => {
             // tools: log, ingest_log, list_runs, read_metric, summarize, compare, make_board.
-            // --dir is the obs root holding runs/ (default $OBS_DIR, else ./obs); --url selects
-            // remote mode (not implemented yet).
+            // --dir is the obs root holding runs/ (default $OBS_DIR, else ./obs); --url
+            // (or $OBS_MCP_URL) selects remote mode against an obs-server, with --token /
+            // $OBS_TOKEN. Analysis always runs here, on fetched rows.
             use modgrad_obs::mcp::{Server, serve_stdio, store};
-            let st: Box<dyn store::Store> = match flag(&args, "--url") {
-                Some(url) => Box::new(store::RemoteStore { url, token: flag(&args, "--token") }),
+            let st: Box<dyn store::Store> = match flag(&args, "--url").or_else(|| env("OBS_MCP_URL")) {
+                Some(url) => Box::new(store::RemoteStore::new(&url, flag(&args, "--token").or_else(|| env("OBS_TOKEN")))),
                 None => {
                     let dir = flag(&args, "--dir").or_else(|| env("OBS_DIR")).unwrap_or_else(|| "obs".into());
                     Box::new(store::LocalStore::open(Path::new(&dir), flag(&args, "--base-url")))

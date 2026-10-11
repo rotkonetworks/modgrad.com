@@ -31,20 +31,29 @@ pub struct AppState {
     pub auth: Auth,
     /// Change feed behind the SSE endpoints.
     pub live: Live,
-    /// Saved boards (`<obs root>/boards/<name>.json`, written by the MCP
-    /// `make_board` tool), served at `GET /api/v1/boards/<name>`; None = off.
-    pub boards_dir: Option<PathBuf>,
+    /// Where `PUT /api/v1/boards/<name>` stores board JSON; None = no boards.
+    pub boards: Option<PathBuf>,
+    /// `--mcp`: this server's own loopback base URL, which the hosted MCP
+    /// endpoint's tools call; None = no `/mcp` route.
+    pub mcp_self: Option<String>,
 }
 
 impl AppState {
     /// Wire the v1 extras around an ingest/read pair (spawns the [`Live`] task).
     pub fn new(ingest: IngestService, read: ReadState, static_dir: Option<PathBuf>, auth: Auth) -> AppState {
         let live = Live::spawn(read.clone());
-        AppState { ingest, read, static_dir, auth, live, boards_dir: None }
+        AppState { ingest, read, static_dir, auth, live, boards: None, mcp_self: None }
     }
-    /// Serve saved boards from `dir` (usually `<obs root>/boards`).
-    pub fn with_boards_dir(mut self, dir: PathBuf) -> AppState {
-        self.boards_dir = Some(dir);
+    /// Store boards under `dir` (`<obs root>/boards`, the same place
+    /// `obs mcp --dir` writes them).
+    pub fn with_boards(mut self, dir: PathBuf) -> AppState {
+        self.boards = Some(dir);
+        self
+    }
+    /// Serve the hosted MCP endpoint at `/mcp`; `self_url` is how this
+    /// process reaches its own HTTP API (e.g. `http://127.0.0.1:8790`).
+    pub fn with_mcp(mut self, self_url: String) -> AppState {
+        self.mcp_self = Some(self_url);
         self
     }
     /// The ingest service behind write authorisation.
@@ -246,9 +255,13 @@ async fn finish(AxState(st): AxState<AppState>, Path(run): Path<String>, body: O
 
 // ------------------------------------------------------------ read routes
 
-pub(crate) async fn index(AxState(st): AxState<AppState>, Query(q): Query<HashMap<String, String>>) -> ApiResult {
-    // anonymous projects are listed only when asked for by name (their board URL)
-    let project = q.get("project").cloned();
+pub(crate) async fn index(AxState(st): AxState<AppState>, Query(q): Query<HashMap<String, String>>, h: HeaderMap) -> ApiResult {
+    // anonymous projects are listed only when asked for by name (their board
+    // URL) or by a project token, which scopes the list to its project
+    let project = q.get("project").cloned().or_else(|| match st.auth.cred(crate::v1::bearer(&h).as_deref()) {
+        Ok(crate::auth::Cred::Project(p)) => Some(p),
+        _ => None,
+    });
     let keep = |e: &Value| {
         let id = e["id"].as_str().unwrap_or("");
         match &project {
@@ -404,6 +417,9 @@ async fn static_file(AxState(st): AxState<AppState>, uri: Uri) -> ApiResult {
 /// exist only in dev mode; the v1 routes (`crate::v1`) are authenticated.
 pub fn router(st: AppState) -> Router {
     let mut r = Router::new().route("/api/index", get(index));
+    if st.mcp_self.is_some() {
+        r = r.route("/mcp", post(crate::mcp_http::post_mcp).get(crate::mcp_http::get_mcp));
+    }
     if st.auth.dev() {
         r = r
             .route("/api/runs", post(create_run))

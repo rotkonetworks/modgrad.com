@@ -1,0 +1,235 @@
+# modgrad-obs
+
+> Training observability for LLM pre-, mid- and post-training runs: metrics,
+> events and summaries stored as append-only JSONL, a live dashboard, and
+> analysis (trends, honest forecasts, spikes, divergence, seed noise) that
+> runs in the client, never on the server. This file is the quickstart for
+> coding agents. It is complete: you should not need anything else.
+
+Binaries: `obs` (CLI and MCP server) and `obs-server` (HTTP API, dashboard).
+Install from a checkout of https://github.com/rotkonetworks/modgrad:
+
+    cargo install --path crates/modgrad-obs          # -> obs
+    cargo install --path crates/modgrad-obs-server   # -> obs-server
+
+Note: OBS Studio also installs a binary called `obs`. If `obs --help` does
+not print this tool's usage, use the full path (usually `~/.cargo/bin/obs`).
+
+Data lives in an obs directory (default `./obs`): `obs/runs/<run>/` holds
+`config.json`, `metrics.jsonl`, `events.jsonl`, `summary.json`. Run names are
+1 to 3 `/`-separated parts of `[A-Za-z0-9_.-]`, e.g. `sweep/lr3e-4_s1`.
+Name seeds `<config>_s1`, `<config>_s2`, ...: the tools group them and test
+differences against seed noise.
+
+## The four doors
+
+Every door ends in the same place: a run with metrics you can query and chart.
+
+1. MCP: `obs mcp`. An agent reads and writes runs through 7 tools. Use this
+   to answer questions about runs ("did it diverge?", "worth continuing?").
+2. `obs run -- <command>`: wraps a training command, passes its output through
+   unchanged, parses metric lines from stdout/stderr, and samples CPU/RSS/GPU.
+   No code change. Use this to instrument a script that already prints metrics.
+3. HTTP API: `POST $OBS/api/v1/runs/<run>/log` with JSON. Any language, no
+   client library. Use this inside a training loop or framework callback.
+4. The dashboard: `obs-server` serves it at `/`. `$OBS/#new` creates an
+   anonymous project and shows ready-to-paste commands; `#run=<id>`,
+   `#project=<p>` and `#board=<id>` open a run, a project or a saved board.
+   Log files (CSV, JSONL, text logs, TensorBoard, W&B offline) can also be
+   dropped onto the page.
+
+## 1. MCP
+
+Local data (recommended; nothing else to run):
+
+    obs mcp --dir ./obs                                        # or OBS_DIR=./obs
+
+Against an obs-server (the tools fetch rows and analyse locally; the server
+only stores and selects):
+
+    obs mcp --url https://obs.example.org --token obsp_...    # or OBS_MCP_URL=... OBS_TOKEN=...
+
+A server started with `obs-server --mcp` also serves MCP over streamable HTTP
+at `$OBS/mcp`. That is for agents that cannot run a local binary: the
+analysis then runs on the server. Prefer `obs mcp --url` when you can.
+
+Claude Code:
+
+    claude mcp add obs -- obs mcp --dir ./obs
+    claude mcp add --scope project obs -- obs mcp --dir obs          # writes .mcp.json
+    claude mcp add obs --env OBS_TOKEN=obsp_... -- obs mcp --url https://obs.example.org
+    claude mcp add --transport http obs https://obs.example.org/mcp --header "Authorization: Bearer obsp_..."
+
+Cursor (`.cursor/mcp.json`) and any client that takes the common JSON shape
+(`.mcp.json`, Claude Desktop, Windsurf, Cline, ...):
+
+    {
+      "mcpServers": {
+        "obs": { "command": "obs", "args": ["mcp", "--dir", "obs"] }
+      }
+    }
+
+Remote store, local analysis:
+
+    { "mcpServers": { "obs": { "command": "obs", "args": ["mcp", "--url", "https://obs.example.org"],
+                               "env": { "OBS_TOKEN": "obsp_..." } } } }
+
+Hosted endpoint (only if the agent cannot run `obs`):
+
+    { "mcpServers": { "obs": { "url": "https://obs.example.org/mcp",
+                               "headers": { "Authorization": "Bearer obsp_..." } } } }
+
+Tools (arguments are flat and forgiving; run and metric names are fuzzy):
+
+    list_runs(filter?)                    runs with last step, metric count, status
+    read_metric(run, metric, last?)       recent values, min/max/last, NaN/inf warning
+    summarize(run, metric?, target?)      Verdict line (DIVERGED / OVERFITTING / improving /
+                                          no clear progress), trend, spikes and what changed
+                                          before them, honest forecast ("no skill" when it
+                                          cannot beat the last value), ETA to target, seeds
+    compare(runs, metric)                 aligned table, best run, diverged runs; seed groups
+                                          (x_s1, x_s2, ...) get mean ± sd and WITHIN/BEYOND noise
+    log(run, metrics, step?)              record values; creates the run
+    ingest_log(run, text)                 parse pasted stdout into a run
+    make_board(query)                     save a dashboard board, return its URL;
+                                          query = metric{run=~"a|b"}; several panels with ';'
+
+Typical calls:
+
+    summarize(run="sweep/lr3e-4")                         "is it worth continuing?"
+    compare(runs="sweep/*", metric="val_loss")            "which run diverged?"
+    compare(runs="abl/base_s*,abl/wd_s*", metric="val_loss")   "is the difference real?"
+    summarize(run="long/a", metric="val_loss", target=2.0)     "when will it reach 2.0?"
+    make_board(query='reward{run=~"rl/ppo_a|rl/ppo_b"}; kl{run=~"rl/ppo_a|rl/ppo_b"}')
+
+Report what the tools say. If summarize says the forecast has "no skill",
+do not give a confident number.
+
+## 2. obs run
+
+    obs run --offline --name exp1 -- python train.py      # writes ./obs/runs/exp1
+    obs run --name exp1 -- python train.py                # streams to $OBS_URL (default http://127.0.0.1:8790)
+    obs run --server https://obs.example.org --token obsp_... --project team --name exp1 -- torchrun ...
+
+Lines it understands (one metric line per print is enough):
+
+    step 1250: loss 3.48 acc 7.5%
+    iter 100 | loss=2.31 | lr 3e-4
+    [epoch 2/10] train_loss: 0.45
+    {'loss': 0.41, 'learning_rate': 5e-05, 'epoch': 0.3}     (HF Trainer's default output)
+    tqdm postfixes: 100%|####| 500/500 [00:12<00:00, loss=0.31]
+
+A line without a step uses the last step seen. The child's exit code is
+returned. If the server is unreachable, rows are spooled to disk and
+`obs push <spool dir>` resends them. `obs tail <run>` prints the latest
+values with sparklines.
+
+To instrument a silent script: add one print per logging step, e.g.
+`print(f"step {step} loss={loss:.6f} lr={lr:.3e}", flush=True)`, then wrap it
+with `obs run`.
+
+## 3. HTTP API
+
+Full reference, plain text: `curl $OBS/api/v1`. Bodies are JSON whatever the
+Content-Type; errors are JSON with a corrected example.
+
+    obs-server --root obs --dev                     # local server; --dev = writes need no token
+    curl -X POST $OBS/api/v1/projects               # -> {"project", "token": "obsp_...", "board"}
+    curl -X POST $OBS/api/v1/runs/exp1/log -H "Authorization: Bearer $OBS_TOKEN" \
+         -d '{"step": 10, "loss": 0.52, "acc": "71.5%"}'
+    curl -X POST $OBS/api/v1/runs/exp1/log -H "Authorization: Bearer $OBS_TOKEN" \
+         -d '{"rows": [{"step": 11, "loss": 0.5}], "events": ["lr drop"], "config": {"lr": 3e-4}}'
+    python train.py 2>&1 | curl -X POST $OBS/api/v1/runs/exp1/text -H "Authorization: Bearer $OBS_TOKEN" --data-binary @-
+    curl -X POST $OBS/api/v1/runs/exp1/finish -H "Authorization: Bearer $OBS_TOKEN" -d '{"exit_code": 0}'
+    curl "$OBS/api/index"                                       # runs (a project token scopes it)
+    curl "$OBS/api/v1/runs/exp1/history?keys=loss,acc&stride=10" # {"steps", "t", "columns"}
+
+The first `log` creates the run. `step` is optional (default: last + 1).
+Nested objects flatten with `/`. Re-sending a row is harmless. With a
+project token, a run id without `/` lands in the token's project.
+
+## Framework snippets
+
+All of these post to the HTTP API with `requests`; each logging call is one
+small POST. Set `OBS_URL` (and `OBS_TOKEN` unless the server runs `--dev`).
+Never let logging crash training: catch and drop errors.
+
+    import os, requests
+    OBS = os.environ.get("OBS_URL", "http://127.0.0.1:8790")
+    HDR = {"Authorization": f"Bearer {os.environ['OBS_TOKEN']}"} if os.environ.get("OBS_TOKEN") else {}
+
+    def obs_log(run, step, metrics, **envelope):
+        """envelope: config={...}, events=[...], summary={...}, finish=True"""
+        body = dict(envelope)
+        if metrics:   # step=None means "one past the run's last step"
+            body["rows"] = [{**metrics, **({"step": step} if step is not None else {})}]
+        try:
+            requests.post(f"{OBS}/api/v1/runs/{run}/log", json=body, headers=HDR, timeout=5)
+        except requests.RequestException:
+            pass
+
+PyTorch loop:
+
+    obs_log("exp1", 0, {}, config={"lr": lr, "batch_size": bs})
+    for step, batch in enumerate(loader):
+        loss = model(batch).loss
+        loss.backward(); opt.step(); sched.step(); opt.zero_grad()
+        if step % 10 == 0:
+            obs_log("exp1", step, {"train/loss": loss.item(), "lr": sched.get_last_lr()[0]})
+    obs_log("exp1", step, {"val/loss": evaluate(model)}, finish=True)
+
+Hugging Face Trainer:
+
+    from transformers import TrainerCallback
+
+    class ObsCallback(TrainerCallback):
+        def __init__(self, run):
+            self.run = run
+        def on_train_begin(self, args, state, control, **kw):
+            if state.is_world_process_zero:
+                obs_log(self.run, 0, {}, config=args.to_sanitized_dict())
+        def on_log(self, args, state, control, logs=None, **kw):
+            if state.is_world_process_zero and logs:
+                obs_log(self.run, state.global_step, logs)   # non-numeric values are skipped
+        def on_train_end(self, args, state, control, **kw):
+            if state.is_world_process_zero:
+                obs_log(self.run, state.global_step, {}, finish=True)
+
+    trainer = Trainer(..., callbacks=[ObsCallback("sft/run1")])
+
+(Or no code at all: `obs run --name sft/run1 -- python train.py` parses the
+dicts the Trainer prints.)
+
+PyTorch Lightning:
+
+    from lightning.pytorch.loggers.logger import Logger
+    from lightning.pytorch.utilities import rank_zero_only
+
+    class ObsLogger(Logger):
+        def __init__(self, run):
+            super().__init__()
+            self._run = run
+        @property
+        def name(self): return "obs"
+        @property
+        def version(self): return self._run
+        @rank_zero_only
+        def log_hyperparams(self, params, *a, **kw):
+            params = params if isinstance(params, dict) else vars(params)
+            obs_log(self._run, 0, {}, config={k: (v if isinstance(v, (int, float, str, bool)) else str(v)) for k, v in params.items()})
+        @rank_zero_only
+        def log_metrics(self, metrics, step=None):
+            obs_log(self._run, step, metrics)
+        @rank_zero_only
+        def finalize(self, status):
+            obs_log(self._run, 0, {}, summary={"status": status}, finish=True)
+
+    trainer = L.Trainer(logger=ObsLogger("pretrain/run1"))
+
+Rust (modgrad SDK): `modgrad_obs::Run::create(...)` and `run.log_scalars(step, &[("loss", x)])`
+write the same directory format with no server.
+
+## Viewing
+
+    obs-server --root obs --dev          # then open http://127.0.0.1:8790/
+    # boards from make_board open at http://127.0.0.1:8790/#board=<id>

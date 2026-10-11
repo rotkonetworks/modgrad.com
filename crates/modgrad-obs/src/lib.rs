@@ -1205,3 +1205,4 @@ pub mod sink;
 pub use sink::{OpenSink, RunAt, Sink};
 pub mod textlog;
 pub mod mcp;
+pub mod net;

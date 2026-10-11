@@ -27,8 +27,8 @@ pub const SERVER_NAME: &str = "modgrad-obs";
 const PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 const INSTRUCTIONS: &str = "modgrad-obs: training-run metrics (loss curves, eval scores) stored locally. \
-Start with list_runs() to see run names. Use summarize(run) for a plain-language status, \
-read_metric(run, metric) for values, compare(runs, metric) across runs, log / ingest_log to record metrics, \
+Start with list_runs() to see run names. Use summarize(run) for a plain-language status and verdict (diverged / overfitting / improving / plateau), \
+read_metric(run, metric) for values, compare(runs, metric) across runs and seed groups (within or beyond seed noise), log / ingest_log to record metrics, \
 and make_board(query) for a dashboard link. Run and metric names are fuzzy-matched.";
 
 /// Name, description, and flat JSON-schema properties of each tool.
@@ -72,8 +72,8 @@ Example: list_runs(filter=\"bkk07\")",
         ),
         tool(
             "read_metric",
-            "Show the recent values of one metric in one run as a small table, plus min / max / last. \
-Metric names are fuzzy: \"lr\", \"learning_rate\" and \"LR\" all work; on a miss the closest names are suggested.\n\
+            "Show the recent values of one metric in one run as a small table, plus min / max / last, and a WARNING if any values are NaN/inf (diverged). \
+Metric names are fuzzy: \"lr\", \"learning_rate\" and \"LR\" all work, and so do descriptions like \"validation loss\" (matched by meaning, e.g. to eval/nll); on a miss the closest names are suggested.\n\
 Example: read_metric(run=\"bkk07/small\", metric=\"brain_heldout_nll\", last=10)",
             json!({
                 "run": s("Run name, e.g. \"bkk07/small\""),
@@ -84,9 +84,10 @@ Example: read_metric(run=\"bkk07/small\", metric=\"brain_heldout_nll\", last=10)
         ),
         tool(
             "summarize",
-            "Plain-language status of a run: for each key metric the latest value, the recent trend (improving / getting worse / no clear trend) \
-with slope per N steps, spikes, plateau, an honest forecast (says \"no skill\" when it cannot beat the last value), and mean ± sd across seeds. \
-Give metric and target to get an ETA, e.g. when the loss will reach 4.5.\n\
+            "Plain-language status of a run. Starts with a one-line Verdict: DIVERGED (NaN/inf or blow-up, with the step), OVERFITTING (val worse while train improves), \
+still improving (worth continuing), or no clear progress (plateau). Then for each key metric: latest value, trend with slope, spikes (and what changed just before them, e.g. an lr change), \
+plateau, an honest forecast (says \"no skill\" when it cannot beat the last value), and mean ± sd across seeds (runs named x_s1, x_s2, ...). \
+Use it for \"is it worth continuing\", \"what went wrong\" and \"when will it reach X\" questions. Give metric and target to get an ETA.\n\
 Example: summarize(run=\"bkk07/small\")  or  summarize(run=\"bkk07/small\", metric=\"brain_heldout_nll\", target=4.5)",
             json!({
                 "run": s("Run name, e.g. \"bkk07/small\""),
@@ -98,8 +99,10 @@ Example: summarize(run=\"bkk07/small\")  or  summarize(run=\"bkk07/small\", metr
         tool(
             "compare",
             "Compare one metric across two or more runs: aligned table at the steps all runs share, the differences, \
-the best run at its latest value and at the latest shared step. runs is a comma-separated list, a glob (\"bkk07/*\") or a group name (\"bkk07\").\n\
-Example: compare(runs=\"bkk07/small,bkk07/mid\", metric=\"brain_heldout_nll\")",
+the best run at its latest value and at the latest shared step, and which runs DIVERGED. \
+Seeds: runs named like x_s1, x_s2, x_s3 form a seed group; with two or more groups it reports mean ± sd per group and whether each difference is WITHIN or BEYOND seed noise. \
+runs is a comma-separated list, globs (\"bkk07/*\", \"abl/base_s*,abl/wd_s*\") or a group name (\"bkk07\").\n\
+Example: compare(runs=\"bkk07/small,bkk07/mid\", metric=\"brain_heldout_nll\")  or  compare(runs=\"abl/base_s*,abl/wd_s*\", metric=\"val_loss\")",
             json!({
                 "runs": s("Comma-separated run names, a glob like \"bkk07/*\", or a group like \"bkk07\""),
                 "metric": s("Metric name, e.g. \"loss\""),

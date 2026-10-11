@@ -247,7 +247,7 @@ async fn saved_boards_are_served_by_name_only() {
     std::fs::create_dir_all(root.join("boards")).unwrap();
     std::fs::write(root.join("boards/loss-ab12.json"), r#"{"panels": [{"query": "loss{run=~\"a|b\"}"}]}"#).unwrap();
     std::fs::write(root.join("secret.json"), "{}").unwrap();
-    let app = router(AppState::new(ingest, read, None, auth).with_boards_dir(root.join("boards")));
+    let app = router(AppState::new(ingest, read, None, auth).with_boards(root.join("boards")));
     let (c, v) = send(&app, "GET", "/api/v1/boards/loss-ab12", None, "").await;
     assert_eq!(c, StatusCode::OK, "{v}");
     assert_eq!(v["panels"][0]["query"], "loss{run=~\"a|b\"}");

@@ -29,6 +29,7 @@ import requests
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mcp_client import McpClient  # noqa: E402
+import hard_tasks  # noqa: E402
 
 CANON = {"log", "ingest_log", "list_runs", "read_metric", "summarize", "compare", "make_board"}
 
@@ -258,6 +259,25 @@ SYSTEM = (
 )
 
 
+def start_server(binary, root):
+    """`obs-server --dev` on a free loopback port, storing under `root`."""
+    import socket
+    import subprocess
+    with socket.socket() as so:
+        so.bind(("127.0.0.1", 0))
+        port = so.getsockname()[1]
+    p = subprocess.Popen([binary, "--root", root, "--listen", f"127.0.0.1:{port}", "--dev", "--no-static"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    url = f"http://127.0.0.1:{port}"
+    for _ in range(100):
+        try:
+            requests.get(url + "/api/index", timeout=1)
+            return p, url
+        except requests.RequestException:
+            time.sleep(0.05)
+    p.kill()
+    raise RuntimeError(f"obs-server did not start on {url}")
+
+
 def mcp_to_openai(tools):
     return [{"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["inputSchema"]}} for t in tools]
 
@@ -266,23 +286,32 @@ def strip_think(s):
     return re.sub(r"<think>.*?</think>", "", s or "", flags=re.S).strip()
 
 
-def run_scripted(task, c):
+def dispatch(c, task, ctx, name, args):
+    if task.get("shell") and name in hard_tasks.SHELL_NAMES:
+        return hard_tasks.shell_call(name, args, ctx["workdir"], ctx["env"])
+    return c.call(name, args)
+
+
+def run_scripted(task, c, ctx):
     calls, outs = [], []
     for name, args in task["script"]:
-        text, err = c.call(name, args)
+        text, err = dispatch(c, task, ctx, name, args)
         calls.append({"name": name, "args": args, "is_error": err, "text": text})
         outs.append(text)
     return task["extract"](outs), calls, 0
 
 
-def run_agent(task, c, tools, a):
+def run_agent(task, c, tools, a, ctx):
     msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": task["prompt"] + ("" if a.think else " /no_think")}]
     calls = []
     for turn in range(1, a.max_turns + 1):
-        body = {"model": a.model, "messages": msgs, "tools": tools, "temperature": a.temperature, "seed": a.seed}
+        body = {"model": a.model, "messages": msgs, "tools": tools, "temperature": a.temperature, "seed": a.seed + a.trial, "max_tokens": a.max_tokens}
         r = requests.post(a.endpoint.rstrip("/") + "/chat/completions", json=body, timeout=a.timeout)
         r.raise_for_status()
-        msg = r.json()["choices"][0]["message"]
+        choice = r.json()["choices"][0]
+        msg = choice["message"]
+        if choice.get("finish_reason") == "length" and not (msg.get("tool_calls") or []):
+            return f"(no answer: the reply hit --max-tokens {a.max_tokens}) " + strip_think(msg.get("content"))[:200], calls, turn
         tcs = msg.get("tool_calls") or []
         msgs.append({"role": "assistant", "content": msg.get("content") or "", **({"tool_calls": tcs} if tcs else {})})
         if not tcs:
@@ -294,7 +323,7 @@ def run_agent(task, c, tools, a):
                 args = json.loads(raw) if isinstance(raw, str) else (raw or {})
             except ValueError:
                 args = raw  # the server copes with a string
-            text, err = c.call(fn.get("name", ""), args)
+            text, err = dispatch(c, task, ctx, fn.get("name", ""), args)
             calls.append({"name": fn.get("name"), "args": raw, "is_error": err, "text": text})
             msgs.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": text})
     return "(no final answer within max turns)", calls, a.max_turns
@@ -313,40 +342,64 @@ def main():
     ap.add_argument("--temperature", type=float, default=0.2)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max-turns", type=int, default=10)
+    ap.add_argument("--max-tokens", type=int, default=3000, help="cap per model reply (a degenerate repeat loop otherwise runs into --timeout)")
     ap.add_argument("--timeout", type=float, default=900, help="seconds per model request")
     ap.add_argument("--only", help="comma-separated task ids")
+    ap.add_argument("--suite", choices=["base", "hard", "all"], default="base", help="base = the 14 one-step tasks, hard = the multi-step tasks in hard_tasks.py")
+    ap.add_argument("--trial", type=int, default=0, help="trial number; also offsets --seed, so trials differ")
+    ap.add_argument("--remote", action="store_true", help="run each task against its own `obs-server --dev` (root = the task dir) through `obs mcp --url`")
+    ap.add_argument("--obs-server", default=os.path.join(root, "target", "debug", "obs-server"), help="obs-server binary for --remote")
     ap.add_argument("--out", help="JSONL transcript path (default <data>/<label>.jsonl)")
     a = ap.parse_args()
 
-    tasks = [t for t in TASKS if not a.only or t["id"] in a.only.split(",")]
-    label = "scripted" if a.scripted else re.sub(r"[^\w.-]", "_", a.model) + ("-think" if a.think else "")
+    all_tasks = [dict(t, suite="base") for t in TASKS] + hard_tasks.HARD_TASKS
+    tasks = [t for t in all_tasks if (a.suite == "all" or t["suite"] == a.suite) and (not a.only or t["id"] in a.only.split(","))]
+    label = ("scripted" if a.scripted else re.sub(r"[^\w.-]", "_", a.model) + ("-think" if a.think else "")) + ("-remote" if a.remote else "") + (f"-{a.suite}" if a.suite != "base" else "") + (f"-t{a.trial}" if a.trial else "")
     os.makedirs(a.data, exist_ok=True)
     out_path = a.out or os.path.join(a.data, f"{label}.jsonl")
     out = open(out_path, "w")
     rows = []
     for t in tasks:
-        d = os.path.join(a.data, label, t["id"])
-        if os.path.isdir(d):
+        # <workdir> is the "project": scripts live here, obs data in <workdir>/obs
+        w = os.path.join(a.data, label, t["id"])
+        if os.path.isdir(w):
             import shutil
-            shutil.rmtree(d)
+            shutil.rmtree(w)
+        d = os.path.join(w, "obs")
         os.makedirs(d)
-        c = McpClient([a.obs, "mcp", "--dir", d])
+        env = dict(os.environ, PATH=os.path.dirname(os.path.abspath(a.obs)) + os.pathsep + os.environ.get("PATH", ""))
+        ctx = {"workdir": w, "env": env}
+        srv = None
+        if a.remote:
+            srv, url = start_server(a.obs_server, d)
+            env["OBS_URL"] = url
+            c = McpClient([a.obs, "mcp", "--url", url])
+        else:
+            c = McpClient([a.obs, "mcp", "--dir", d])
         try:
-            build_fixture(c)
-            tools = mcp_to_openai(c.tools())
+            if t["suite"] == "hard":
+                hard_tasks.build_hard_fixture(c, _must)
+                hard_tasks.setup_scripts(w)
+            else:
+                build_fixture(c)
+            mtools = c.tools() + (hard_tasks.SHELL_TOOLS if t.get("shell") else [])
+            tools = mcp_to_openai(mtools)
             t0 = time.time()
             try:
-                answer, calls, turns = run_scripted(t, c) if a.scripted else run_agent(t, c, tools, a)
+                answer, calls, turns = run_scripted(t, c, ctx) if a.scripted else run_agent(t, c, tools, a, ctx)
             except Exception as e:  # network / model failure counts as a fail
                 answer, calls, turns = f"(harness error: {e})", [], 0
             dt = time.time() - t0
         finally:
             c.close()
+            if srv:
+                srv.terminate()
+                srv.wait(timeout=10)
         ok, why = t["check"](answer, d)
         ok = bool(ok)
         errs = sum(1 for x in calls if x["is_error"])
-        renamed = sum(1 for x in calls if x["name"] not in CANON)
-        rec = {"task": t["id"], "pass": ok, "why": why, "answer": answer, "turns": turns, "tool_calls": len(calls), "tool_errors": errs, "noncanonical_names": renamed, "seconds": round(dt, 1), "calls": calls, "model": None if a.scripted else a.model}
+        renamed = sum(1 for x in calls if x["name"] not in CANON and x["name"] not in hard_tasks.SHELL_NAMES)
+        rec = {"task": t["id"], "pass": ok, "why": why, "answer": answer, "turns": turns, "tool_calls": len(calls), "tool_errors": errs, "noncanonical_names": renamed, "seconds": round(dt, 1), "calls": calls, "model": None if a.scripted else a.model, "suite": t["suite"], "trial": a.trial, "obs": a.obs}
         out.write(json.dumps(rec) + "\n")
         out.flush()
         rows.append(rec)

@@ -258,11 +258,17 @@ fn board_tool() {
     let t = ok(&s, "make_board", json!({"query": "nll", "runs": "g/small,g/mid"}));
     assert!(t.contains("heldout_nll for 2 runs"), "{t}");
     fail(&s, "make_board", json!({"query": "nope_metric{run=~\"g/*\"}"}));
+    // commas between panels (not inside the selector) split; same metric merges
+    let t = ok(&s, "make_board", json!({"query": "heldout_nll{run=~\"g/small\"}, learning_rate{run=~\"g/small\"}, heldout_nll{run=~\"g/mid\"}"}));
+    assert!(t.contains("2 panels") && t.contains("heldout_nll for 2 runs"), "{t}");
+    let (t, e) = s.call_tool("make_board", &json!({"query": "heldout_nll{run=~\"small/*\"}"}));
+    assert!(e && t.contains("g/small"), "{t}");
 }
 
 #[test]
-fn remote_mode_refuses_clearly() {
-    let s = Server::new(Box::new(store::RemoteStore { url: "https://obs.example".into(), token: None }));
+fn remote_mode_unreachable_server_teaches() {
+    // port 1 refuses connections; the full remote tests live in modgrad-obs-server
+    let s = Server::new(Box::new(store::RemoteStore::new("http://127.0.0.1:1", None)));
     let (t, e) = s.call_tool("list_runs", &json!({}));
-    assert!(e && t.contains("not implemented") && t.contains("obs mcp --dir"), "{t}");
+    assert!(e && t.contains("Cannot reach") && t.contains("obs mcp --dir"), "{t}");
 }

@@ -35,6 +35,7 @@ function dataSig(t: { xs: ArrayLike<number>; raw: ArrayLike<number> }): string {
   for (let i = 0; i < n; i++) { const v = t.raw[i]; if (Number.isFinite(v)) { s1 += v; s2 += v * ((i % 97) + 1); } }
   return `${n}:${t.xs[0]}:${t.xs[t.xs.length - 1]}:${s1}:${s2}`;
 }
+const lastX = (t: { xs: ArrayLike<number> }): number => { for (let i = t.xs.length - 1; i >= 0; i--) if (Number.isFinite(t.xs[i])) return t.xs[i]; return -Infinity; };
 const FC_LIVE_MS = 2000;
 const fcLast = new Map<string, { f: Forecast; at: number; n: number }>();
 const fcTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -93,7 +94,9 @@ export function drawPanel(c: DrawCtx): DrawOut {
           // most every FC_LIVE_MS; in between the last fit is drawn and one redraw is queued, so
           // the final rows always get a fit
           const prev = fcLast.get(id), now = Date.now();
-          const n = t.raw.length + pool.reduce((a, o) => a + o.raw.length, 0); // grows only when rows were appended
+          // rows were appended: the newest x moved on (the length is pinned once block-averaged to
+          // MAX_POINTS, and a value-only change such as norm z must refit at once)
+          const n = Math.max(lastX(t), ...pool.map(lastX));
           if (prev && c.redraw && n > prev.n && now - prev.at < FC_LIVE_MS) {
             f = prev.f;
             if (!fcTimers.has(p.id)) fcTimers.set(p.id, setTimeout(() => { fcTimers.delete(p.id); c.redraw!(); }, FC_LIVE_MS - (now - prev.at) + 20));

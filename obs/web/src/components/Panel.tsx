@@ -91,7 +91,7 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
     // keep keyboard/wheel focus on the same chart across a redraw (click-then-wheel zoom)
     const fi = [...host.querySelectorAll('svg')].indexOf(document.activeElement as SVGSVGElement);
     drawnW = chartWidth(host.clientWidth);
-    const out = drawPanel({ panel: cur, host, foot, res, events, inFocus: !!props.inFocus, focusOpen: !!focusId(), dataKey: dataKey(), title: title(), redraw: () => { if (t === tok) draw(); } });
+    const out = drawPanel({ panel: cur, host, foot, res, events, inFocus: !!props.inFocus, focusOpen: !!focusId(), dataKey: dataKey(), title: title(), redraw: () => { draw(); } }); // the latest draw: a timer set by an earlier one must still land
     if (fi >= 0) host.querySelectorAll('svg')[fi]?.focus({ preventScroll: true });
     setBadge(out.badge);
     setPending(false);

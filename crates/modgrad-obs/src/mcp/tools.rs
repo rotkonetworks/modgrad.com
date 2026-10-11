@@ -563,6 +563,26 @@ pub fn read_metric(store: &dyn Store, a: &Args) -> ToolResult {
     if let Some(l) = nonfinite_line(&rd, &key) {
         out.push_str(&format!("\n{l}"));
     }
+    // the things a reader of a single column misses
+    if v.len() >= analysis::MIN_SHAPE_POINTS {
+        let sp = analysis::spikes(&v);
+        if let Some(&(i, _)) = sp.iter().max_by(|a, b| a.1.abs().total_cmp(&b.1.abs())) {
+            let ch = changes_near(&rd, &key, st[i] as f64, 3.0 * analysis::spacing(&st.iter().map(|&x| x as f64).collect::<Vec<_>>()));
+            out.push_str(&format!(
+                "\nSpike: step {} ({}).{}",
+                st[i],
+                fmt(v[i]),
+                if ch.is_empty() { String::new() } else { format!(" Just before it: {}. That change is a likely cause.", ch.join("; ")) }
+            ));
+        }
+    }
+    if let Some(o) = overfit_note(&rd) {
+        out.push_str(&format!("\n{o}"));
+    }
+    let others: Vec<&String> = keys.iter().filter(|k| **k != key).collect();
+    if !others.is_empty() {
+        out.push_str(&format!("\nOther metrics in this run: {}{}.", others.iter().take(12).map(|s| s.as_str()).collect::<Vec<_>>().join(", "), if others.len() > 12 { ", …" } else { "" }));
+    }
     out.push_str(&format!("\nNext: summarize(run=\"{run}\", metric=\"{key}\") for trend and forecast, or compare(runs=\"{run},OTHER\", metric=\"{key}\")."));
     Ok(out)
 }

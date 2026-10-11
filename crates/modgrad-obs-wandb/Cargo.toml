@@ -6,6 +6,6 @@ description = "Read and write Weights & Biases offline run files (run-<id>.wandb
 license = "MIT"
 
 [dependencies]
-modgrad-obs = { path = "../modgrad-obs" }
+modgrad-obs = { path = "../modgrad-obs", default-features = false }
 prost = "0.13"
 serde_json = "1"

@@ -5,8 +5,23 @@ edition = "2024"
 description = "Append-only experiment observability for the modgrad SDK: metrics, arrays, events, summaries as JSONL, plus a reader"
 license = "MIT"
 
+[features]
+default = ["h3"]
+# HTTP/3 (QUIC) transport for `modgrad run` / `modgrad push`, with automatic
+# fallback to TCP. Off for library users that build to wasm (modgrad-obs-ingest).
+h3 = ["dep:quinn", "dep:h3", "dep:h3-quinn", "dep:rustls", "dep:rustls-native-certs", "dep:tokio", "dep:bytes", "dep:http"]
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 modgrad-obs-analysis = { path = "../modgrad-obs-analysis" }
+quinn = { version = "0.11.9", optional = true, default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+h3 = { version = "0.0.8", optional = true }
+h3-quinn = { version = "0.0.10", optional = true }
+rustls = { version = "0.23.37", optional = true, default-features = false, features = ["ring", "std"] }
+rustls-native-certs = { version = "0.8.3", optional = true }
+tokio = { version = "1", optional = true, features = ["rt-multi-thread", "time", "net"] }
+bytes = { version = "1.11", optional = true }
+http = { version = "1", optional = true }
+

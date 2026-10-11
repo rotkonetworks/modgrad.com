@@ -11,6 +11,10 @@
 //! away, and if the run ends before they get through the spool stays on
 //! disk for `modgrad push <dir>`. Steps are resolved here (not by the server),
 //! so a resend is idempotent.
+//!
+//! POSTs go through `net::push_request`, which moves to HTTP/3 when the
+//! server offers it (or `--h3`) and falls back to TCP on its own; the spool
+//! sits in front of either transport and does not know which one is used.
 
 use crate::net;
 use crate::sys::Sampler;
@@ -34,6 +38,8 @@ pub struct Opts {
     pub gpu: bool,
     pub json: bool,
     pub spool_root: PathBuf,
+    /// Try HTTP/3 even without `Alt-Svc` / for an `http://` URL.
+    pub h3: bool,
     pub cmd: Vec<String>,
 }
 
@@ -149,6 +155,8 @@ pub struct Remote {
     pub fatal: Option<String>,
     json: bool,
     warned: bool,
+    /// Try HTTP/3 even if the server does not advertise it (`--h3`).
+    pub h3: bool,
 }
 
 const MAX_POST_ITEMS: usize = 1000;
@@ -184,6 +192,7 @@ impl Remote {
             fatal: None,
             json: json_mode,
             warned: false,
+            h3: false,
         };
         // a previous attempt's unsent tail (same run name) goes first
         r.load_unacked()?;
@@ -256,7 +265,11 @@ impl Remote {
     }
 
     fn post(&self, path: &str, body: &Value, token: Option<&str>) -> std::io::Result<net::Resp> {
-        net::request("POST", &self.url(path), token, Some(body.to_string().as_bytes()), "application/json", Duration::from_secs(10))
+        let (r, notice) = net::push_request("POST", &self.url(path), token, Some(body.to_string().as_bytes()), "application/json", Duration::from_secs(10), self.h3);
+        if let Some(n) = notice {
+            say(self.json, json!({"event": "transport", "transport": n.transport, "fallback": n.fallback, "server": self.server}), n.text);
+        }
+        r
     }
 
     fn retryable(status: u16) -> bool {
@@ -504,6 +517,7 @@ pub fn run(o: Opts) -> i32 {
     } else {
         match Remote::new(&o.server, o.token.clone(), &name, o.project.clone(), meta, &o.spool_root, o.json) {
             Ok(mut r) => {
+                r.h3 = o.h3;
                 r.ensure_created();
                 match (&r.run, &r.dashboard) {
                     (Some(run), Some(d)) => say(o.json, json!({"event": "start", "mode": "server", "run": run, "dashboard": d, "server": r.server, "spool": r.dir}), format!("run {run} -> {d}")),
@@ -684,7 +698,7 @@ pub fn run(o: Opts) -> i32 {
 }
 
 /// `modgrad push <spool dir>`: resend what a previous `modgrad run` left behind.
-pub fn push(dir: &Path, json_mode: bool) -> i32 {
+pub fn push(dir: &Path, json_mode: bool, h3: bool) -> i32 {
     let (mut r, finish) = match Remote::reopen(dir, json_mode) {
         Ok(x) => x,
         Err(e) => {
@@ -692,6 +706,7 @@ pub fn push(dir: &Path, json_mode: bool) -> i32 {
             return 1;
         }
     };
+    r.h3 = h3;
     let n = r.pending();
     let summary = finish.unwrap_or(json!({ "pushed_later": true }));
     let ok = r.close(&summary, Instant::now() + Duration::from_secs(60));

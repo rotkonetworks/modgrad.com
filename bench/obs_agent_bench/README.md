@@ -384,7 +384,7 @@ stop. 8B base 0, 0, 1 of 6.
 - **Checker bugs found and fixed before the counted rounds**: the
   dashboard was not findable inside the sandbox (e751b9f), and `#run=`
   links were not URL-decoded and init's Dashboard line changed format
-  (6aa4b8a, before after1). No checker change after the counted runs
+  (5a0ffee, before after1). No checker change after the counted runs
   started.
 
 **After the fix, the one 30B failure** (plain_server, trial 1) is the old

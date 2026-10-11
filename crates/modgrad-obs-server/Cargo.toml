@@ -26,9 +26,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 axum = { version = "0.7", default-features = false, features = ["http1", "json", "query", "tokio"] }
 base64 = "0.22"
 sha2 = "0.10"
-# ed25519 for zafu sign-in (already in the tree via rustls/quinn/russh)
-ring = "0.17"
-ureq = { version = "3", optional = true, default-features = false, features = ["native-tls"] }
+# ed25519 for zafu sign-in, passkey signatures (src/webauthn.rs); already in the tree via rustls/quinn/russh
+ring = "0.17.14"
+# passkey CBOR
+ciborium = "=0.2.2"
+ureq = { version = "3", optional = true, default-features = false, features = ["rustls"] }
 async-stream = "0.3"
 futures-util = { version = "0.3", default-features = false }
 quinn = { version = "0.11.9", optional = true, default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }

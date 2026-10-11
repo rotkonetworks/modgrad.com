@@ -11,6 +11,7 @@
 //! * [`Live`] — the change feed behind the SSE endpoints.
 //! * `h3` (feature `h3`) — the same router over HTTP/3 (QUIC).
 //! * `ssh` (feature `ssh`) — `python train.py | ssh <server>`: the key is the account.
+//! * [`webauthn`] — passkey registration and assertion verification (pure).
 //!
 //! The server stores and selects; all analysis runs in the browser (wasm).
 

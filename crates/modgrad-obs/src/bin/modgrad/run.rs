@@ -40,7 +40,31 @@ pub struct Opts {
     pub spool_root: PathBuf,
     /// When to try HTTP/3 (`--h3`, `--no-h3`).
     pub h3: net::H3,
+    /// Lineage config from `--parent <run>[@step]` and `--stage <s>`
+    /// (`parent_run`, `parent_step`, `stage`); an empty object without them.
+    pub config: Value,
     pub cmd: Vec<String>,
+}
+
+/// `--parent <run>[@step]` and `--stage <s>` as config keys (see "Lineage"
+/// in obs/llms.txt). `Err` for a step that is not a number.
+pub fn lineage_config(parent: Option<&str>, stage: Option<&str>) -> Result<Value, String> {
+    let mut c = serde_json::Map::new();
+    if let Some(p) = parent.map(str::trim).filter(|p| !p.is_empty()) {
+        let (run, step) = match p.rsplit_once('@') {
+            Some((r, s)) => (r, Some(s)),
+            None => (p, None),
+        };
+        c.insert("parent_run".into(), json!(run));
+        if let Some(s) = step {
+            let v: f64 = s.parse().map_err(|_| format!("--parent {p}: '{s}' is not a step (use <run>@<step>)"))?;
+            c.insert("parent_step".into(), if v.fract() == 0.0 && v.abs() < 9e15 { json!(v as i64) } else { json!(v) });
+        }
+    }
+    if let Some(s) = stage.map(str::trim).filter(|s| !s.is_empty()) {
+        c.insert("stage".into(), json!(s));
+    }
+    Ok(Value::Object(c))
 }
 
 /// Messages from the CLI to stderr: a line of text, or one JSON object per
@@ -157,6 +181,8 @@ pub struct Remote {
     warned: bool,
     /// When to try HTTP/3 (`--h3`, `--no-h3`).
     pub h3: net::H3,
+    /// Config sent with the create (`--parent`, `--stage`); `null` sends none.
+    pub config: Value,
 }
 
 const MAX_POST_ITEMS: usize = 1000;
@@ -193,6 +219,7 @@ impl Remote {
             json: json_mode,
             warned: false,
             h3: net::H3::Auto,
+            config: Value::Null,
         };
         // a previous attempt's unsent tail (same run name) goes first
         r.load_unacked()?;
@@ -298,7 +325,10 @@ impl Remote {
         if self.fatal.is_some() || Instant::now() < self.next_try {
             return false;
         }
-        let body = json!({ "name": self.name, "project": self.project, "meta": self.meta });
+        let mut body = json!({ "name": self.name, "project": self.project, "meta": self.meta });
+        if self.config.is_object() {
+            body["config"] = self.config.clone();
+        }
         match self.post("/api/v1/runs", &body, self.token.as_deref()) {
             Ok(r) if r.ok() => {
                 let j = r.json();
@@ -483,7 +513,7 @@ fn exit_code(st: &std::process::ExitStatus) -> (i32, Option<i32>) {
 
 pub fn run(o: Opts) -> i32 {
     if o.cmd.is_empty() {
-        eprintln!("usage: modgrad run [--server URL] [--token T] [--name N] [--project P] [--offline] -- <command...>");
+        eprintln!("usage: modgrad run [--server URL] [--token T] [--name N] [--project P] [--parent RUN[@STEP]] [--stage S] [--offline] -- <command...>");
         return 2;
     }
     let name = o.name.clone().unwrap_or_else(auto_name);
@@ -506,7 +536,7 @@ pub fn run(o: Opts) -> i32 {
         let mut m = detected.clone();
         m.project = o.project.clone();
         m.extra = Some(json!({ "command": command, "cwd": cwd, "client": "modgrad run" }));
-        match modgrad_obs::Run::create_with_meta(&o.out, &full, &json!({}), m) {
+        match modgrad_obs::Run::create_with_meta(&o.out, &full, &o.config, m) {
             Ok(run) => {
                 let dir = run.dir().to_path_buf();
                 say(o.json, json!({"event": "start", "mode": "offline", "run": full, "dir": dir}), format!("offline run {full} -> {} (view: modgrad-server --root {})", dir.display(), o.out.display()));
@@ -524,6 +554,7 @@ pub fn run(o: Opts) -> i32 {
         match Remote::new(&o.server, o.token.clone(), &name, o.project.clone(), meta, &o.spool_root, o.json) {
             Ok(mut r) => {
                 r.h3 = o.h3;
+                r.config = o.config.clone();
                 r.ensure_created();
                 match (&r.run, &r.dashboard) {
                     (Some(run), Some(d)) => say(o.json, json!({"event": "start", "mode": "server", "run": run, "dashboard": d, "server": r.server, "spool": r.dir}), format!("run {run} -> {d}")),
@@ -737,6 +768,15 @@ pub fn push(dir: &Path, json_mode: bool, h3: net::H3) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lineage_flags() {
+        assert_eq!(lineage_config(Some("pt/base@3000"), Some("sft")).unwrap(), json!({"parent_run": "pt/base", "parent_step": 3000, "stage": "sft"}));
+        assert_eq!(lineage_config(Some("base"), None).unwrap(), json!({"parent_run": "base"}));
+        assert_eq!(lineage_config(Some("base@1.5"), None).unwrap(), json!({"parent_run": "base", "parent_step": 1.5}));
+        assert_eq!(lineage_config(None, None).unwrap(), json!({}));
+        assert!(lineage_config(Some("base@x"), None).is_err());
+    }
 
     #[test]
     fn stepper_policy() {

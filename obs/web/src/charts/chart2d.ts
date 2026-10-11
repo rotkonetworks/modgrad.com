@@ -19,7 +19,11 @@ export interface View { x0: number; x1: number; y0?: number; y1?: number }
 export interface Ghost { xs: Arr; ys: Arr; lo: Arr; hi: Arr }
 export interface SeriesIn {
   name: string; color: string; xs: Arr; ys: Arr; raw?: Arr; area?: boolean; hidden?: boolean; y2?: boolean;
-  band?: { lo: Arr; hi: Arr } | null; ghost?: Ghost | null; [extra: string]: unknown;
+  band?: { lo: Arr; hi: Arr } | null; ghost?: Ghost | null;
+  /** extra text after the value in the hover readout for point i (e.g. a stitched run's own step) */
+  note?: (i: number) => string;
+  /** hover lists this series only where x is within its own first..last point (stitched runs) */
+  ownRange?: boolean; [extra: string]: unknown;
 }
 /** a series as drawn: transformed coordinates plus the caller's fields */
 export interface Series extends SeriesIn {
@@ -317,9 +321,10 @@ export function chart2d(parent: Element, o: Chart2DOpts): HTMLDivElement & { cha
     const lines: string[] = [];
     let best: number | null = null;
     for (const s of shown) {
+      if (s.ownRange) { const fin = s.X.filter(Number.isFinite); if (!fin.length || xv < fin[0] || xv > fin[fin.length - 1]) continue; }
       let bi = -1, bd = Infinity;
       for (let i = 0; i < s.X.length; i++) { const d = Math.abs(s.X[i] - xv); if (d < bd && Number.isFinite(s.Y[i]) && inX(s.X[i])) { bd = d; bi = i; } }
-      if (bi >= 0) { lines.push(`${s.name.slice(0, 28).padEnd(28)} ${fmt(s.V[bi]).padStart(9)}`); if (best === null) best = s.X[bi]; }
+      if (bi >= 0) { lines.push(`${s.name.slice(0, 28).padEnd(28)} ${fmt(s.V[bi]).padStart(9)}${s.note ? '  ' + s.note(bi) : ''}`); if (best === null) best = s.X[bi]; }
     }
     for (const s of ghosts) { // past a run's last real point its row shows the forecast and band
       const G = s.G; if (G.n0 && !(xv > G.X[0])) continue;

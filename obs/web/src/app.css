@@ -110,6 +110,10 @@ table.runs th, table.runs td { padding: 2px 8px; text-align: left; border-bottom
 table.runs th { position: sticky; top: 0; background: var(--bg); font: 600 11px var(--mono); z-index: 1; }
 table.runs th button.th { border: 0; background: none; font: 600 11px var(--mono); padding: 0; }
 table.runs td.num { text-align: right; font-family: var(--mono); }
+table.runs td.lin { font-family: var(--mono); }
+table.runs td.lin button.mini, .lineage-edit button.mini { font: 10px var(--mono); padding: 0 4px; line-height: 15px; margin-left: 2px; }
+.lineage-edit { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin: 6px 0; padding: 6px 8px; border: 1px solid var(--frame); background: var(--panel); font-size: 12px; }
+.lineage-edit select { max-width: 100%; }
 table.runs tr:hover td { background: var(--hl); }
 details.run { border: 1px solid var(--rule); padding: 4px 8px; margin: 6px 0; font: 11px var(--mono); }
 details.run summary { cursor: pointer; font-weight: 600; }
@@ -206,6 +210,7 @@ details.run .dh { font-weight: 600; margin-top: 6px; }
 .ldot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 3px; vertical-align: 0; background: var(--accent); }
 .ldot.stale { background: transparent; border: 1px solid var(--accent); }
 .bpanel.dz-add, .bpanel.dz-merge { box-shadow: 0 0 0 2px var(--accent); border-color: var(--accent); }
+table.runs tr.dz-add td { background: var(--accent-soft); box-shadow: inset 0 1px 0 var(--accent), inset 0 -1px 0 var(--accent); }
 .bpanel.dz-before { box-shadow: -5px 0 0 0 var(--accent); }
 .bpanel.dz-after { box-shadow: 5px 0 0 0 var(--accent); }
 .bempty { font: 11px var(--mono); color: var(--muted); padding: 30px 8px; text-align: center; border: 1px dashed var(--rule); margin: 4px 0; }

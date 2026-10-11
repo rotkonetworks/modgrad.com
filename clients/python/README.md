@@ -160,6 +160,9 @@ Where a row lists several variables, the first one that is set wins.
   alongside it.
   - `init` also accepts `url=`, `token=` and `data=` (an obs directory: write locally),
     which are modgrad additions.
+  - `fork_from="<run>?_step=<n>"` (W&B's spelling; `"<run>@<n>"` also works) records
+    where this run started as config `parent_run` and `parent_step`. The new run counts
+    its own steps from 0; see "Lineage" below.
   - Other W&B arguments are accepted and ignored.
   - Run ids use only the characters `[A-Za-z0-9_.-]`. A `name` becomes `<name>-<4 hex>`,
     because W&B names are not unique. Pass `id=` for a stable id, and add `resume=` to
@@ -177,6 +180,28 @@ Where a row lists several variables, the first one that is set wins.
   `run.step`, the context manager (`with wandb.init() as run:`), and `wandb.run`.
 - `login()` does nothing and returns True. `Settings` and `setup` are accepted and do
   nothing.
+
+### Lineage
+
+A model's life is several runs (pre-training, annealing, SFT, RL, branches off one
+checkpoint). Each run names where it started with config keys:
+
+| key | meaning |
+|---|---|
+| `parent_run` | id of the run it continues or forks from (a bare name matches `<project>/<name>`) |
+| `parent_step` | the parent's step it started from; omitted = the parent's last step |
+| `parent_tokens` | the parent's token count there, if the parent does not log `tokens_seen` |
+| `stage` | `pretrain`, `midtrain`, `sft`, `rl`, `eval` (free text; labels the chart bands) |
+
+```python
+wandb.init(id="sft-a", config={"stage": "sft", "lr": 2e-5}, fork_from="anneal?_step=800")
+# or, without fork_from:
+wandb.init(id="sft-a", config={"stage": "sft", "parent_run": "anneal", "parent_step": 800})
+```
+
+Steps and `tokens_seen` count from 0 in each run. The dashboard query stage `| stitch`
+puts every run after its ancestors on one axis (`loss{run="rl"} | stitch`, also with
+`| x tokens`). Runs logged without these keys can be linked in the dashboard's Runs view.
 
 ### Logged values
 

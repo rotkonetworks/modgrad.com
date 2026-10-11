@@ -2,10 +2,10 @@
 // (text, parsed in wasm) plus view state. Query edits go through the wasm parser so chips and text
 // always round-trip (crates/modgrad-obs-analysis/src/query.rs).
 import { A } from '@/lib/wasm';
-import type { Board, Chip, Panel, PanelView, Parsed } from '@/logic/types';
+import type { Board, Chip, Lineage, Panel, PanelView, Parsed } from '@/logic/types';
 
 export const BOARD_VERSION = 2;
-export const STAGE_KINDS = ['ema', 'by', 'agg', 'split', 'x', 'forecast', 'log', 'norm', 'baseline', 'align', 'show', 'heatmap'];
+export const STAGE_KINDS = ['ema', 'by', 'agg', 'split', 'x', 'forecast', 'log', 'norm', 'baseline', 'align', 'show', 'heatmap', 'stitch'];
 
 export const uid = (): string => 'p' + Math.random().toString(36).slice(2, 10).replace(/[^a-z0-9]/g, '0');
 export const quote = (s: unknown): string => '"' + String(s).replace(/"/g, '') + '"';
@@ -36,7 +36,22 @@ export function validBoard(j: unknown): Board {
     v.hidden = Array.isArray(v.hidden) ? v.hidden.map(String) : [];
     panels.push({ id: typeof p.id === 'string' && /^[A-Za-z0-9-]+$/.test(p.id) ? p.id : uid(), title: String(p.title || ''), q, view: v });
   }
-  return { version: BOARD_VERSION, panels };
+  const lineage = validLineage((j as { lineage?: unknown }).lineage);
+  return Object.keys(lineage).length ? { version: BOARD_VERSION, panels, lineage } : { version: BOARD_VERSION, panels };
+}
+/** {run id: {parent, step?, stage?}}; anything else is dropped */
+export function validLineage(j: unknown): Record<string, Lineage> {
+  const out: Record<string, Lineage> = {};
+  if (!j || typeof j !== 'object') return out;
+  for (const [id, v0] of Object.entries(j as Record<string, unknown>)) {
+    const v = v0 as Partial<Lineage> | null;
+    if (!v || typeof v.parent !== 'string' || !v.parent || v.parent === id) continue;
+    const l: Lineage = { parent: v.parent };
+    if (typeof v.step === 'number' && Number.isFinite(v.step)) l.step = v.step;
+    if (typeof v.stage === 'string' && v.stage.trim()) l.stage = v.stage.trim();
+    out[id] = l;
+  }
+  return out;
 }
 function legacyQuery(p: LegacyPanel): string {
   const ents: string[] = [];
@@ -51,7 +66,11 @@ function legacyQuery(p: LegacyPanel): string {
   if (q && p.norm) q += ` | norm ${p.norm}`;
   return q;
 }
-export const serialize = (board: Board): string => JSON.stringify({ version: BOARD_VERSION, panels: board.panels }, null, 1);
+export const serialize = (board: Board): string => JSON.stringify({ version: BOARD_VERSION, panels: board.panels, ...(board.lineage && Object.keys(board.lineage).length ? { lineage: board.lineage } : {}) }, null, 1);
+/** the stitched loss of a run's whole lineage (Runs view, "whole lineage") */
+export const lineageQuery = (metric: string, runId: string): string => `${metric}{run=${quote(runId)}} | stitch`;
+/** stage names offered when setting a parent in the browser */
+export const STAGE_NAMES = ['pretrain', 'midtrain', 'sft', 'rl', 'eval'];
 
 // ------------------------------------------------------------ undo
 export interface UndoEntry { what: string; board: Board }

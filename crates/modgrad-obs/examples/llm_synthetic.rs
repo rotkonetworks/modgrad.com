@@ -1,7 +1,11 @@
 //! Synthetic LLM-style runs for the dashboard's LLM views: a pretraining run
 //! with per-layer grad norms and activation RMS (24 layers), a loss spike and
 //! a NaN; an SFT run with evals and generations; an RL run with reward, kl,
-//! entropy, response length and samples.
+//! entropy, response length and samples. Project `lc` is one model's life
+//! as five runs that name their parents (config `parent_run` /
+//! `parent_step` / `stage`): pretrain -> anneal -> two SFT branches (one
+//! forked mid-anneal) -> RL, each counting steps and tokens from 0, for the
+//! dashboard's `| stitch`.
 //!
 //! ```sh
 //! cargo run -p modgrad-obs --example llm_synthetic -- /tmp/obs-llm-data
@@ -185,6 +189,83 @@ fn rl(root: &std::path::Path) {
     run.event(380, "reward collapse: kl spike, lr halved").unwrap();
 }
 
+/// One row: values logged together at `step`.
+fn row(run: &mut Run, step: u64, kv: &[(&str, f64)]) {
+    run.log_scalars(step, kv).unwrap();
+}
+
+/// Pre-training loss on held-out web text, as a function of tokens (the
+/// level every later stage starts from).
+fn pt_loss(x: f64) -> f64 {
+    2.2 + 30.0 * (x + 50.0).powf(-0.55)
+}
+
+/// Project `lc`: pretrain (4000 steps) -> anneal (600, lr to 0) -> sft-chat
+/// (from the anneal's end) and sft-code (from anneal step 300) -> rl-grpo
+/// (from sft-chat's end). `eval/loss` is the same held-out set in every
+/// stage, so it is the one curve across the whole life.
+fn lifecycle(root: &std::path::Path) {
+    let mut r = Lcg(41);
+    let (pt_n, an_n) = (4000u64, 600u64);
+    let mut pt = Run::init(root, "lc", "lc/pretrain", &json!({"stage": "pretrain", "model": "gpt-24l", "lr": 3e-4, "batch_tokens": 1048576, "total_steps": pt_n})).unwrap();
+    for s in (0..pt_n).step_by(10) {
+        let x = s as f64;
+        let lr = 3e-4 * (x / 200.0).min(1.0);
+        let mut kv = vec![("loss", pt_loss(x) + 0.02 * r.n()), ("lr", lr), ("tokens_seen", (s + 1) as f64 * 1048576.0)];
+        if s % 100 == 0 || s + 10 >= pt_n {
+            kv.push(("eval/loss", pt_loss(x) + 0.04 + 0.005 * r.n()));
+        }
+        row(&mut pt, s, &kv);
+    }
+    pt.finish().unwrap();
+    let pt_end = pt_loss((pt_n - 10) as f64);
+
+    // the anneal continues from the pretrain's last step (no parent_step) with a linear lr decay
+    let an_loss = |x: f64| pt_end - 0.12 * (1.0 - (-x / 150.0).exp());
+    let mut an = Run::init(root, "lc", "lc/anneal", &json!({"stage": "midtrain", "parent_run": "lc/pretrain", "lr": 3e-4, "schedule": "linear-to-zero", "data": "high-quality mix", "total_steps": an_n})).unwrap();
+    for s in (0..an_n).step_by(5) {
+        let x = s as f64;
+        let mut kv = vec![("loss", an_loss(x) + 0.015 * r.n()), ("lr", 3e-4 * (1.0 - x / an_n as f64)), ("tokens_seen", (s + 1) as f64 * 1048576.0)];
+        if s % 50 == 0 || s + 5 >= an_n {
+            kv.push(("eval/loss", an_loss(x) + 0.04 + 0.004 * r.n()));
+        }
+        row(&mut an, s, &kv);
+    }
+    an.finish().unwrap();
+
+    // two SFT branches: chat from the anneal's end, code from its midpoint
+    for (name, fork, floor, eval_tax, seed_off) in [("sft-chat", None, 1.05, 0.06, 0.0), ("sft-code", Some(300u64), 0.9, 0.09, 0.05)] {
+        let base = an_loss(fork.unwrap_or(an_n - 5) as f64) + 0.04;
+        let mut cfg = json!({"stage": "sft", "parent_run": "lc/anneal", "lr": 2e-5, "data": name.trim_start_matches("sft-"), "total_steps": 800});
+        if let Some(f) = fork {
+            cfg["parent_step"] = json!(f);
+        }
+        let mut run = Run::init(root, "lc", &format!("lc/{name}"), &cfg).unwrap();
+        for s in (0..800u64).step_by(4) {
+            let x = s as f64;
+            let mut kv = vec![("loss", floor + 0.6 * (-x / 120.0).exp() + seed_off * (-x / 300.0).exp() + 0.03 * r.n()), ("lr", 2e-5 * (x / 40.0).min(1.0)), ("tokens_seen", (s + 1) as f64 * 65536.0)];
+            if s % 40 == 0 || s + 4 >= 800 {
+                kv.push(("eval/loss", base + eval_tax * (1.0 - (-x / 200.0).exp()) + 0.004 * r.n()));
+            }
+            row(&mut run, s, &kv);
+        }
+        run.finish().unwrap();
+    }
+    let chat_eval = an_loss((an_n - 5) as f64) + 0.04 + 0.06 * (1.0 - (-796.0f64 / 200.0).exp());
+
+    // RL from sft-chat's end: reward up, held-out loss drifts up a little (no train loss to stitch)
+    let mut rl = Run::init(root, "lc", "lc/rl-grpo", &json!({"stage": "rl", "parent_run": "lc/sft-chat", "algo": "grpo", "lr": 1e-6, "kl_coef": 0.04, "group_size": 8, "total_steps": 400})).unwrap();
+    for s in 0..400u64 {
+        let x = s as f64;
+        let mut kv = vec![("reward", 0.3 + 0.45 * (1.0 - (-x / 120.0).exp()) + 0.04 * r.n()), ("kl", 0.002 + 0.02 * x / 400.0 + 0.002 * r.n().abs()), ("tokens_seen", (s + 1) as f64 * 8.0 * 64.0 * 320.0)];
+        if s % 20 == 0 || s == 399 {
+            kv.push(("eval/loss", chat_eval + 0.035 * x / 400.0 + 0.004 * r.n()));
+        }
+        row(&mut rl, s, &kv);
+    }
+    rl.finish().unwrap();
+}
+
 fn main() {
     let root = PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| "/tmp/obs-llm-data".into()));
     let _ = std::fs::remove_dir_all(root.join("runs"));
@@ -192,5 +273,6 @@ fn main() {
     pretrain(&root, "gpt-24l-s2", 2);
     sft(&root);
     rl(&root);
+    lifecycle(&root);
     println!("wrote runs under {}", root.join("runs").display());
 }

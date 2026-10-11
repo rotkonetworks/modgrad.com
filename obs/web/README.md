@@ -67,3 +67,9 @@ Per-layer heatmaps (`layers/<i>/<stat>` | `heatmap over layer`), the Samples tab
 `samples:text{...}` panels, the Evals tab (`eval/<benchmark>/<metric>`), and the anomaly list
 on the board. Conventions, record shapes and endpoints: `docs/design/obs-llm-views.md`.
 Synthetic runs for trying them: `cargo run -p modgrad-obs --example llm_synthetic -- <dir>`.
+
+Lineage: a run's config `parent_run` / `parent_step` / `stage` (or a parent set in the Runs view,
+stored in the board as `lineage`) place it after its ancestors with the query stage `| stitch`;
+stitched panels shade stages and show each run's own step on hover. The Runs view's "whole
+lineage" button opens one. The same example writes project `lc` (pretrain -> anneal -> two SFT
+branches -> RL) for trying it.

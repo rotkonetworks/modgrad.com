@@ -2,19 +2,22 @@
 // 300 ms hold (touch, so lists still scroll). Every drop has a click path too: the + buttons in the
 // browser, the x on legend rows and chips, the panel menu. Targets are found by hit-testing:
 // .bpanel[data-pid] (overlay / merge / reorder by edge), [data-canvas] (new panel / move to end),
-// .bnew (new panel), anywhere else for a legend row = remove.
+// .bnew (new panel), anywhere else for a legend row = remove. A run (Runs view, "set parent") dropped
+// on another run's row tr[data-run] opens the "continues from" editor with that run as the parent.
 import { h } from '@/lib/dom';
 import { hideTip } from '@/lib/dom';
 import {
   findPanel, titleOf, addToNew, addTo, removeTrace, moveTrace, mergePanel, movePanel, type TraceRef,
 } from '@/stores/board';
 import { closePop } from '@/stores/ui';
+import { setParentDraft } from '@/stores/lineage';
 
 export type Payload =
   | { type: 'series'; entries: string; q?: string; label: string }
   | { type: 'trace'; pid: string; ref: TraceRef; label: string }
-  | { type: 'panel'; pid: string; label: string };
-interface Target { kind: 'add' | 'merge' | 'before' | 'after' | 'end' | 'new' | 'remove' | 'none'; el?: Element | null; pid?: string; cls?: string; text: string }
+  | { type: 'panel'; pid: string; label: string }
+  | { type: 'run'; run: string; label: string };
+interface Target { kind: 'add' | 'merge' | 'before' | 'after' | 'end' | 'new' | 'remove' | 'parent' | 'none'; el?: Element | null; pid?: string; run?: string; cls?: string; text: string }
 interface Drag { x: number; y: number; id: number; active: boolean; payload: () => Payload | null; data?: Payload; el: Element; touch: boolean; timer: ReturnType<typeof setTimeout> | null; ghost?: HTMLDivElement; t?: Target | null }
 
 let DR: Drag | null = null;
@@ -44,6 +47,13 @@ function clearHl(): void { document.querySelectorAll('.' + HL.join(',.')).forEac
 function target(x: number, y: number): Target | null {
   const d = DR!.data!;
   const el = document.elementFromPoint(x, y);
+  if (d.type === 'run') {
+    const row = el && el.closest<HTMLElement>('tr[data-run]');
+    const id = row && row.dataset.run;
+    if (!row || !id) return null;
+    if (id === d.run) return { kind: 'none', text: 'drop on another run' };
+    return { kind: 'parent', el: row, run: id, cls: 'dz-add', text: `${d.run} continues from ${id}` };
+  }
   const pel = el && el.closest<HTMLElement>('.bpanel[data-pid]');
   const canvas = el && el.closest<HTMLElement>('[data-canvas]');
   if (pel) {
@@ -103,6 +113,7 @@ export function wireDnd(): void {
 }
 
 function drop(d: Payload, t: Target): void {
+  if (d.type === 'run') { if (t.kind === 'parent' && t.run) setParentDraft({ run: d.run, parent: t.run }); return; }
   const tp = findPanel(t.pid);
   if (d.type === 'series') {
     if (t.kind === 'new') addToNew(d.q || d.entries, d.label);

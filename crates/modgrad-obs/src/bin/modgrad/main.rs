@@ -44,6 +44,7 @@ const USAGE: &str = "usage:
   modgrad init [--server URL] [--token T] [--project P] [--local] [--data DIR]
           [--mcp claude|cursor] [--json]                set up this directory (.modgrad.json)
   modgrad run [--server URL] [--token T] [--name N] [--project P] [--offline [--out DIR]]
+          [--parent RUN[@STEP]] [--stage pretrain|midtrain|sft|rl|eval]
           [--sys-interval S] [--no-gpu] [--spool DIR] [--h3 | --no-h3] [--tls-ca PEM] [--json] -- <command...>
   modgrad tail <run id | run dir> [--server URL] [--keys a,b] [--follow] [--interval S] [--json]
   modgrad push <spool dir> [--h3 | --no-h3] [--tls-ca PEM] [--json]
@@ -173,6 +174,13 @@ fn main() {
                 json: has("--json"),
                 spool_root: flag(&flags, "--spool").map(PathBuf::from).unwrap_or_else(spool_root),
                 h3: transport_flags(&flags),
+                config: match run::lineage_config(flag(&flags, "--parent").as_deref(), flag(&flags, "--stage").as_deref()) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("modgrad run: {e}");
+                        std::process::exit(2);
+                    }
+                },
                 cmd,
             };
             std::process::exit(run::run(o));

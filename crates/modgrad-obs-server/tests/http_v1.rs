@@ -256,3 +256,46 @@ async fn saved_boards_are_served_by_name_only() {
         assert_eq!(c, StatusCode::NOT_FOUND, "{bad}");
     }
 }
+
+#[tokio::test]
+async fn samples_are_stored_and_served() {
+    let (app, root) = app("samples", false);
+    let (_, p) = send(&app, "POST", "/api/v1/projects", None, "").await;
+    let tok = p["token"].as_str().unwrap().to_string();
+    let proj = p["project"].as_str().unwrap().to_string();
+    // no token: refused like any write
+    let (c, _) = send(&app, "POST", "/api/v1/runs/rl/samples", None, r#"{"completion": "x"}"#).await;
+    assert_eq!(c, StatusCode::UNAUTHORIZED);
+    // the first write may be samples: the run is created; step defaults to the last history step (0)
+    let (c, v) = send(&app, "POST", "/api/v1/runs/rl/samples", Some(&tok), r#"{"prompt": "2+2=", "completion": "5", "reward": 0}"#).await;
+    assert_eq!(c, StatusCode::OK, "{v}");
+    assert_eq!((v["samples"].as_u64(), v["created"].as_bool()), (Some(1), Some(true)));
+    let run = v["run"].as_str().unwrap().to_string();
+    send(&app, "POST", &format!("/api/v1/runs/{run}/log"), Some(&tok), r#"{"step": 10, "reward": 0.5}"#).await;
+    let body = "{\"step\": 10, \"key\": \"eval\", \"prompt\": \"2+2=\", \"completion\": \"4\", \"reward\": 1, \"temperature\": 0.7}\n{\"prompt\": \"3+3=\", \"response\": \"6\"}\n";
+    let (c, v) = send(&app, "POST", &format!("/api/v1/runs/{run}/samples"), Some(&tok), body).await;
+    assert_eq!((c, v["samples"].as_u64()), (StatusCode::OK, Some(2)), "{v}");
+    // a bad sample teaches
+    let (c, v) = send(&app, "POST", &format!("/api/v1/runs/{run}/samples"), Some(&tok), r#"{"prompt": "no output"}"#).await;
+    assert_eq!(c, StatusCode::BAD_REQUEST);
+    assert!(v["error"].as_str().unwrap().contains("completion") && v["example"].as_str().unwrap().contains("/samples"), "{v}");
+    // read back: all, by key, by step window, newest-limited
+    let (c, v) = send(&app, "GET", &format!("/api/v1/runs/{run}/samples"), None, "").await;
+    assert_eq!(c, StatusCode::OK, "{v}");
+    assert_eq!((v["n"].as_u64(), v["steps"].clone(), v["keys"].clone()), (Some(3), json!([0, 10]), json!(["default", "eval"])));
+    let s = v["samples"].as_array().unwrap();
+    assert_eq!((s[1]["key"].as_str(), s[1]["meta"]["temperature"].as_f64(), s[2]["step"].as_u64(), s[2]["completion"].as_str()), (Some("eval"), Some(0.7), Some(10), Some("6")));
+    let (_, v) = send(&app, "GET", &format!("/api/v1/runs/{run}/samples?key=eval"), None, "").await;
+    assert_eq!(v["samples"].as_array().unwrap().len(), 1);
+    let (_, v) = send(&app, "GET", &format!("/api/v1/runs/{run}/samples?from=5&limit=1"), None, "").await;
+    assert_eq!(v["samples"].as_array().unwrap().iter().map(|x| x["completion"].clone()).collect::<Vec<_>>(), vec![json!("6")]);
+    // the index advertises them; a run without samples has n_samples 0 and no file
+    send(&app, "POST", "/api/v1/runs/plain/log", Some(&tok), r#"{"loss": 1}"#).await;
+    let (_, idx) = send(&app, "GET", &format!("/api/index?project={proj}"), None, "").await;
+    let n = |id: &str| idx["runs"].as_array().unwrap().iter().find(|r| r["id"] == id).map(|r| r["n_samples"].clone());
+    assert_eq!(n(&run), Some(json!(3)));
+    assert_eq!(n(&format!("{proj}/plain")), Some(json!(0)));
+    assert!(!root.join("runs").join(&proj).join("plain").join("samples.jsonl").exists());
+    let (c, _) = send(&app, "GET", "/api/v1/runs/nope/x/samples", None, "").await;
+    assert_eq!(c, StatusCode::NOT_FOUND);
+}

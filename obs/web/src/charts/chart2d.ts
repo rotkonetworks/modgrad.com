@@ -53,6 +53,22 @@ export function zoomGroup(name: string): ZoomGroup {
   return g;
 }
 
+/** Set the x window of every zoom group whose name passes `pred` and redraw its charts (jump to a
+ *  step from outside a chart, e.g. the anomaly list). `v` is in transformed x; null resets. Returns
+ *  the number of charts moved. */
+export function setGroupViews(pred: (name: string) => boolean, v: View | null): number {
+  let n = 0;
+  for (const [name, g] of ZOOM_GROUPS) {
+    if (!pred(name)) continue;
+    g.view = v ? { x0: v.x0, x1: v.x1 } : null;
+    for (const c of [...g.charts]) {
+      if (!c.panel.isConnected) { g.charts.delete(c); continue; }
+      c.setView(g.view, true); n++;
+    }
+  }
+  return n;
+}
+
 /** y range of the visible values, else of everything, padded when flat */
 function fitY(visible: number[][], all: { Y: number[] }[]): [number, number] {
   let [a, b] = finiteRange(visible);

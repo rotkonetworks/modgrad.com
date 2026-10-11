@@ -275,3 +275,66 @@ body.bdragging, body.bdragging * { cursor: grabbing !important; }
 
 /* board panels share the row: as many ~420px+ columns as fit, each stretching */
 .bcanvas .panel { max-width: none; }
+
+/* ------------------------------------------------------------ LLM views: layer heatmaps */
+.lheat svg { cursor: crosshair; }
+.bpanel .bcell .bkey button { font: 10px var(--mono); padding: 0 4px; line-height: 15px; }
+
+/* ------------------------------------------------------------ samples (tab and board panel) */
+.samplesview .stepper { display: inline-flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+.samplesview .stepper input[type=range] { width: 220px; max-width: 46vw; }
+.sample { border: 1px solid var(--rule); background: var(--panel); margin: 0 0 8px; padding: 4px 8px 6px; min-width: 0; }
+.sample .shead { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: 11px; color: var(--muted); border-bottom: 1px dotted var(--rule); padding-bottom: 2px; margin-bottom: 3px; }
+.sample .shead .sp { flex: 1; }
+.sample .shead button, .sample button.more { font: 10px var(--mono); padding: 0 4px; line-height: 15px; }
+.sample pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 2px 0; font: 12px/1.45 var(--mono); }
+.sample pre.sprompt, .scompare > pre.sprompt { color: var(--muted); border-left: 2px solid var(--rule); padding-left: 6px; max-height: 9em; overflow-y: auto; }
+.scompare > pre.sprompt { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.45 var(--mono); margin: 0 0 8px; }
+.sample pre.scomp { color: var(--ink); }
+.sample .smeta { font-size: 10px; color: var(--muted); overflow-wrap: anywhere; }
+ins.d-ins { text-decoration: none; background: color-mix(in srgb, var(--c2) 22%, transparent); box-shadow: inset 0 -1px 0 var(--c2); }
+del.d-del { text-decoration: line-through; color: var(--muted); background: color-mix(in srgb, var(--c3) 16%, transparent); }
+.lhist { margin: 0 0 8px; max-width: 540px; }
+.lhist svg { display: block; width: 100%; height: auto; }
+.lhist figcaption { margin: 0; }
+.slist > button { font: 11px var(--mono); }
+.spanel { max-height: 520px; overflow-y: auto; padding: 2px; }
+.spanel .sgroup { margin-bottom: 6px; }
+.spanel .bkey button { font: 10px var(--mono); padding: 0 4px; line-height: 15px; }
+
+/* ------------------------------------------------------------ evals table */
+.evalwrap { overflow-x: auto; border: 1px solid var(--rule); max-width: 100%; }
+table.evals { border-collapse: collapse; font-size: 12px; }
+table.evals th, table.evals td { padding: 2px 8px; border-bottom: 1px solid var(--rule); white-space: nowrap; text-align: left; vertical-align: bottom; }
+table.evals th { background: var(--bg); font: 600 11px var(--mono); }
+table.evals th button.th { border: 0; background: none; font: 600 11px var(--mono); padding: 0; text-align: left; display: flex; flex-direction: column; }
+table.evals th .em { font-weight: 400; color: var(--muted); }
+table.evals th.ecol { min-width: 128px; }
+table.evals th button.add { font: 10px var(--mono); padding: 0 4px; line-height: 14px; display: block; margin-top: 2px; }
+table.evals svg.spark { display: block; width: 120px; height: 26px; margin-top: 2px; }
+table.evals td.num { text-align: right; font-family: var(--mono); }
+table.evals td.rn { font: 11px var(--mono); }
+table.evals td.rn.rep { color: var(--muted); }
+table.evals .miss { color: var(--miss); }
+table.evals button.ev { border: 1px solid transparent; background: none; font: 12px var(--mono); padding: 0 3px; }
+table.evals button.ev:hover { border-color: var(--muted); }
+table.evals button.ev.best { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+table.evals tr:hover td { background: var(--hl); }
+
+/* ------------------------------------------------------------ anomaly list (board) */
+.anoms { border: 1px solid var(--rule); padding: 4px 8px; margin: 0 0 8px; font: 11px var(--mono); }
+.anoms .ahead { display: flex; gap: 6px 12px; align-items: center; flex-wrap: wrap; }
+.anoms .ahead .sp { flex: 1; }
+.anoms .ahead button, .anoms li button { font: 10px var(--mono); padding: 0 4px; line-height: 15px; }
+.anoms .note { margin: 2px 0; }
+.alist { list-style: none; margin: 4px 0 2px; padding: 0; max-height: 220px; overflow-y: auto; }
+.alist li { display: flex; gap: 4px 10px; align-items: baseline; flex-wrap: wrap; border-bottom: 1px dotted var(--rule); padding: 1px 2px; }
+.alist li.on { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+.alist .akind { border: 1px solid var(--muted); padding: 0 3px; font-size: 10px; min-width: 52px; text-align: center; }
+.alist .akind.nonfinite { border-color: var(--accent); color: var(--accent); }
+.alist .astep { min-width: 9em; }
+.alist .awhat { overflow-wrap: anywhere; }
+.alist .asize { color: var(--muted); }
+.alist li button { margin-left: auto; }
+.samplesview input[type=range] { accent-color: var(--c1); }
+.bpanel .panel.lheat .ptitle { display: block; font-weight: 400; color: var(--muted); }

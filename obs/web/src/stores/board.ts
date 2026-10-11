@@ -8,7 +8,7 @@
 import { createSignal } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
 import * as Bd from '@/logic/board';
-import { fieldsOf, hasReplicates, metricCounts, type Stream } from '@/logic/data';
+import { fieldsOf, hasReplicates, metricCounts, layerFamilies, heatmapQuery, SAMPLES_METRIC, type Stream } from '@/logic/data';
 import type { Board, FitForecast, Forecast, Panel, QueryResult, Run } from '@/logic/types';
 import { lsGet, lsSet } from '@/lib/storage';
 import { hash, setHash } from '@/lib/hash';
@@ -71,7 +71,7 @@ export const parseQ = Bd.parse;
 export function titleOf(p: { title: string; q: string }): string {
   if (p.title) return p.title;
   const pq = Bd.parse(p.q); if (!pq.ok) return p.q;
-  const ms = pq.chips.filter((c) => c.kind === 'metric' || c.kind === 'formula').map((c) => (c.text === '*' ? 'all metrics' : c.text));
+  const ms = pq.chips.filter((c) => c.kind === 'metric' || c.kind === 'formula').map((c) => (c.text === '*' ? 'all metrics' : c.text === SAMPLES_METRIC ? 'text samples' : c.text));
   return ms.length ? ms.slice(0, 3).join(', ') + (ms.length > 3 ? ` +${ms.length - 3}` : '') : p.q;
 }
 /** every state change goes through here: optional undo snapshot, mutation, save, re-render */
@@ -117,7 +117,8 @@ export function autoPreset(): Board | null {
   if (t.run) filter = `{run=${Bd.quote(t.run)}}`;
   else if (t.project) filter = `{run=~${Bd.quote(t.project + '/*')}}`;
   const tok = [...counts.keys()].find((m) => /tokens?_seen|^tokens$|num_tokens|consumed_tokens/.test(m));
-  return Bd.autoBoard(counts, { replicates: hasReplicates(runs), hasTokens: tok || null, filter });
+  const families = layerFamilies([...counts.keys()], 2);
+  return Bd.autoBoard(counts, { replicates: hasReplicates(runs), hasTokens: tok || null, filter, families, heatmapQuery, samples: runs.some((r) => (r.n_samples || 0) > 0), samplesMetric: SAMPLES_METRIC });
 }
 export const defaultBoard = (): Board => autoPreset() || historyPreset();
 export function applyPreset(name: string): void {

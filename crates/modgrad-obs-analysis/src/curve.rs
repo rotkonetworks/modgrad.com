@@ -164,6 +164,42 @@ pub fn spikes(vals: &[f64], window: usize, k: f64) -> Vec<u32> {
     out
 }
 
+/// What [`anomalies`] found at one index.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Anomaly {
+    /// An upward spike (see [`spikes`]): the value over the trailing median.
+    Spike { ratio: f64 },
+    /// A logged value that is not finite. The writer stores NaN and inf as
+    /// `null`, so the reader cannot tell which; series only carry steps at
+    /// which the key was logged, so this is never a plain missing value.
+    NonFinite,
+}
+
+/// Spikes ([`spikes`], with the size as a ratio to the trailing median of
+/// the previous `window` finite points) and non-finite values, by index.
+pub fn anomalies(vals: &[f64], window: usize, k: f64) -> Vec<(u32, Anomaly)> {
+    let window = window.max(3);
+    let mut out: Vec<(u32, Anomaly)> = Vec::new();
+    let sp = spikes(vals, window, k);
+    let mut hist: Vec<f64> = Vec::new();
+    let mut si = 0;
+    for (i, &v) in vals.iter().enumerate() {
+        if !v.is_finite() {
+            out.push((i as u32, Anomaly::NonFinite));
+            continue;
+        }
+        if si < sp.len() && sp[si] as usize == i {
+            let mut w: Vec<f64> = hist[hist.len() - window..].to_vec();
+            w.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let med = w[window / 2];
+            out.push((i as u32, Anomaly::Spike { ratio: if med != 0.0 { v / med } else { f64::INFINITY } }));
+            si += 1;
+        }
+        hist.push(v);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,5 +242,19 @@ mod tests {
         assert_eq!(spikes(&v, 10, 6.0), vec![30]);
         assert!(spikes(&[1.0; 40], 10, 6.0).is_empty());
         assert!(spikes(&[1.0, 9.0], 10, 6.0).is_empty());
+    }
+
+    #[test]
+    fn anomalies_report_spikes_with_ratio_and_non_finite() {
+        let mut v: Vec<f64> = (0..40).map(|i| 2.0 + if i % 2 == 0 { 0.01 } else { -0.01 }).collect();
+        v[20] = 8.0;
+        v[25] = f64::NAN;
+        v[30] = f64::INFINITY;
+        let a = anomalies(&v, 10, 6.0);
+        assert_eq!(a.len(), 3);
+        assert_eq!(a[0].0, 20);
+        let Anomaly::Spike { ratio } = a[0].1 else { panic!() };
+        assert!((ratio - 8.0 / 2.01).abs() < 1e-9, "{ratio}");
+        assert_eq!((a[1], a[2]), ((25, Anomaly::NonFinite), (30, Anomaly::NonFinite)));
     }
 }

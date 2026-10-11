@@ -15,6 +15,9 @@ import {
   findPanel, type TraceRef,
 } from '@/stores/board';
 import { draggable } from '@/board/dnd';
+import { layerHeatmap } from '@/charts/layerHeatmap';
+import { getStage, quote } from '@/logic/board';
+import { addToNew } from '@/stores/board';
 
 export const MAX_POINTS = 1500;
 export interface DrawOut { badge: { text: string; skill: boolean; title: string } | null }
@@ -30,6 +33,7 @@ export function drawPanel(c: DrawCtx): DrawOut {
   const out: DrawOut = { badge: null };
   if (!res.ok) { h('div', { class: 'bempty' }, host, 'query error (see above)'); return out; }
   const meta = res.meta, traces = res.traces;
+  if (res.heatmaps.length) return drawHeatmaps(c, res);
   if (!traces.length) { h('div', { class: 'bempty' }, host, 'nothing matches this query yet; it updates as runs arrive'); for (const w of meta.warnings) h('div', { class: 'bnote' }, foot, w); return out; }
   const isStep = meta.x_label === 'step';
   const fc = meta.forecast && isStep ? meta.forecast : null;
@@ -148,6 +152,46 @@ export function drawPanel(c: DrawCtx): DrawOut {
   if (meta.downsampled) h('div', { class: 'bnote' }, foot, `long series block-averaged to ${MAX_POINTS} points (longest ${meta.downsampled}); legend statistics are over block means`);
   for (const w of meta.warnings) h('div', { class: 'bnote' }, foot, w);
   return out;
+}
+
+/** picked heatmap cell per panel and (run, family): survives redraws (live rows) */
+const heatPick = new Map<string, [number, number]>();
+/** `heatmap over layer`: one layer x step matrix per (run, family); a click draws that layer's line */
+function drawHeatmaps(c: DrawCtx, res: Extract<QueryResult, { ok: true }>): DrawOut {
+  const { panel: p, host, foot } = c;
+  const el = host.closest('.bpanel') as HTMLElement | null;
+  if (el) el.classList.toggle('wide', res.heatmaps.length > 1 && !c.focusOpen);
+  const rownorm = /rownorm/.test(getStage(p.q, 'heatmap') || '');
+  const wrap = res.heatmaps.length > 1 ? h('div', { class: 'bcells' }, host) : host;
+  for (const hm of res.heatmaps) {
+    const key = p.id + '\u0001' + hm.run + '\u0001' + hm.family;
+    const box = h('div', { class: 'bcell' }, wrap);
+    const stat = hm.family.slice(hm.family.lastIndexOf('*') + 1).replace(/^[/._-]+/, '') || hm.family;
+    const draw = (): void => {
+      box.textContent = '';
+      const mark = heatPick.get(key) || null;
+      layerHeatmap(box, {
+        title: `${hm.run} / ${hm.family}`, layers: hm.layers, cols: hm.cols, z: hm.z, log: res.meta.ylog, mark, centered: rownorm,
+        zlabel: rownorm ? `${stat} / layer median` : stat,
+        onpick: (i, j) => { heatPick.set(key, [i, j]); draw(); },
+      });
+      if (!mark) return;
+      const [i, j] = mark;
+      if (i >= hm.metrics.length || j >= hm.cols.length) { heatPick.delete(key); return; }
+      const metric = hm.metrics[i];
+      const bar = h('div', { class: 'bkey' }, box);
+      h('span', {}, bar, `layer ${hm.layers[i]}, step ${fmt(hm.cols[j])}: ${metric}`);
+      btn(bar, 'open as panel', `new panel with ${metric} of ${hm.run}`, () => addToNew(`${metric}{run=${quote(hm.run)}}`, `${hm.run}:${metric}`));
+      btn(bar, 'close', 'hide this layer line', () => { heatPick.delete(key); draw(); });
+      const tr = res.traces.find((t) => t.metric === metric && t.runs.length === 1 && t.runs[0] === hm.run);
+      if (tr) chart2d(box, { title: `${hm.run}: ${metric}`, xlabel: 'step', ylog: res.meta.ylog, marker: [hm.cols[j]], series: [{ name: metric, color: '--c1', area: true, xs: tr.steps, ys: tr.raw, raw: tr.raw }] });
+    };
+    draw();
+  }
+  if (rownorm) h('div', { class: 'bnote' }, foot, 'rownorm: each layer divided by its own median, so 1 is typical for that layer and a spike in one layer stands out');
+  h('div', { class: 'bnote' }, foot, 'click a cell for that layer as a line; columns are the union of logged steps, block-reduced past 400');
+  for (const w of res.meta.warnings) h('div', { class: 'bnote' }, foot, w);
+  return { badge: null };
 }
 
 type DSeries = ChartSeries & { trace: Trace; fresh: boolean };

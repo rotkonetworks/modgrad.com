@@ -8,6 +8,7 @@
 //! | `metrics.jsonl` | [`Run::log`]        | history: `{"step":N,"t":secs,"key":value,...}` per line |
 //! | `arrays.jsonl`  | [`Run::log`], [`Run::log_array`] | tensors and histograms: `{"step","t","key","kind","shape","dtype":"f32le","b64"[,"edges"]}` |
 //! | `events.jsonl`  | [`Run::event`]      | `{"step","t","text"}` |
+//! | `samples.jsonl` | [`Run::log_sample`] | text samples: `{"step","t","key","prompt","completion","reward"?,"score"?,"meta"?}` (created on first sample) |
 //! | `summary.json`  | [`Run::summary`], [`Run::finish`] | `{summary, elapsed_s, finished?, end_unix?}` |
 //!
 //! Config, history (metrics + arrays) and summary are separate concepts, as
@@ -32,7 +33,7 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
@@ -134,6 +135,8 @@ pub struct Run {
     metrics: File,
     arrays: File,
     events: File,
+    /// [`SAMPLES_FILE`], opened (and its tail repaired) on the first sample.
+    samples: Option<File>,
     t0: Instant,
     start_unix: f64,
     /// Run summary (W&B semantics): last value of every logged scalar,
@@ -299,6 +302,57 @@ pub fn event_line(step: u64, t: f64, text: &str) -> String {
     json!({ "step": step, "t": round6(t), "text": text }).to_string()
 }
 
+/// Text samples (generations) of a run: one line of [`SAMPLES_FILE`] each.
+/// Kept outside [`JSONL_FILES`] (and so outside [`Run::committed`]): runs
+/// without samples never get the file, and readers of the other three
+/// files are unchanged.
+pub const SAMPLES_FILE: &str = "samples.jsonl";
+
+/// One text sample: what an SFT or RL run generated for a prompt at a step.
+/// `key` names the stream (`train`, `eval/gsm8k`, ...; empty is written as
+/// `"default"`); compare-across-steps matches samples by `(key, prompt)`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Sample {
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub prompt: String,
+    pub completion: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reward: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
+    /// Anything else (sampling settings, ids, judge output), shown verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+}
+
+/// One `samples.jsonl` line. Non-finite reward/score are left out; a
+/// `meta` that is not an object is wrapped as `{"value": meta}`.
+pub fn sample_line(step: u64, t: f64, s: &Sample) -> String {
+    let mut m = Map::new();
+    m.insert("step".into(), json!(step));
+    m.insert("t".into(), json!(round6(t)));
+    m.insert("key".into(), json!(if s.key.is_empty() { "default" } else { s.key.as_str() }));
+    m.insert("prompt".into(), json!(s.prompt));
+    m.insert("completion".into(), json!(s.completion));
+    for (k, v) in [("reward", s.reward), ("score", s.score)] {
+        if let Some(x) = v.filter(|x| x.is_finite()) {
+            m.insert(k.into(), json!(x));
+        }
+    }
+    match &s.meta {
+        None | Some(Value::Null) => {}
+        Some(v @ Value::Object(_)) => {
+            m.insert("meta".into(), v.clone());
+        }
+        Some(v) => {
+            m.insert("meta".into(), json!({ "value": v }));
+        }
+    }
+    Value::Object(m).to_string()
+}
+
 /// Pre-serialised records for one run, written by [`Run::append_batch`]
 /// with a single `write_all` per file (the unit a server batches into).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -306,16 +360,18 @@ pub struct Batch {
     pub metrics: Vec<String>,
     pub arrays: Vec<String>,
     pub events: Vec<String>,
+    /// [`SAMPLES_FILE`] lines.
+    pub samples: Vec<String>,
     /// Last value per scalar key in this batch (feeds the auto-summary).
     pub last: Vec<(String, f64)>,
 }
 
 impl Batch {
     pub fn is_empty(&self) -> bool {
-        self.metrics.is_empty() && self.arrays.is_empty() && self.events.is_empty()
+        self.metrics.is_empty() && self.arrays.is_empty() && self.events.is_empty() && self.samples.is_empty()
     }
     pub fn len(&self) -> usize {
-        self.metrics.len() + self.arrays.len() + self.events.len()
+        self.metrics.len() + self.arrays.len() + self.events.len() + self.samples.len()
     }
     /// Add one W&B-style `log` call: scalars to one history line, the rest
     /// to array lines.
@@ -337,10 +393,14 @@ impl Batch {
     pub fn push_event(&mut self, step: u64, t: f64, text: &str) {
         self.events.push(event_line(step, t, text));
     }
+    pub fn push_sample(&mut self, step: u64, t: f64, s: &Sample) {
+        self.samples.push(sample_line(step, t, s));
+    }
     pub fn extend(&mut self, other: Batch) {
         self.metrics.extend(other.metrics);
         self.arrays.extend(other.arrays);
         self.events.extend(other.events);
+        self.samples.extend(other.samples);
         self.last.extend(other.last);
     }
 }
@@ -393,6 +453,7 @@ impl Run {
             metrics: open_append(&dir.join("metrics.jsonl"))?,
             arrays: open_append(&dir.join("arrays.jsonl"))?,
             events: open_append(&dir.join("events.jsonl"))?,
+            samples: None,
             dir: dir.to_path_buf(),
             t0: Instant::now(),
             start_unix: meta.start_unix,
@@ -419,6 +480,7 @@ impl Run {
             metrics: open_append(&dir.join("metrics.jsonl"))?,
             arrays: open_append(&dir.join("arrays.jsonl"))?,
             events: open_append(&dir.join("events.jsonl"))?,
+            samples: None,
             dir: dir.to_path_buf(),
             t0: Instant::now().checked_sub(std::time::Duration::from_secs_f64(behind)).unwrap_or_else(Instant::now),
             start_unix,
@@ -440,6 +502,9 @@ impl Run {
         write_lines(&mut self.metrics, &b.metrics)?;
         write_lines(&mut self.arrays, &b.arrays)?;
         write_lines(&mut self.events, &b.events)?;
+        if !b.samples.is_empty() {
+            write_lines(self.samples_file()?, &b.samples)?;
+        }
         for (k, v) in &b.last {
             self.summary.insert(k.clone(), if v.is_finite() { json!(v) } else { Value::Null });
         }
@@ -635,6 +700,32 @@ impl Run {
 
     pub fn event_with_time(&mut self, step: u64, t: f64, text: &str) -> Result<(), ObsError> {
         write_line(&mut self.events, event_line(step, t, text))?;
+        Ok(())
+    }
+
+    fn samples_file(&mut self) -> io::Result<&mut File> {
+        if self.samples.is_none() {
+            let p = self.dir.join(SAMPLES_FILE);
+            repair_tail(&p)?;
+            self.samples = Some(open_append(&p)?);
+        }
+        Ok(self.samples.as_mut().unwrap())
+    }
+
+    /// Log one text sample (a generation) at `step`; see [`Sample`].
+    ///
+    /// ```no_run
+    /// # use modgrad_obs::{Run, Sample};
+    /// # let mut run = Run::init(std::path::Path::new("obs"), "p", "r", &()).unwrap();
+    /// run.log_sample(200, &Sample { key: "eval/gsm8k".into(), prompt: "2+2=".into(), completion: "4".into(), reward: Some(1.0), ..Default::default() }).unwrap();
+    /// ```
+    pub fn log_sample(&mut self, step: u64, s: &Sample) -> Result<(), ObsError> {
+        let t = self.elapsed();
+        self.log_sample_with_time(step, t, s)
+    }
+
+    pub fn log_sample_with_time(&mut self, step: u64, t: f64, s: &Sample) -> Result<(), ObsError> {
+        write_line(self.samples_file()?, sample_line(step, t, s))?;
         Ok(())
     }
 
@@ -843,6 +934,18 @@ pub fn array_record(v: &Value) -> Option<ArrayRecord> {
     })
 }
 
+/// Every complete line of a run's [`SAMPLES_FILE`] (a torn last line is
+/// skipped), in file order; no file = no samples.
+pub fn read_samples(dir: &Path) -> io::Result<Vec<Value>> {
+    Ok(read_jsonl(&dir.join(SAMPLES_FILE))?.0)
+}
+
+/// Number of complete samples (newline count of [`SAMPLES_FILE`]): cheap
+/// enough for an index entry.
+pub fn count_samples(dir: &Path) -> usize {
+    std::fs::read(dir.join(SAMPLES_FILE)).map(|b| b.iter().filter(|&&c| c == b'\n').count()).unwrap_or(0)
+}
+
 /// Read a run directory written by [`Run`].
 pub fn read_run(dir: &Path) -> io::Result<RunData> {
     read_run_limited(dir, None)
@@ -908,6 +1011,37 @@ mod tests {
         let d = std::env::temp_dir().join(format!("modgrad-obs-test-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
+    }
+
+    #[test]
+    fn samples_written_lazily_and_read_back() {
+        let root = tmpdir("samples");
+        let mut run = Run::create(&root, "r", &json!({})).unwrap();
+        let dir = run.dir().to_path_buf();
+        run.log_scalars(0, &[("loss", 1.0)]).unwrap();
+        assert!(!dir.join(SAMPLES_FILE).exists(), "no samples, no file");
+        run.log_sample(3, &Sample { prompt: "2+2=".into(), completion: "4".into(), reward: Some(1.0), score: Some(f64::NAN), meta: Some(json!("raw")), ..Default::default() }).unwrap();
+        let mut b = Batch::default();
+        b.push_sample(4, 1.5, &Sample { key: "eval/x".into(), completion: "b \"q\"\nline".into(), meta: Some(json!({"id": 7})), ..Default::default() });
+        assert_eq!(b.len(), 1);
+        run.append_batch(&b).unwrap();
+        // a torn tail is not returned, and is repaired on the next open
+        std::fs::OpenOptions::new().append(true).open(dir.join(SAMPLES_FILE)).unwrap().write_all(b"{\"step\":9,\"comp").unwrap();
+        let s = read_samples(&dir).unwrap();
+        assert_eq!(s.len(), 2);
+        assert_eq!(count_samples(&dir), 2);
+        assert_eq!((s[0]["step"].as_u64(), s[0]["key"].as_str(), s[0]["reward"].as_f64()), (Some(3), Some("default"), Some(1.0)));
+        assert!(s[0].get("score").is_none(), "non-finite score left out");
+        assert_eq!(s[0]["meta"], json!({"value": "raw"}));
+        assert_eq!((s[1]["key"].as_str(), s[1]["completion"].as_str()), (Some("eval/x"), Some("b \"q\"\nline")));
+        let back: Sample = serde_json::from_value(s[1].clone()).unwrap();
+        assert_eq!(back.meta, Some(json!({"id": 7})));
+        drop(run);
+        let mut run = Run::open_existing(&dir).unwrap();
+        run.log_sample(10, &Sample { completion: "after".into(), ..Default::default() }).unwrap();
+        assert_eq!(read_samples(&dir).unwrap().len(), 3);
+        // the other files' committed lengths are unaffected
+        assert_eq!(run.committed().unwrap().len(), 3);
     }
 
     #[test]

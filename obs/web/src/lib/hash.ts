@@ -3,7 +3,7 @@
 //   project=<p>     a project board: only that project's runs, new ones appear live
 //   new             issue an anonymous project, then become project=<p>
 //   board=<name>    a shared board file (boards/<name>.json, written by the MCP make_board tool)
-//   view=<tab>      cross | arrays | runs (board is the default)
+//   view=<tab>      samples | evals | cross | arrays | runs (board is the default)
 //   panel=<id>      focus view of one panel (the legacy form #panel-<id> is accepted too)
 import { createSignal } from 'solid-js';
 

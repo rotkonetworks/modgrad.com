@@ -16,6 +16,9 @@
 //!   [`STATE_ELEMS`] instead; no analysis (PCA, smoothing, surfaces) happens
 //!   here — the dashboard does it in wasm (modgrad-obs-analysis).
 //! * `events.json` — the last 200 events.
+//! * `samples.json` — text samples (only when the run logged any), as
+//!   [`samples_json`] shapes them: `{"samples", "steps", "keys", "n"}`; the
+//!   index entry carries `n_samples`.
 //!
 //! The dashboard fetches only the keys it plots.
 
@@ -254,6 +257,29 @@ pub fn build_run(rd: &RunData, rel: &str, source: &str) -> (Value, Vec<(String, 
     (index, files)
 }
 
+/// Samples cut for the dashboard: `{"samples": [...], "steps": [distinct
+/// steps], "keys": [distinct keys], "n": total}`. `samples` keeps those with
+/// `range.start <= step < range.end` and (when given) `key`, the newest
+/// `limit` of them in file order; `steps`, `keys` and `n` describe every
+/// sample, so a viewer can offer the whole run while loading a window.
+pub fn samples_json(all: &[Value], range: std::ops::Range<u64>, key: Option<&str>, limit: usize) -> Value {
+    let mut steps: Vec<u64> = all.iter().filter_map(|v| v["step"].as_u64()).collect();
+    steps.sort_unstable();
+    steps.dedup();
+    let mut keys: Vec<&str> = all.iter().filter_map(|v| v["key"].as_str()).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    let keep: Vec<&Value> = all
+        .iter()
+        .filter(|v| v["step"].as_u64().is_some_and(|s| range.contains(&s)) && key.is_none_or(|k| v["key"].as_str() == Some(k)))
+        .collect();
+    let from = keep.len().saturating_sub(limit);
+    json!({ "samples": keep[from..], "steps": steps, "keys": keys, "n": all.len() })
+}
+
+/// Samples kept in a static export (the newest).
+pub const EXPORT_SAMPLES: usize = 5000;
+
 /// Export one run (write its plot files next to it); returns its index entry.
 pub fn export_run(obs: &Path, dir: &Path) -> io::Result<Value> {
     let rd = read_run(dir)?;
@@ -264,9 +290,16 @@ pub fn export_run(obs: &Path, dir: &Path) -> io::Result<Value> {
         let _ = std::fs::remove_dir_all(dir.join(sub));
     }
     let _ = std::fs::remove_file(dir.join("metrics.small.json"));
-    let (index, files) = build_run(&rd, &rel, &source);
+    let (mut index, files) = build_run(&rd, &rel, &source);
     for (f, v) in files {
         write_json(&dir.join(f), &v)?;
+    }
+    let samples = crate::read_samples(dir)?;
+    index["n_samples"] = json!(samples.len());
+    if samples.is_empty() {
+        let _ = std::fs::remove_file(dir.join("samples.json"));
+    } else {
+        write_json(&dir.join("samples.json"), &samples_json(&samples, 0..u64::MAX, None, EXPORT_SAMPLES))?;
     }
     Ok(index)
 }
@@ -316,5 +349,32 @@ mod tests {
         assert!(sh.iter().product::<usize>() <= ARRAY_ELEMS);
         let m: Value = serde_json::from_slice(&std::fs::read(dir.join("metrics/loss.json")).unwrap()).unwrap();
         assert_eq!(m["step"].as_array().unwrap().len(), 2500);
+        assert_eq!(r["n_samples"], 0);
+        assert!(!dir.join("samples.json").exists());
+    }
+
+    #[test]
+    fn samples_exported_and_cut() {
+        let obs = std::env::temp_dir().join(format!("modgrad-obs-export-samples-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&obs);
+        let mut run = Run::init(&obs.join("runs"), "p", "rl", &json!({})).unwrap();
+        run.log_scalars(0, &[("reward", 0.1)]).unwrap();
+        for s in [0u64, 10, 20] {
+            for k in ["train", "eval"] {
+                run.log_sample(s, &crate::Sample { key: k.into(), prompt: "p".into(), completion: format!("{k} at {s}"), ..Default::default() }).unwrap();
+            }
+        }
+        run.finish().unwrap();
+        let idx = export_all(&obs).unwrap();
+        let r = &idx["runs"][0];
+        assert_eq!(r["n_samples"], 6);
+        let dir = obs.join(r["path"].as_str().unwrap());
+        let j: Value = serde_json::from_slice(&std::fs::read(dir.join("samples.json")).unwrap()).unwrap();
+        assert_eq!((j["n"].as_u64(), j["steps"].clone(), j["keys"].clone()), (Some(6), json!([0, 10, 20]), json!(["eval", "train"])));
+        let all = crate::read_samples(&dir).unwrap();
+        let cut = samples_json(&all, 10..u64::MAX, Some("eval"), 1);
+        assert_eq!(cut["samples"].as_array().unwrap().len(), 1);
+        assert_eq!(cut["samples"][0]["completion"], "eval at 20");
+        assert_eq!(cut["n"], 6);
     }
 }

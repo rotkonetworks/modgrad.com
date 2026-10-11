@@ -31,6 +31,7 @@ pub const API_TEXT: &str = include_str!("v1_api.txt");
 pub const EX_LOG: &str = r#"curl -X POST "$OBS/api/v1/runs/my-run/log" -H "Authorization: Bearer $OBS_TOKEN" -d '{"step": 1, "loss": 0.52, "acc": "71.5%"}'"#;
 pub const EX_TOKEN: &str = r#"curl -X POST "$OBS/api/v1/projects"   # -> {"token": "obsp_..."}; then send -H "Authorization: Bearer obsp_...""#;
 pub const EX_TEXT: &str = r#"python train.py 2>&1 | curl -X POST "$OBS/api/v1/runs/my-run/text" -H "Authorization: Bearer $OBS_TOKEN" --data-binary @-"#;
+pub const EX_SAMPLES: &str = r#"curl -X POST "$OBS/api/v1/runs/my-run/samples" -H "Authorization: Bearer $OBS_TOKEN" -d '{"step": 100, "key": "eval/gsm8k", "prompt": "2+2=", "completion": "4", "reward": 1.0}'"#;
 pub const EX_CREATE: &str = r#"curl -X POST "$OBS/api/v1/runs" -H "Authorization: Bearer $OBS_TOKEN" -d '{"name": "my-run", "config": {"lr": 0.0003}}'"#;
 
 fn bad(m: impl Into<String>) -> ApiError {
@@ -208,6 +209,76 @@ pub fn parse_log(body: &Value) -> Result<LogBody, ApiError> {
     Ok(out)
 }
 
+fn bad_sample(m: impl Into<String>) -> ApiError {
+    ApiError::Teach { status: StatusCode::BAD_REQUEST, error: m.into(), example: EX_SAMPLES }
+}
+
+/// Field aliases a sample accepts (first is canonical).
+const SAMPLE_TEXT: [(&str, &[&str]); 3] = [("completion", &["completion", "response", "output", "generation", "text"]), ("prompt", &["prompt", "input", "query"]), ("key", &["key", "name", "split"])];
+
+/// One sample object -> a `Sample` record. `completion` (or `response`,
+/// `output`, `generation`, `text`) is required; `step` optional (missing =
+/// the run's last step); other unknown keys are kept under `meta`.
+pub fn sample_record(v: &Value) -> Result<Record, ApiError> {
+    let o = v.as_object().ok_or_else(|| bad_sample(format!("a sample is a JSON object like {{\"step\": 1, \"prompt\": \"...\", \"completion\": \"...\"}}, got {v}")))?;
+    let step = match o.get("step").or_else(|| o.get("_step")) {
+        None | Some(Value::Null) => AUTO_STEP,
+        Some(s) => loose_step(s).map_err(|_| bad_sample(format!("step must be a non-negative integer (or left out to mean the run's last step), got {s}")))?,
+    };
+    let t = o.get("t").and_then(loose_number).filter(|x| x.is_finite());
+    let mut text: [Option<String>; 3] = Default::default();
+    let mut used: Vec<&str> = vec!["step", "_step", "t", "reward", "score", "meta"];
+    for (i, (canon, aliases)) in SAMPLE_TEXT.iter().enumerate() {
+        if let Some((k, x)) = aliases.iter().find_map(|k| o.get(*k).map(|x| (*k, x))) {
+            used.push(k);
+            text[i] = Some(match x {
+                Value::String(s) => s.clone(),
+                Value::Null => String::new(),
+                other => other.to_string(),
+            });
+        } else if *canon == "completion" {
+            return Err(bad_sample(format!("a sample needs \"completion\" (the generated text); got keys {:?}", o.keys().collect::<Vec<_>>())));
+        }
+    }
+    let num = |k: &str| -> Result<Option<f64>, ApiError> {
+        match o.get(k) {
+            None | Some(Value::Null) => Ok(None),
+            Some(x) => loose_number(x).map(|f| Some(f).filter(|f| f.is_finite())).ok_or_else(|| bad_sample(format!("{k} must be a number, got {x}"))),
+        }
+    };
+    let (reward, score) = (num("reward")?, num("score")?);
+    let mut meta = match o.get("meta") {
+        None | Some(Value::Null) => Map::new(),
+        Some(Value::Object(m)) => m.clone(),
+        Some(other) => Map::from_iter([("value".to_string(), other.clone())]),
+    };
+    for (k, x) in o.iter().filter(|(k, _)| !used.contains(&k.as_str())) {
+        meta.insert(k.clone(), x.clone());
+    }
+    let [completion, prompt, key] = text;
+    let sample = modgrad_obs::Sample { key: key.unwrap_or_default(), prompt: prompt.unwrap_or_default(), completion: completion.unwrap_or_default(), reward, score, meta: (!meta.is_empty()).then_some(Value::Object(meta)) };
+    Ok(Record::Sample { step, t, sample })
+}
+
+/// A `samples` body: one sample object, an array (or NDJSON), or
+/// `{"samples": [...]}`.
+pub fn parse_samples(body: &Value) -> Result<Vec<Record>, ApiError> {
+    let items: Vec<&Value> = match body {
+        Value::Array(a) => a.iter().collect(),
+        Value::Object(o) if o.len() == 1 && o.contains_key("samples") => match &o["samples"] {
+            Value::Array(a) => a.iter().collect(),
+            other => vec![other],
+        },
+        Value::Object(_) => vec![body],
+        Value::Null => return Err(bad_sample("the body is empty; send a sample like {\"step\": 1, \"prompt\": \"...\", \"completion\": \"...\"}")),
+        other => return Err(bad_sample(format!("expected a sample object, an array of them, or {{\"samples\": [...]}}; got {other}"))),
+    };
+    if items.is_empty() {
+        return Err(bad_sample("no samples in the body"));
+    }
+    items.into_iter().map(sample_record).collect()
+}
+
 /// Raw log text -> rows via [`modgrad_obs::textlog::parse_line`]. A line
 /// without a step takes the step of the last line in this body that had
 /// one, else "next". Returns (records, lines, unparsed non-empty lines).
@@ -345,8 +416,8 @@ fn split_action<'a>(path: &'a str, actions: &[&str]) -> Option<(&'a str, &'a str
 }
 
 async fn post_dispatch(AxState(st): AxState<AppState>, Path(path): Path<String>, Query(q): Query<HashMap<String, String>>, h: HeaderMap, body: Bytes) -> ApiResult {
-    let Some((run, action)) = split_action(&path, &["log", "text", "finish"]) else {
-        return Err(ApiError::Teach { status: StatusCode::NOT_FOUND, error: format!("no POST endpoint /api/v1/runs/{path}; the run actions are .../log, .../text and .../finish"), example: EX_LOG });
+    let Some((run, action)) = split_action(&path, &["log", "text", "finish", "samples"]) else {
+        return Err(ApiError::Teach { status: StatusCode::NOT_FOUND, error: format!("no POST endpoint /api/v1/runs/{path}; the run actions are .../log, .../text, .../samples and .../finish"), example: EX_LOG });
     };
     let token = bearer(&h);
     let base = base_url(&h);
@@ -377,6 +448,12 @@ async fn post_dispatch(AxState(st): AxState<AppState>, Path(path): Path<String>,
             // always sent, so even a body with no metric lines creates the run
             send(IngestRequest::Rows { run: req_run.clone(), records }, &mut req_run).await?;
             json!({ "lines": lines, "rows": rows, "unparsed": unparsed.len(), "unparsed_sample": unparsed.iter().take(3).collect::<Vec<_>>(), "unparsed_stored_as_events": keep_unparsed })
+        }
+        "samples" => {
+            let records = parse_samples(&parse_body(&body)?)?;
+            let n = records.len();
+            send(IngestRequest::Rows { run: req_run.clone(), records }, &mut req_run).await?;
+            json!({ "samples": n })
         }
         "finish" => {
             let summary = match parse_body(&body)? {
@@ -473,8 +550,8 @@ async fn stream_all(AxState(st): AxState<AppState>, Query(q): Query<HashMap<Stri
 
 async fn get_dispatch(st: AxState<AppState>, Path(path): Path<String>, q: Query<HashMap<String, String>>, h: HeaderMap) -> ApiResult {
     use crate::http as hh;
-    let Some((run, action)) = split_action(&path, &["stream", "history", "config", "summary", "events"]) else {
-        return Err(ApiError::Teach { status: StatusCode::NOT_FOUND, error: format!("no GET endpoint /api/v1/runs/{path}; the run reads are .../history, .../config, .../summary, .../events and .../stream"), example: r#"curl "$OBS/api/v1/runs/my-project/my-run/history?keys=loss&from=0""# });
+    let Some((run, action)) = split_action(&path, &["stream", "history", "config", "summary", "events", "samples"]) else {
+        return Err(ApiError::Teach { status: StatusCode::NOT_FOUND, error: format!("no GET endpoint /api/v1/runs/{path}; the run reads are .../history, .../config, .../summary, .../events, .../samples and .../stream"), example: r#"curl "$OBS/api/v1/runs/my-project/my-run/history?keys=loss&from=0""# });
     };
     let run = Path(run.to_string());
     match action {
@@ -482,7 +559,19 @@ async fn get_dispatch(st: AxState<AppState>, Path(path): Path<String>, q: Query<
         "history" => hh::history(st, run, q, h).await,
         "config" => hh::config(st, run).await,
         "summary" => hh::summary(st, run).await,
+        "samples" => samples(&st.0, run.0, &q.0).await,
         _ => hh::events(st, run).await,
+    }
+}
+
+/// `GET /api/v1/runs/<id>/samples?from=&to=&key=&limit=`.
+async fn samples(st: &AppState, run: String, q: &HashMap<String, String>) -> ApiResult {
+    use crate::read::{ReadRequest, ReadResponse};
+    let p = |k: &str, d: u64| q.get(k).and_then(|v| v.parse().ok()).unwrap_or(d);
+    let req = ReadRequest::Samples { run, range: p("from", 0)..p("to", u64::MAX), key: q.get("key").filter(|k| !k.is_empty()).cloned(), limit: p("limit", 5000).clamp(1, 100_000) as usize };
+    match st.read.clone().oneshot(req).await.map_err(ApiError::Read)? {
+        ReadResponse::Samples(v) => Ok(axum::Json(v).into_response()),
+        _ => Err(ApiError::NotFound),
     }
 }
 
@@ -585,6 +674,21 @@ mod tests {
         assert_eq!(steps, vec![10, 10, 10], "lines without a step carry the last step in the body");
         let (recs, ..) = parse_text("loss=1.0\n");
         assert!(matches!(&recs[0], Record::Log { step, .. } if *step == AUTO_STEP));
+    }
+
+    #[test]
+    fn sample_bodies() {
+        let r = parse_samples(&json!({"step": "5", "prompt": "q", "response": "a", "reward": "0.5", "temperature": 0.7, "meta": {"id": 3}})).unwrap();
+        let Record::Sample { step, sample, .. } = &r[0] else { panic!() };
+        assert_eq!((*step, sample.prompt.as_str(), sample.completion.as_str(), sample.reward), (5, "q", "a", Some(0.5)));
+        assert_eq!(sample.meta, Some(json!({"id": 3, "temperature": 0.7})), "unknown keys go to meta");
+        assert_eq!(parse_samples(&json!({"samples": [{"completion": "x"}, {"completion": "y", "key": "eval"}]})).unwrap().len(), 2);
+        let Record::Sample { step, .. } = &parse_samples(&json!([{"completion": "x"}])).unwrap()[0] else { panic!() };
+        assert_eq!(*step, AUTO_STEP);
+        let err = |v: Value| match parse_samples(&v) { Err(ApiError::Teach { error, .. }) => error, other => panic!("{other:?}") };
+        assert!(err(json!({"prompt": "q"})).contains("completion"));
+        assert!(err(json!({"completion": "x", "reward": "high"})).contains("reward"));
+        assert!(err(json!([])).contains("no samples"));
     }
 
     #[test]

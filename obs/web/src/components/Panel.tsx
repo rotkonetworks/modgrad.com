@@ -1,7 +1,8 @@
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from 'solid-js';
 import type { Chip, Panel as PanelT, QueryResult, RunEvent } from '@/logic/types';
 import * as Bd from '@/logic/board';
-import { evalQuery, planOf, varyingFields } from '@/logic/data';
+import { evalQuery, planOf, varyingFields, SAMPLES_METRIC } from '@/logic/data';
+import SamplesPanel from '@/components/SamplesPanel';
 import { A } from '@/lib/wasm';
 import { themeVersion } from '@/lib/theme';
 import { catalog, catalogVersion, runVersion, eventsOf } from '@/stores/runs';
@@ -20,7 +21,7 @@ import ErrLine from '@/components/ErrLine';
 
 const CHIP_LABEL = (c: Chip): string => {
   if (c.kind === 'matcher') { const m = c.text.match(/^run(=~|=|!=|!~)"?(.*?)"?$/); if (m) return `${m[1].startsWith('!') ? 'not ' : ''}runs: ${m[2]}`; return c.text.replace(/"/g, ''); }
-  if (c.kind === 'metric') return c.text === '*' ? 'all metrics' : c.text;
+  if (c.kind === 'metric') return c.text === '*' ? 'all metrics' : c.text === SAMPLES_METRIC ? 'text samples' : c.text;
   return c.text;
 };
 
@@ -48,10 +49,19 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
   const viewSig = () => { const { follow: _f, ...rest } = props.panel.view; return rest; };
   const sig = createMemo(() => JSON.stringify([props.panel.q, props.panel.title, viewSig(), dataKey(), settings.events, settings.spikes, settings.linkX, themeVersion(), !!props.inFocus, !!focusId()]));
 
+  // a query over the text-samples pseudo-metric only is a samples panel, not a chart
+  const samplesQ = createMemo(() => {
+    const pq = parsed(); if (!pq.ok) return false;
+    const ms = pq.chips.filter((c) => c.kind === 'metric');
+    return ms.length > 0 && ms.every((c) => c.text === SAMPLES_METRIC) && !pq.chips.some((c) => c.kind === 'formula');
+  });
+  const sampleRunIds = createMemo(() => (samplesQ() ? [...new Set(planOf(props.panel.q, catalog()).filter(([, m]) => m === SAMPLES_METRIC).map(([r]) => r))] : []));
+
   let tok = 0, cached: { key: string; res: QueryResult } | null = null;
   async function draw(): Promise<void> {
     const t = ++tok;
     const p = model(); if (!p) return;
+    if (samplesQ()) { host.textContent = ''; foot.textContent = ''; setBadge(null); setPending(false); return; }
     const key = p.q + '\u0001' + dataKey();
     let res: QueryResult;
     if (cached && cached.key === key) res = cached.res;
@@ -133,6 +143,8 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
       { label: 'x axis: tokens', run: st('x', 'x tokens') },
       { label: 'forecast', run: st('forecast', 'forecast') },
       { label: 'log y', run: st('log', 'log') },
+      { label: 'layer x step heatmap (layers/<i>/<stat>)', run: st('heatmap', 'heatmap over layer') },
+      { label: 'layer heatmap, each layer / its median', run: st('heatmap', 'heatmap over layer rownorm') },
       { label: 'normalise: z-score', run: st('norm', 'norm z') },
       ...runs.slice(0, 8).map((r) => ({ label: `baseline ${r.id} (difference)`, run: st('baseline', `baseline ${Bd.quote(r.id)}`) })),
       ...(lets.length >= 2 ? [{ label: `formula: ${lets[0]} - ${lets[1]}`, run: () => commit('add formula', () => { p.q = Bd.addEntries(p.q, `${Bd.nextLetter(lets)} = ${lets[0]} - ${lets[1]}`); }) }] : []),
@@ -199,6 +211,7 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
         <QueryText q={props.panel.q} onApply={applyText} />
       </Show>
       <Show when={pending()}><div class="bempty">evaluating…</div></Show>
+      <Show when={samplesQ()}><SamplesPanel runs={sampleRunIds()} k={props.panel.view.samplesK ?? 4} /></Show>
       <div class="bchart" ref={host} />
       <div class="bfootn" ref={foot} />
     </div>

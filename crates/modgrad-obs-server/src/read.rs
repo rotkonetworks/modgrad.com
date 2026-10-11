@@ -29,6 +29,12 @@ pub enum ReadRequest {
     Arrays { run: String, key: String, steps: Option<Vec<u64>>, index_range: Option<Range<usize>> },
     /// Last 200 events.
     Events(String),
+    /// Text samples with `range.start <= step < range.end` (and `key`), the
+    /// newest `limit`; see [`modgrad_obs::export::samples_json`]. Read from
+    /// `samples.jsonl` directly: that file is outside the committed-length
+    /// snapshot, so a response may include samples newer than the snapshot
+    /// (never a torn line).
+    Samples { run: String, range: Range<u64>, key: Option<String>, limit: usize },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +67,7 @@ pub enum ReadResponse {
     History(HistoryBlock),
     Arrays { key: String, blocks: Vec<ArrayBlock> },
     Events(Vec<Value>),
+    Samples(Value),
 }
 
 #[derive(Clone)]
@@ -100,7 +107,9 @@ fn serve(snap: &Snapshot, req: ReadRequest) -> Result<ReadResponse, ReadError> {
                 let rd = load(c)?;
                 let rel = format!("runs/{name}");
                 let source = modgrad_obs::export::source_of(&rd, Some(name));
-                out.push(modgrad_obs::export::build_run(&rd, &rel, &source).0);
+                let mut entry = modgrad_obs::export::build_run(&rd, &rel, &source).0;
+                entry["n_samples"] = serde_json::json!(modgrad_obs::count_samples(&c.dir));
+                out.push(entry);
             }
             Ok(ReadResponse::Runs(out))
         }
@@ -162,6 +171,11 @@ fn serve(snap: &Snapshot, req: ReadRequest) -> Result<ReadResponse, ReadError> {
                 })
                 .collect();
             Ok(ReadResponse::Arrays { key, blocks })
+        }
+        ReadRequest::Samples { run, range, key, limit } => {
+            let c = commit(snap, &run)?;
+            let all = modgrad_obs::read_samples(&c.dir)?;
+            Ok(ReadResponse::Samples(modgrad_obs::export::samples_json(&all, range, key.as_deref(), limit)))
         }
         ReadRequest::Events(run) => {
             let rd = load(commit(snap, &run)?)?;

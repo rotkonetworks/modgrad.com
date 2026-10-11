@@ -1,7 +1,7 @@
 import { createMemo, createSignal, For, Show } from 'solid-js';
 import { createStore } from 'solid-js/store';
 import * as Bd from '@/logic/board';
-import { streamList, type Stream } from '@/logic/data';
+import { streamList, layerFamilies, heatmapQuery, type Stream } from '@/logic/data';
 import { S, runsVersion, selection } from '@/stores/runs';
 import { board, findPanel, titleOf, addToNew, addTo, focusId, registerPicked } from '@/stores/board';
 import { openMenu } from '@/stores/ui';
@@ -37,10 +37,22 @@ export default function SeriesBrowser() {
     return streamList(runs).filter((s) => words.every((w) => (s.run + ':' + s.metric).toLowerCase().includes(w)));
   });
   const visible = () => items().map((s) => s.run + ':' + s.metric);
+  // per-layer metrics (layers/<i>/<stat>) collapse into one group per family, offered as a heatmap
+  const famOf = createMemo(() => {
+    const m = new Map<string, { family: string; n: number }>();
+    for (const f of layerFamilies([...new Set(items().map((s) => s.metric))], 2)) for (const x of f.metrics) m.set(x, { family: f.family, n: f.layers.length });
+    return m;
+  });
   const groups = createMemo(() => {
     const g = new Map<string, Stream[]>();
-    for (const s of items()) { const k = st.group === 'run' ? s.run : s.metric; if (!g.has(k)) g.set(k, []); g.get(k)!.push(s); }
-    return [...g.keys()].sort((a, b) => a.localeCompare(b)).map((k) => ({ name: k, items: g.get(k)! }));
+    const fam = new Map<string, number>();
+    for (const s of items()) {
+      const f = st.group === 'metric' ? famOf().get(s.metric) : undefined;
+      const k = st.group === 'run' ? s.run : f ? f.family : s.metric;
+      if (f) fam.set(k, f.n);
+      if (!g.has(k)) g.set(k, []); g.get(k)!.push(s);
+    }
+    return [...g.keys()].sort((a, b) => Number(fam.has(b)) - Number(fam.has(a)) || a.localeCompare(b)).map((k) => ({ name: k, items: g.get(k)!, layers: fam.get(k) || 0 }));
   });
   const searching = () => st.filter.trim().length > 0;
   const toggleGroup = (name: string) => { const k = st.group + ':' + name; const o = open(); if (o.has(k)) o.delete(k); else o.add(k); setOpen(o); };
@@ -64,15 +76,17 @@ export default function SeriesBrowser() {
       <div class="blist">
         <For each={groups()}>{(g) => {
           const isOpen = () => searching() || open().has(st.group + ':' + g.name);
-          const gq = () => (st.group === 'run' ? Bd.runQuery(g.name) : Bd.metricQuery(g.name));
+          const gq = () => (st.group === 'run' ? Bd.runQuery(g.name) : g.layers ? heatmapQuery(g.name) : Bd.metricQuery(g.name));
           const gEntries = () => (st.group === 'run' ? `{run=${Bd.quote(g.name)}}` : g.name);
-          const glabel = () => (st.group === 'run' ? `run ${g.name} (split by metric)` : `${g.name} across runs`);
+          const glabel = () => (st.group === 'run' ? `run ${g.name} (split by metric)` : g.layers ? `${g.name}: layer x step heatmap (${g.layers} layers)` : `${g.name} across runs`);
           return (
             <div class="bgrp">
               <div class="bgh" ref={(el) => draggable(el, () => ({ type: 'series', entries: gEntries(), q: gq(), label: glabel() }))}>
                 <span class="bgrip" title="drag onto the board or a panel" aria-hidden="true">::</span>
                 <button type="button" class="tog" aria-expanded={isOpen()} title={`${isOpen() ? 'collapse' : 'expand'} ${g.name}`} aria-label={`${isOpen() ? 'collapse' : 'expand'} ${g.name}`} onClick={() => toggleGroup(g.name)}>
-                  <span>{isOpen() ? '-' : '+'}</span><span class="lab">{g.name}</span><span class="n">{g.items.length}</span>
+                  <span>{isOpen() ? '-' : '+'}</span><span class="lab">{g.name}</span>
+                  <Show when={g.layers}><span class="tag" title="per-layer metrics: drag or + for a layer x step heatmap">{g.layers} layers</span></Show>
+                  <span class="n">{g.items.length}</span>
                 </button>
                 <button type="button" class="add" title={`add ${glabel()} to...`} aria-label={`add ${glabel()} to a panel`} onClick={(e) => addMenu(e.currentTarget, gEntries(), glabel(), gq())}>+</button>
               </div>
@@ -88,7 +102,7 @@ export default function SeriesBrowser() {
                       <span class="bgrip" title="drag onto the board or a panel" aria-hidden="true">::</span>
                       <button type="button" class="pick" aria-pressed={on()} title={`${on() ? 'deselect' : 'select'} ${key} (${s.n} points${s.kind === 'array' ? ', mean of a logged array' : ''}); shift for a range`}
                         aria-label={`${on() ? 'deselect' : 'select'} ${key}`} onClick={(e) => pick(key, e.shiftKey)}>
-                        <span class="lab">{st.group === 'run' ? s.metric : s.run}</span><span class="k">{s.kind === 'array' ? 'array' : String(s.n)}</span>
+                        <span class="lab">{st.group === 'run' || g.layers ? (g.layers ? `${s.run}:${s.metric}` : s.metric) : s.run}</span><span class="k">{s.kind === 'array' ? 'array' : String(s.n)}</span>
                       </button>
                       <button type="button" class="add" title={`add ${key} to...`} aria-label={`add ${key} to a panel`} onClick={(e) => addMenu(e.currentTarget, Bd.selectorFor([{ run: s.run, metric: s.metric }]), key)}>+</button>
                     </div>

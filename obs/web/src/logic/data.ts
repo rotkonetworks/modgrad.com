@@ -4,6 +4,8 @@ import { A } from '@/lib/wasm';
 import type { FitForecast, Forecast, QueryMeta, QueryResult, Run, Trace } from '@/logic/types';
 
 export const STATS = ['mean', 'min', 'max', 'rms'];
+/** pseudo-metric in the query catalog for runs with text samples: `samples:text{run=...}` is a samples panel */
+export const SAMPLES_METRIC = 'samples:text';
 const clean = (s: unknown) => String(s).replace(/[\t\n\r]/g, ' ');
 
 /** the catalog the query engine matches against (see query.rs Catalog) */
@@ -15,6 +17,7 @@ export function catalogText(runs: Run[]): string {
     for (const [k, v] of Object.entries(r.config || {})) if (v !== null && typeof v !== 'object') out.push(`C\t${clean(k)}\t${clean(v)}`);
     for (const m of Object.keys(r.metrics || {})) out.push('M\t' + clean(m));
     for (const [k, a] of Object.entries(r.arrays || {})) if ((a.n_steps || 0) >= 2) for (const s of STATS) out.push(`M\t${clean(k)}.${s}`);
+    if (r.n_samples) out.push('M\t' + SAMPLES_METRIC);
   }
   return out.join('\n');
 }
@@ -27,6 +30,17 @@ export function streamList(runs: Run[]): Stream[] {
     for (const [k, a] of Object.entries(r.arrays || {})) if ((a.n_steps || 0) >= 2) out.push({ run: r.id, metric: k + '.mean', kind: 'array', n: a.n_steps, shape: a.shape });
   }
   return out;
+}
+/** metrics that differ only by a layer index (layers/<i>/<stat>; layers.rs in wasm) */
+export interface LayerFamily { family: string; layers: number[]; metrics: string[] }
+export function layerFamilies(names: string[], minLayers = 2): LayerFamily[] {
+  if (!names.length) return [];
+  try { return JSON.parse(A.layer_families(names.join('\n'), minLayers)) as LayerFamily[]; } catch { return []; }
+}
+/** the heatmap query for a family (rownorm for gradient-like stats, where the question is which layer spiked) */
+export function heatmapQuery(family: string, filter = ''): string {
+  const grads = /grad|update/i.test(family);
+  return `${family}${filter} | heatmap over layer${grads ? ' rownorm' : ''} | log`;
 }
 export function metricCounts(runs: Run[]): Map<string, number> {
   const m = new Map<string, number>();
@@ -75,7 +89,8 @@ export async function evalQuery(q: string, catalog: string, load: Loader, maxPoi
     const s = (k: number) => data.subarray(t.off + k * t.n, t.off + (k + 1) * t.n);
     return { ...t, xs: s(0), ys: s(1), raw: s(2), lo: s(3), hi: s(4), steps: s(5) };
   });
-  return { ok: true, meta, traces, streams: plan.length };
+  const heatmaps = (meta.heatmaps || []).map((h) => ({ ...h, cols: data.subarray(h.off, h.off + h.ncols), z: data.subarray(h.off + h.ncols, h.off + h.ncols + h.ncols * h.layers.length) }));
+  return { ok: true, meta, traces, heatmaps, streams: plan.length };
 }
 
 // ------------------------------------------------------------ forecasts

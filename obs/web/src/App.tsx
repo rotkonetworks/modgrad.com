@@ -25,6 +25,9 @@ import FocusView from '@/views/FocusView';
 import CrossView from '@/views/CrossView';
 import ArraysView from '@/views/ArraysView';
 import RunsView from '@/views/RunsView';
+import SamplesView from '@/views/SamplesView';
+import EvalsView from '@/views/EvalsView';
+import { anomaliesOpen, setAnomaliesOpen } from '@/components/Anomalies';
 
 /** palette actions: the same operations as the chips, menus and inspector */
 function runAction(a: Action): void {
@@ -49,6 +52,7 @@ function runAction(a: Action): void {
     case 'export': exportBoard(); break;
     case 'import': openImport(); break;
     case 'view': setHash({ view: a.name === 'board' ? null : a.name, panel: null }); break;
+    case 'anomalies': setAnomaliesOpen(!anomaliesOpen()); if (anomaliesOpen()) setHash({ view: null, panel: null }); break;
   }
 }
 
@@ -102,6 +106,8 @@ export default function App() {
         <Show when={ready()} fallback={<div class="note">loading…</div>}>
           <Switch>
             <Match when={currentTab() === 'board'}><BoardView /></Match>
+            <Match when={currentTab() === 'samples'}><SamplesView /></Match>
+            <Match when={currentTab() === 'evals'}><EvalsView /></Match>
             <Match when={currentTab() === 'cross'}><CrossView /></Match>
             <Match when={currentTab() === 'arrays'}><ArraysView /></Match>
             <Match when={currentTab() === 'runs'}><RunsView /></Match>

@@ -57,6 +57,19 @@ Write
       ?events=unparsed also stores the lines without metrics as events.
       Response: {"run", "dashboard", "lines", "rows", "unparsed", "unparsed_sample"}
 
+  POST /api/v1/runs/<id>/samples
+      Text samples (generations) for SFT/RL/eval. Creates the run like .../log.
+      Body: one sample, an array (or NDJSON), or {"samples": [...]}:
+        {"step": 1200, "key": "eval/gsm8k", "prompt": "...", "completion": "...",
+         "reward": 0.73, "score": 1.0, "meta": {"temperature": 0.7}}
+      completion  required (aliases: response, output, generation, text)
+      prompt      optional (aliases: input, query); key optional (default "default")
+      step        optional; missing = the run's last history step
+      reward, score  optional numbers; other unknown keys are kept under "meta".
+      Log the same prompts at every eval step: the dashboard diffs completions
+      of one (key, prompt) across steps.
+      Response: {"run", "created", "dashboard", "samples": N}
+
   POST /api/v1/runs/<id>/finish
       Optional body: an object merged into the run summary, e.g. {"exit_code": 0}.
 
@@ -74,6 +87,12 @@ Read
   GET /api/v1/runs/<id>/history?keys=a,b&from=&to=&stride=
                                                   {"steps", "t", "columns": {key: [...]}}
   GET /api/v1/runs/<id>/config | /summary | /events
+  GET /api/v1/runs/<id>/samples?from=&to=&key=&limit=
+                                                  {"samples": [...newest limit (default 5000)...],
+                                                   "steps": [all steps], "keys": [all keys], "n": total}
+      Samples are read from samples.jsonl directly (outside the snapshot the
+      metric reads use), so they may be slightly newer than other reads; a torn
+      last line is never returned. They are not sent over the SSE stream.
   GET /api/runs/<id %2F-encoded>/metrics/<key>?max_points=N   {"step": [...], "value": [...]}
   GET /api/v1/boards/<name>                       a saved board ({"panels": [{"query"}]}); opens as <server>/#board=<name>
 
@@ -88,6 +107,15 @@ Live (Server-Sent Events)
     events   {"events": [{"step", "t", "text"}]}
     summary  {"finished", "summary"}
     resync   {}                                  you fell behind: refetch
+
+Naming conventions the dashboard understands
+--------------------------------------------
+  layers/<i>/<stat>        per-layer metrics (layers/0/grad_norm, layers/23/act_rms):
+                           shown as a layer x step heatmap. Nested rows work:
+                           {"layers": {"0": {"grad_norm": 1.2}}} -> layers/0/grad_norm
+  eval/<benchmark>/<metric>  evals at checkpoints (eval/gsm8k/acc): the Evals table
+  loss, grad_norm, lr, tokens_seen, reward, kl, entropy, response_length:
+                           the default board
 
 Errors
 ------

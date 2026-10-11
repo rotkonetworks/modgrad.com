@@ -27,8 +27,8 @@ export const closePop = (): void => { setPop(null); };
 const [paletteOpen, setPaletteOpen] = createSignal(false);
 export { paletteOpen, setPaletteOpen };
 
-export type Tab = 'board' | 'cross' | 'arrays' | 'runs';
-export const TABS: [Tab, string][] = [['board', 'Board'], ['cross', 'Across runs'], ['arrays', 'Arrays / 3D'], ['runs', 'Runs']];
+export type Tab = 'board' | 'samples' | 'evals' | 'cross' | 'arrays' | 'runs';
+export const TABS: [Tab, string][] = [['board', 'Board'], ['samples', 'Samples'], ['evals', 'Evals'], ['cross', 'Across runs'], ['arrays', 'Arrays / 3D'], ['runs', 'Runs']];
 
 // the series/runs rail: open on wide screens, collapsed on phones; the viewer's choice is remembered
 const railSaved = lsGet('obs-rail');

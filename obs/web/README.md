@@ -37,7 +37,7 @@ obs-server opens at `/`), the JS/CSS bundle, the drop worker and both wasm modul
 ## Addresses (URL hash)
 
 `#run=<id>`, `#project=<p>`, `#new` (anonymous project), `#board=<name>` (a board file from
-the MCP `make_board` tool: shown unsaved, with "save as my board"), `#view=cross|arrays|runs`,
+the MCP `make_board` tool: shown unsaved, with "save as my board"), `#view=samples|evals|cross|arrays|runs`,
 `#panel=<id>` (focus view; the old `#panel-<id>` still works).
 
 ## Layout
@@ -60,3 +60,10 @@ diverging scales, and one `--accent` used only for live, selection, alerts and E
 Storage (all behind try/catch): `obs-builder-board-v2` (per data target:
 `…:run=<id>`, `…:project=<p>`), `obs-builder-settings-v1`, `obs-theme`, `obs-rail`,
 IndexedDB `modgrad-obs-local` for dropped runs.
+
+## LLM views
+
+Per-layer heatmaps (`layers/<i>/<stat>` | `heatmap over layer`), the Samples tab and
+`samples:text{...}` panels, the Evals tab (`eval/<benchmark>/<metric>`), and the anomaly list
+on the board. Conventions, record shapes and endpoints: `docs/design/obs-llm-views.md`.
+Synthetic runs for trying them: `cargo run -p modgrad-obs --example llm_synthetic -- <dir>`.

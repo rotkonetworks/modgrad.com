@@ -13,8 +13,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 use libm::{cos, floor, log10, pow, round, sin, sqrt};
 
+pub mod curve;
 pub mod expr;
 pub mod forecast;
+pub mod query;
 
 #[cfg(feature = "wasm")]
 pub mod wasm;

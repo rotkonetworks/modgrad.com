@@ -367,3 +367,129 @@ pub fn eval_expr(expr: &str, names: &str, off: &[u32], steps: &[f64], vals: &[f6
         Err(e) => ExprOut { steps: Vec::new(), values: Vec::new(), refs: String::new(), error: Some(e) },
     }
 }
+
+// ------------------------------------------------------------------ panel queries
+
+/// Parse a panel query: `ok()`, `error()`/`err_start()`/`err_end()` on
+/// failure; `canonical()` text and `chips()` JSON
+/// (`[{kind, text, entry, letter}]`) on success.
+#[wasm_bindgen]
+pub struct QueryParse {
+    canonical: String,
+    chips: String,
+    error: Option<crate::query::QueryError>,
+}
+
+#[wasm_bindgen]
+impl QueryParse {
+    pub fn ok(&self) -> bool {
+        self.error.is_none()
+    }
+    pub fn canonical(&self) -> String {
+        self.canonical.clone()
+    }
+    pub fn chips(&self) -> String {
+        self.chips.clone()
+    }
+    pub fn error(&self) -> String {
+        self.error.as_ref().map(|e| e.msg.clone()).unwrap_or_default()
+    }
+    pub fn err_start(&self) -> usize {
+        self.error.as_ref().map_or(0, |e| e.start)
+    }
+    pub fn err_end(&self) -> usize {
+        self.error.as_ref().map_or(0, |e| e.end)
+    }
+}
+
+fn qp(r: Result<crate::query::Query, crate::query::QueryError>) -> QueryParse {
+    match r {
+        Ok(q) => QueryParse { canonical: crate::query::canonical(&q), chips: crate::query::chips_json(&q), error: None },
+        Err(e) => QueryParse { canonical: String::new(), chips: "[]".into(), error: Some(e) },
+    }
+}
+
+#[wasm_bindgen]
+pub fn query_parse(src: &str) -> QueryParse {
+    qp(crate::query::parse(src))
+}
+
+/// Replace chip `idx` with `text` (empty removes it); the result parses as
+/// the new query (its `canonical()`), or carries the error.
+#[wasm_bindgen]
+pub fn query_replace_chip(src: &str, idx: usize, text: &str) -> QueryParse {
+    match crate::query::replace_chip(src, idx, text) {
+        Ok(s) => qp(crate::query::parse(&s)),
+        Err(e) => QueryParse { canonical: String::new(), chips: "[]".into(), error: Some(e) },
+    }
+}
+
+/// Streams a query needs, as `run\tmetric` lines in the order `query_eval`
+/// expects their data. Empty when the query does not parse.
+#[wasm_bindgen]
+pub fn query_plan(src: &str, catalog: &str) -> String {
+    let Ok(q) = crate::query::parse(src) else { return String::new() };
+    let cat = crate::query::Catalog::parse(catalog);
+    let p = crate::query::plan(&q, &cat);
+    p.streams.iter().map(|s| format!("{}\t{}", cat.runs[s.run].id, s.metric)).collect::<Vec<_>>().join("\n")
+}
+
+#[wasm_bindgen]
+pub struct QueryOut {
+    meta: String,
+    data: Vec<f64>,
+}
+
+#[wasm_bindgen]
+impl QueryOut {
+    /// JSON: `{traces: [{letter, label, metric, runs, band, cell, color, off, n}], cells, warnings, by, by_numeric, ylog, forecast, x_label, downsampled}`.
+    pub fn meta(&self) -> String {
+        self.meta.clone()
+    }
+    /// Trace `i`: `data[off .. off + 6n]` = xs, ys, raw, lo, hi, steps.
+    pub fn data(&self) -> Vec<f64> {
+        self.data.clone()
+    }
+}
+
+/// Evaluate a query; stream `i` of `query_plan` is `steps/vals[off[i]..off[i+1]]`.
+#[wasm_bindgen]
+pub fn query_eval(src: &str, catalog: &str, off: &[u32], steps: &[f64], vals: &[f64], max_points: usize) -> QueryOut {
+    let Ok(q) = crate::query::parse(src) else { return QueryOut { meta: "{\"traces\":[],\"cells\":[],\"warnings\":[\"query does not parse\"]}".into(), data: Vec::new() } };
+    let cat = crate::query::Catalog::parse(catalog);
+    let p = crate::query::plan(&q, &cat);
+    let data: Vec<(&[f64], &[f64])> = off
+        .windows(2)
+        .map(|w| (w[0] as usize, w[1] as usize))
+        .map(|(a, b)| if a <= b && b <= steps.len() && b <= vals.len() { (&steps[a..b], &vals[a..b]) } else { (&steps[..0], &vals[..0]) })
+        .collect();
+    let o = crate::query::eval(&q, &cat, &p, &data, max_points);
+    let (meta, data) = crate::query::output_json(&o, &cat);
+    QueryOut { meta, data }
+}
+
+// ------------------------------------------------------------------ curve helpers
+
+/// Power-law forecast; flat result `[skill, mae_test, mae_naive, n_test, a, b, c, n, steps…, mean…, lo…, hi…]`,
+/// empty when there are too few points or the horizon is not past the data.
+#[wasm_bindgen]
+pub fn powerlaw_forecast(xs: &[f64], ys: &[f64], horizon: f64, n_out: usize) -> Vec<f64> {
+    let Some(f) = crate::curve::powerlaw_forecast(xs, ys, horizon, n_out) else { return Vec::new() };
+    let mut v = vec![f.skill as u8 as f64, f.mae_test, f.mae_test_naive, f.n_test as f64, f.params[0], f.params[1], f.params[2], f.steps.len() as f64];
+    v.extend(f.steps);
+    v.extend(f.mean);
+    v.extend(f.lo);
+    v.extend(f.hi);
+    v
+}
+
+/// `[mean, early, late]` x at which a forecast reaches `target` (`NaN` = not reached).
+#[wasm_bindgen]
+pub fn forecast_eta(xs: &[f64], mean: &[f64], lo: &[f64], hi: &[f64], target: f64) -> Vec<f64> {
+    crate::curve::eta(xs, mean, lo, hi, target).to_vec()
+}
+
+#[wasm_bindgen]
+pub fn spikes(vals: &[f64], window: usize, k: f64) -> Vec<u32> {
+    crate::curve::spikes(vals, window, k)
+}

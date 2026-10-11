@@ -197,5 +197,7 @@ export function defaultHorizon(traces: { xs: Arr; runs: string[] }[], byId: Map<
     for (let i = 0; i < t.xs.length; i++) { const x = t.xs[i]; if (Number.isFinite(x)) { lo = Math.min(lo, x); hi = Math.max(hi, x); } }
     for (const r of t.runs) { const run = byId.get(r); if (run) for (const k of ['steps', 'total_steps', 'max_steps', 'train_steps', 'num_steps']) { const v = run.config[k]; if (typeof v === 'number' && v > hi) planned = Math.max(planned, v); } }
   }
-  return planned || hi + 0.5 * (hi - lo);
+  // a planned length only counts when it is still ahead: a finished run logs its last row at
+  // total_steps - 1, and a 1-step horizon draws nothing
+  return planned - hi >= 0.05 * (hi - lo) ? planned : hi + 0.5 * (hi - lo);
 }

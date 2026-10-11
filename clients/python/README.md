@@ -24,14 +24,53 @@ pip install "git+<repo-url>#subdirectory=clients/python"
 The package is not on PyPI yet. The name `modgrad` may already be taken there, so check
 before publishing.
 
-## What happens by default
+## Local mode: no server
 
-- **Server.** The client uses `init(url=...)`, else `MODGRAD_URL`, else the server in
-  `.modgrad.json` (written by `modgrad init`, looked up in the current directory and its
-  parents), else `modgrad.DEFAULT_URL` (`http://127.0.0.1:8790`, the same default as the
-  `modgrad` CLI). The token and project in `.modgrad.json` are used the same way, below
-  arguments and environment variables, and the token only goes to the server the file
-  names. Run a local server with `modgrad-server --dev`.
+After `modgrad init` without `--server`, `.modgrad.json` is `{"data": "obs"}` and the client
+writes each run straight to disk; nothing else needs to run:
+
+```console
+$ python train.py
+modgrad: run exp1 -> obs/runs/exp1 (view: modgrad-server --root obs)
+$ modgrad tail exp1
+```
+
+- **Where.** A run goes to `<data>/runs/<project>/<name>/`, or `<data>/runs/<name>/` without
+  a project. `<data>` is `init(data=...)`, else `MODGRAD_DATA`, else the project file's
+  `data` (relative to the file's directory), else `./obs`. A `/` in a name nests, as in
+  `name="sweep/lr3e-4_s1"`. A name that is already taken gets a `-<4 hex>` suffix, so two
+  scripts never write into one run. Without a name the run is `run-<date>-<time>-<4 hex>`.
+  `id=` names the run exactly, and appends to it if it exists.
+- **Format.** The directory is exactly what the Rust writer (`modgrad_obs::Run`, also used
+  by `modgrad run --offline`) produces: `config.json`, `metrics.jsonl` (one line per `log`
+  call with scalars), `arrays.jsonl` (histograms and tensors, f32 little-endian base64),
+  `events.jsonl` (text, tables, alerts) and `summary.json`. `modgrad tail`, `modgrad
+  export`, `modgrad mcp --dir` and `modgrad-server --root` read it unchanged.
+- **Crash safety.** Each `log()` is appended with one `write()` to files opened for append,
+  before `log()` returns. A killed process keeps everything it logged, except possibly a
+  torn final line, which readers skip and the next open cuts. There is no fsync, so a power
+  loss can still lose what the OS had not written yet. `config.json` and `summary.json`
+  are replaced atomically. `summary.json` gets `finished: true` and `exit_code` at
+  `finish()`, so a run without them was killed or is still running.
+- **Resume.** `init(id="exp1", resume=True)` (or `name=` with `resume=`) continues after
+  the run's last logged step, counting steps that hold only arrays, as the server does.
+  `t` continues from the run's original start. `resume="must"` raises if the run does not
+  exist.
+- **Offline mode.** `init(mode="offline")`, `MODGRAD_MODE=offline` or `WANDB_MODE=offline`
+  write locally the same way, whatever the project file says.
+- `run.dir` is the run directory, `run.local` is True, `run.url` is None and `flush()`
+  returns at once. There is no spool and no background thread.
+
+## What happens with a server
+
+- **Server or local.** Arguments beat environment variables, which beat `.modgrad.json`
+  (written by `modgrad init`, looked up in the current directory and its parents). At each
+  level, a server (`init(url=...)`, `MODGRAD_URL`, the file's `server`) means online and a
+  data directory (`init(data=...)`, `MODGRAD_DATA`, a file without `server`) means local
+  mode. With nothing set the client uses `modgrad.DEFAULT_URL` (`http://127.0.0.1:8790`,
+  the same default as the `modgrad` CLI). The token and project in `.modgrad.json` are used
+  the same way, and the token only goes to the server the file names. Run a local server
+  with `modgrad-server --dev`.
 - **No token and no project.** On first use the client creates an anonymous project
   (`POST /api/v1/projects`) and prints its board link. It caches the token in
   `~/.config/modgrad/anon.json`, so later runs on the same machine go to the same project.
@@ -61,10 +100,11 @@ before publishing.
 - **Forked processes.** In processes forked after `init`, such as DataLoader workers,
   `log()` does nothing.
 
-### Offline mode and sending later
+### Sending a spool later
+
+When the server stayed unreachable, `finish()` keeps the spool and prints how to send it:
 
 ```sh
-MODGRAD_MODE=offline python train.py      # or init(mode="offline"), or WANDB_MODE=offline
 python -m modgrad sync                    # send every spool under the spool root
 python -m modgrad sync <dir>              # send one run (rows, events, config, summary, finish)
 modgrad push <dir>                            # the Rust CLI: sends rows and events only
@@ -95,7 +135,8 @@ Where a row lists several variables, the first one that is set wins.
 | `MODGRAD_URL`, `MODGRAD_URL` | server URL |
 | `MODGRAD_TOKEN`, `MODGRAD_TOKEN` | bearer token (`obsp_…` for a project, `obsr_…` for a run) |
 | `MODGRAD_PROJECT`, `WANDB_PROJECT`, `MODGRAD_PROJECT` | project (used when `init(project=)` is not given) |
-| `MODGRAD_MODE`, `WANDB_MODE` | `online` (default), `offline` or `disabled`; W&B's `dryrun` means offline and `run` means online |
+| `MODGRAD_MODE`, `WANDB_MODE` | `online` (default), `offline` (write locally) or `disabled`; W&B's `dryrun` means offline and `run` means online |
+| `MODGRAD_DATA` | obs directory for local runs; local mode unless `MODGRAD_URL` is set (beats the project file) |
 | `WANDB_DISABLED=true` | same as `disabled` |
 | `MODGRAD_NAME`, `WANDB_NAME` | run name |
 | `MODGRAD_RUN_ID`, `WANDB_RUN_ID` | run id |
@@ -115,7 +156,8 @@ Where a row lists several variables, the first one that is set wins.
   returns a `Run`. With an existing run, `reinit=None/False` returns that run,
   `reinit=True` or `"finish_previous"` finishes it first, and `"create_new"` starts a run
   alongside it.
-  - `init` also accepts `url=` and `token=`, which are modgrad additions.
+  - `init` also accepts `url=`, `token=` and `data=` (an obs directory: write locally),
+    which are modgrad additions.
   - Other W&B arguments are accepted and ignored.
   - Run ids use only the characters `[A-Za-z0-9_.-]`. A `name` becomes `<name>-<4 hex>`,
     because W&B names are not unique. Pass `id=` for a stable id, and add `resume=` to
@@ -250,6 +292,8 @@ cd clients/python && python -m venv .venv && .venv/bin/pip install -e '.[test]'
 .venv/bin/python -m pytest -q
 ```
 
-The fixture starts the built `modgrad-server --dev` on a free port. Tests that need `torch`,
+The fixture starts the built `modgrad-server --dev` on a free port (a debug build is enough;
+release is preferred when both exist). Set `PYTEST_OBS_PORTS=18940-18949` to keep test servers
+inside a port range. The local-mode tests read their runs back with the built `modgrad`. Tests that need `torch`,
 `transformers` or `lightning` are skipped when those packages are missing. You can point
 the tests at other binaries with `OBS_SERVER_BIN` and `OBS_BIN`.

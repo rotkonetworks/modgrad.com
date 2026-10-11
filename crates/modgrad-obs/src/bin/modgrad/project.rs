@@ -277,7 +277,7 @@ pub fn next_steps(p: &Project) -> Value {
             let d = p.data.as_deref().unwrap_or("obs");
             json!({
                 "run": "modgrad run --name exp1 -- python train.py",
-                "python": "print(f\"step {step} loss={loss:.4f}\", flush=True)   # one line per logging step, then wrap with modgrad run\n# (import modgrad as wandb needs a server: modgrad init --server URL)",
+                "python": format!("import modgrad as wandb   # no server: writes {d}/runs/exp1\nwandb.init(name=\"exp1\", config={{\"lr\": 3e-4}})\nwandb.log({{\"loss\": 0.52}})"),
                 "view": format!("modgrad-server --root {d}"),
                 "dashboard": format!("{DEFAULT_SERVER}/"),
             })
@@ -374,6 +374,9 @@ mod tests {
         let o = InitOpts { exe: "modgrad".into(), ..Default::default() };
         let r = init(&d, &o).unwrap();
         assert_eq!((r.file, r.gitignore, r.p.data.as_deref()), ("created", "created", Some("obs")));
+        // the Python client writes local runs itself: the snippet is the plain W&B one
+        let py = next_steps(&r.p)["python"].as_str().unwrap().to_string();
+        assert!(py.starts_with("import modgrad as wandb") && py.contains("obs/runs/exp1"), "{py}");
         let gi = std::fs::read_to_string(d.join(".gitignore")).unwrap();
         assert!(gi.contains("/.modgrad.json\n") && gi.contains("/obs/\n"), "{gi}");
         let r = init(&d, &o).unwrap();

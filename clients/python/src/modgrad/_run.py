@@ -12,9 +12,10 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
 from . import _auth, _net, _project
+from ._local import LocalRun, last_logged_step
 from ._sender import Sender, say
 from ._spool import Spool, SpoolBusy, default_root, dir_for
 from ._types import convert, warn_once
@@ -310,7 +311,7 @@ class Run:
     def __init__(self, *, id: str, name: str, project: Optional[str], config: Dict[str, Any], mode: str, server: str, token: Optional[str],
                  anon: bool, root: Path, meta: Dict[str, Any], start_step: int = 0, tags: Sequence[str] = (), notes: Optional[str] = None,
                  group: Optional[str] = None, job_type: Optional[str] = None, interval: float = 1.0, batch_rows: int = 500,
-                 finish_timeout: Optional[float] = None, retry_max: Optional[float] = None):
+                 finish_timeout: Optional[float] = None, retry_max: Optional[float] = None, local: Optional[LocalRun] = None):
         self.id = id
         self.name = name
         self.project = project
@@ -333,8 +334,12 @@ class Run:
         self._spool: Optional[Spool] = None
         self._sender: Optional[Sender] = None
         self._dashboard: Optional[str] = None
+        # local mode: a native run directory (no server, no spool)
+        self._local = local
         self.dir = None
-        if mode != "disabled":
+        if local is not None:
+            self.dir = str(local.dir)
+        elif mode != "disabled":
             sdir = dir_for(root, id, project)
             self._spool = _open_spool(sdir, {"server": server, "token": token, "name": id, "project": project, "meta": meta,
                                        "config": _jsonable(config), "display_name": name, "mode": mode})
@@ -364,6 +369,8 @@ class Run:
 
     @property
     def path(self) -> str:
+        if self._local is not None:
+            return self._local.name
         if self._spool is not None and self._spool.meta.get("run"):
             return self._spool.meta["run"]
         return f"{self.project}/{self.id}" if self.project else self.id
@@ -374,7 +381,13 @@ class Run:
 
     @property
     def offline(self) -> bool:
-        return self.mode == "offline"
+        """True when nothing goes to a server (offline mode or local mode)."""
+        return self.mode == "offline" or self._local is not None
+
+    @property
+    def local(self) -> bool:
+        """True when the run is written as a native run directory (`run.dir`)."""
+        return self._local is not None
 
     @property
     def disabled(self) -> bool:
@@ -392,6 +405,10 @@ class Run:
         return not self._finished and os.getpid() == self._pid
 
     def _emit(self, kind: str, payload: Any) -> None:
+        if self._local is not None:
+            if self._live():
+                self._local_write(kind, payload)
+            return
         if self._spool is None or not self._live():
             return
         try:
@@ -404,7 +421,26 @@ class Run:
     def _emit_config(self, patch: Dict[str, Any]) -> None:
         self._emit("config", patch)
 
+    def _local_write(self, kind: str, payload: Any) -> None:
+        lr = self._local
+        try:
+            if kind == "row":
+                payload = dict(payload)
+                lr.log(payload.pop("step"), payload.pop("t"), payload)
+            elif kind == "event":
+                lr.event(payload["step"], payload["t"], payload["text"])
+            elif kind == "config":
+                lr.update_config(payload)
+            elif kind == "summary":
+                lr.update_summary(payload)
+        except ValueError as e:  # an invalid array: dropped, like the server's 400
+            warn_once("local-bad:" + str(e)[:80], f"not logged: {e}")
+        except Exception as e:  # noqa: BLE001 - never crash training (disk full, ...)
+            warn_once("local-write", f"cannot write {lr.dir} ({e}); logging continues in memory only")
+
     def _t(self) -> float:
+        if self._local is not None:
+            return round(self._local.elapsed(), 6)
         return round(time.time() - self._t0, 6)
 
     def log(self, data: Dict[str, Any], step: Optional[int] = None, commit: Optional[bool] = None, sync: Optional[bool] = None) -> None:
@@ -450,7 +486,10 @@ class Run:
             self.summary._auto(row)
         for e in events:
             items.append(("event", {"step": at, "t": t, "text": e}))
-        if items and self._spool is not None:
+        if items and self._local is not None:
+            for kind, v in items:
+                self._local_write(kind, v)
+        elif items and self._spool is not None:
             try:
                 self._spool.append(items)
                 if self._sender is not None:
@@ -512,7 +551,10 @@ class Run:
 
     def flush(self, timeout: float = 10.0) -> bool:
         """Block until the server has acknowledged everything logged so far
-        (modgrad extension; useful in tests and before checkpoints)."""
+        (modgrad extension; useful in tests and before checkpoints). In local
+        mode every call is already written, so this returns True at once."""
+        if self._local is not None:
+            return True
         if self._sender is None:
             return self.mode == "disabled"
         return self._sender.flush(timeout)
@@ -527,16 +569,21 @@ class Run:
             if self in _active:
                 _active.remove(self)
         _clear_globals(self)
-        if self._spool is None:
-            return
         code = int(exit_code) if exit_code is not None else _exit_code[0]
         fin = {"exit_code": code}
+        if self._local is not None:
+            try:
+                self._local.finish(fin)
+            except Exception as e:  # noqa: BLE001
+                say(f"cannot write the final summary of {self._local.dir}: {e}")
+            self._local.close()
+            return
+        if self._spool is None:
+            return
         self._spool.meta["finish"] = fin
         self._spool.save_meta()
-        if self._sender is None:  # offline
+        if self._sender is None:  # not reached: a spool is online-only (offline runs are local)
             self._spool.close()
-            if not quiet:
-                say(f"offline run saved to {self._spool.dir}; send it with `python -m modgrad sync {self._spool.dir}`")
             return
         pending = self._spool.pending()
         ok = self._sender.close(fin, self._finish_timeout)
@@ -622,13 +669,87 @@ def _resume_step(server: str, run_full: str, token: Optional[str]) -> int:
     return 0
 
 
+def local_root(url: Optional[str], data: Optional[str], pf: Dict[str, Any], mode: str) -> Optional[Path]:
+    """The obs directory to write a native run into, or None to use a server.
+
+    Argument > environment > project file, the first that names either a
+    server or a data directory decides: `url=` / `data=`, then `MODGRAD_URL`
+    / `MODGRAD_DATA`, then `.modgrad.json` (`server`, or local mode `data`).
+    Nothing named means the default server. Offline mode always writes
+    locally, into the data directory resolved the same way (default ./obs)."""
+    env_data = _env("MODGRAD_DATA", "OBS_DIR")
+    file_data = Path(pf["_dir"]) / (pf.get("data") or "obs") if pf.get("_dir") else None
+    root = Path(data) if data else Path(env_data) if env_data else file_data or Path("obs")
+    if mode == "offline":
+        local = True
+    elif url or data:
+        local = bool(data) and not url
+    elif _env("MODGRAD_URL", "OBS_URL") or env_data:
+        local = not _env("MODGRAD_URL", "OBS_URL")
+    else:
+        local = bool(pf) and not pf.get("server")
+    return root.expanduser().absolute() if local else None
+
+
+def _local_name(s: str) -> str:
+    """A local run name: 1 to 3 `/`-separated parts of [A-Za-z0-9_.-]."""
+    parts = [sanitize_id(p) for p in str(s).split("/") if p.strip("/")]
+    return "/".join(parts[:3]) if parts else "run"
+
+
+def _shown(p: Path) -> str:
+    """`p` relative to the current directory when it is below it."""
+    try:
+        return str(p.resolve().relative_to(Path.cwd().resolve()))
+    except (ValueError, OSError):
+        return str(p)
+
+
+def _open_local(root: Path, project: Optional[str], id: Optional[str], name: Optional[str], resume: Any, cfg: Dict[str, Any],
+                meta: Dict[str, Any]) -> Tuple[LocalRun, str, int]:
+    """Create or reopen `<root>/runs/<project>/<id or name>`. Returns the run,
+    its full name (path under runs/) and the step to continue from.
+
+    - `id=` names the run: an existing directory is appended to, and with
+      `resume` its steps continue after the last logged step.
+    - `name=` without `id=`: with `resume` an existing run of that name is
+      continued; otherwise a taken name gets a `-<4 hex>` suffix, so two
+      scripts never write into one run.
+    - neither: a fresh `run-<date>-<time>-<4 hex>`."""
+    base = _local_name(id or name) if (id or name) else auto_id()
+    full = f"{project}/{base}" if project and "/" not in base else base
+    if full.count("/") > 2:
+        full = sanitize_id(full)
+    runs = root / "runs"
+    resume_on = bool(resume) and str(resume).lower() not in ("never", "false", "0")
+    d = runs / full
+    exists = (d / "config.json").is_file()
+    if str(resume).lower() == "must" and not exists:
+        raise Error(f"resume='must' but there is no run {full} in {runs}")
+    if exists and (id or resume_on):
+        run = LocalRun.open_existing(d)
+        if cfg:
+            run.update_config(cfg)
+        last = last_logged_step(d) if resume_on else None
+        return run, full, (last + 1 if last is not None else 0)
+    if d.exists():  # a taken name (or a directory of other runs)
+        while True:
+            alt = f"{full}-{random.getrandbits(16):04x}"
+            if not (runs / alt).exists():
+                full, d = alt, runs / alt
+                break
+    return LocalRun.create(d, full, cfg, meta), full, 0
+
+
 def init(project: Optional[str] = None, entity: Optional[str] = None, config: Any = None, name: Optional[str] = None, id: Optional[str] = None,
          resume: Union[bool, str, None] = None, dir: Optional[str] = None, mode: Optional[str] = None, tags: Optional[Sequence[str]] = None,
          notes: Optional[str] = None, group: Optional[str] = None, job_type: Optional[str] = None, reinit: Union[bool, str, None] = None,
          config_exclude_keys: Optional[Sequence[str]] = None, config_include_keys: Optional[Sequence[str]] = None, *,
-         url: Optional[str] = None, token: Optional[str] = None, settings: Any = None, **ignored: Any) -> Run:
-    """Start a run (W&B `wandb.init`). Extra modgrad arguments: `url`, `token`.
-    Unknown W&B arguments are accepted and ignored."""
+         url: Optional[str] = None, token: Optional[str] = None, data: Optional[str] = None, settings: Any = None, **ignored: Any) -> Run:
+    """Start a run (W&B `wandb.init`). Extra modgrad arguments: `url`, `token`,
+    and `data` (write a native run directory under this obs directory
+    instead of sending to a server). Unknown W&B arguments are accepted and
+    ignored."""
     import modgrad
 
     with _lock:
@@ -646,7 +767,9 @@ def init(project: Optional[str] = None, entity: Optional[str] = None, config: An
             raise Error(f"mode must be online, offline or disabled, got {mode!r}")
 
         # argument > environment > project file (.modgrad.json) > default
+        project_arg = project or _env("MODGRAD_PROJECT", "WANDB_PROJECT", "OBS_PROJECT")
         pf = _project.find()
+        lroot = local_root(url, data, pf, mode) if mode != "disabled" else None
         env_url = _env("MODGRAD_URL", "OBS_URL")
         server = (url or env_url or pf.get("server") or DEFAULT_URL).rstrip("/")
         file_token = _project.token_for(pf, server)
@@ -680,6 +803,11 @@ def init(project: Optional[str] = None, entity: Optional[str] = None, config: An
             if v:
                 meta[k] = v
 
+        if lroot is not None:
+            # the project file's project belongs to its server, not to local runs
+            lproject = sanitize_id(project_arg) if project_arg else None
+            return _init_local(lroot, lproject, name, id, resume, cfg, meta, mode, tags, notes, group, job_type)
+
         start_step = 0
         if resume and id and mode == "online":
             run_full = f"{project}/{run_id}" if project else run_id
@@ -698,9 +826,29 @@ def init(project: Optional[str] = None, entity: Optional[str] = None, config: An
             run._emit_config(_jsonable(cfg))
         _active.append(run)
         _set_globals(run)
-        if mode == "offline":
-            say(f"offline mode: run {run_id} spools to {run.dir}")
         return run
+
+
+def _init_local(root: Path, project: Optional[str], name: Optional[str], id: Optional[str], resume: Any, cfg: Dict[str, Any],
+                client_meta: Dict[str, Any], mode: str, tags: Sequence[str], notes: Optional[str], group: Optional[str], job_type: Optional[str]) -> Run:
+    """`init` in local mode (the caller holds `_lock`)."""
+    # config.json's meta as the server writes it: git and hostname as
+    # fields, everything else the client knows under `extra`
+    extra = {k: v for k, v in client_meta.items() if k not in ("git", "hostname", "project_name", "display_name")}
+    if name:
+        extra["display_name"] = name
+    meta: Dict[str, Any] = {"git": client_meta.get("git"), "hostname": client_meta.get("hostname"), "start_unix": time.time(), "extra": _jsonable(extra)}
+    if project:
+        meta["project"] = project
+    lrun, full, start_step = _open_local(root, project, id, name, resume, _jsonable(cfg), meta)
+    run_id = full[len(project) + 1:] if project and full.startswith(project + "/") else full
+    run = Run(id=run_id, name=name or run_id, project=project, config=cfg, mode=mode, server="", token=None, anon=False, root=root,
+              meta=client_meta, start_step=start_step, tags=tags, notes=notes, group=group, job_type=job_type, local=lrun)
+    _active.append(run)
+    _set_globals(run)
+    at = f" (resumed at step {start_step})" if start_step else ""
+    say(f"run {full} -> {_shown(lrun.dir)}{at} (view: modgrad-server --root {_shown(root)})")
+    return run
 
 
 def _register_fork_guard() -> None:

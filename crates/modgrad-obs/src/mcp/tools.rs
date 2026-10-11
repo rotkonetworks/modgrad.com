@@ -4,7 +4,7 @@
 
 use super::analysis::{self, Dir};
 use super::store::{Rows, Store, valid_run_name};
-use super::text::{Resolved, closest, fmt, fmt_age, fmt_signed, glob, norm_key, num, parse_generic_line, resolve_metric, squash, table};
+use super::text::{Resolved, closest, fmt, fmt_age, fmt_signed, glob, norm_key, num, resolve_metric, squash, table};
 use crate::RunData;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -220,7 +220,7 @@ fn parse_metrics(v: &Value) -> (Vec<(String, f64)>, Option<u64>, Vec<String>) {
             if let Ok(j @ (Value::Object(_) | Value::Array(_))) = serde_json::from_str::<Value>(s) {
                 return parse_metrics(&j);
             }
-            match parse_generic_line(s) {
+            match crate::textlog::parse_line(s).map(|r| (r.step, r.values)) {
                 Some((st, pairs)) => {
                     step = st;
                     kv = pairs;

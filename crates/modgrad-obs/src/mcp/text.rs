@@ -216,81 +216,6 @@ pub fn glob(pat: &str, s: &str) -> bool {
     go(&p, &s)
 }
 
-// ------------------------------------------------- generic log lines
-//
-// TODO(merge): this whole section is a stopgap. When the text-log ingest
-// branch lands, replace `parse_generic_line` with `textlog::parse_line`
-// (same input, same `(step?, [(key, value)])` output) and delete the rest.
-
-const STEP_WORDS: &[&str] = &["step", "steps", "global_step", "iter", "iteration", "it", "update", "batch_idx"];
-
-fn is_key_token(t: &str) -> bool {
-    let t = t.trim_end_matches([':', '=']);
-    t.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) && t.chars().all(|c| c.is_ascii_alphanumeric() || "_-./()".contains(c)) && t.len() <= 48
-}
-
-/// Value token: a number with optional `%`, trailing `,;|` stripped, and a
-/// `N/M` progress form read as `N`.
-fn value_token(t: &str) -> Option<f64> {
-    let t = t.trim_end_matches([',', ';', '|', ']', ')', ':']);
-    if let Some((a, b)) = t.split_once('/') {
-        if num_str(b).is_some() {
-            return num_str(a);
-        }
-        return None;
-    }
-    num_str(t)
-}
-
-/// Generic `key value` / `key=value` / `key: value` scanner for one log
-/// line. Returns `(step, metrics)`; `step` comes from a step-like key
-/// (`step`, `iter`, `it`, …; `epoch` when there is no step). Keys are
-/// normalised with [`norm_key`]. `None` when the line holds no metric.
-pub fn parse_generic_line(line: &str) -> Option<(Option<u64>, Vec<(String, f64)>)> {
-    // split `k=v` and `k:v` glued forms, and separators, into tokens
-    let mut toks: Vec<String> = Vec::new();
-    for raw in line.split(|c: char| c.is_whitespace() || c == '|' || c == ';' || c == ',' || c == '[' || c == ']' || c == '{' || c == '}') {
-        let raw = raw.trim_matches(|c: char| c == '"' || c == '\'');
-        if raw.is_empty() {
-            continue;
-        }
-        if let Some((k, v)) = raw.split_once('=').or_else(|| raw.split_once(':').filter(|(k, v)| is_key_token(k) && !v.is_empty())) {
-            toks.push(format!("{k}="));
-            if !v.is_empty() {
-                toks.push(v.to_string());
-            }
-        } else {
-            toks.push(raw.to_string());
-        }
-    }
-    let mut kv: Vec<(String, f64)> = Vec::new();
-    let mut i = 0;
-    while i + 1 < toks.len() {
-        let k = &toks[i];
-        if is_key_token(k) {
-            if let Some(v) = value_token(&toks[i + 1]) {
-                let key = norm_key(k.trim_end_matches(['=', ':']));
-                if !key.is_empty() && !kv.iter().any(|(x, _)| *x == key) {
-                    kv.push((key, v));
-                }
-                i += 2;
-                continue;
-            }
-        }
-        i += 1;
-    }
-    if kv.is_empty() {
-        return None;
-    }
-    let mut step = None;
-    if let Some(pos) = kv.iter().position(|(k, v)| STEP_WORDS.contains(&k.as_str()) && *v >= 0.0 && v.fract() == 0.0) {
-        step = Some(kv.remove(pos).1 as u64);
-    } else if let Some((_, v)) = kv.iter().find(|(k, v)| k == "epoch" && *v >= 0.0 && v.fract() == 0.0) {
-        step = Some(*v as u64);
-    }
-    kv.retain(|(k, _)| k != "t");
-    if kv.is_empty() { None } else { Some((step, kv)) }
-}
 
 #[cfg(test)]
 mod tests {
@@ -345,18 +270,22 @@ mod tests {
 
     #[test]
     fn generic_lines() {
-        let (s, kv) = parse_generic_line("step 100 | loss 2.31 | lr 3e-4 | acc 71.2%").unwrap();
+        // the MCP ingest goes through the shared textlog parser; these are the cases it must cover
+        let gl = |l: &str| crate::textlog::parse_line(l).map(|r| (r.step, r.values));
+        let (s, kv) = gl("step 100 | loss 2.31 | lr 3e-4 | acc 71.2%").unwrap();
         assert_eq!(s, Some(100));
         assert_eq!(kv, vec![("loss".into(), 2.31), ("lr".into(), 3e-4), ("acc".into(), 71.2)]);
-        let (s, kv) = parse_generic_line("2026-10-11 12:00:01 INFO step=5 loss=1.25, val_loss: 1.5").unwrap();
+        let (s, kv) = gl("2026-10-11 12:00:01 INFO step=5 loss=1.25, val_loss: 1.5").unwrap();
         assert_eq!(s, Some(5));
         assert_eq!(kv, vec![("loss".into(), 1.25), ("val_loss".into(), 1.5)]);
-        let (s, kv) = parse_generic_line("Epoch 3: train_loss=0.45 val_loss=0.52").unwrap();
-        assert_eq!(s, Some(3));
+        // textlog only takes the step from step-like words; an epoch is kept as a metric
+        let (s, kv) = gl("Epoch 3: train_loss=0.45 val_loss=0.52").unwrap();
+        assert_eq!(s, None);
+        assert!(kv.iter().any(|(k, v)| k == "epoch" && *v == 3.0), "{kv:?}");
         assert!(kv.contains(&("val_loss".into(), 0.52)));
-        let (s, _) = parse_generic_line("iter 40/1000 loss 0.9").unwrap();
+        let (s, _) = gl("iter 40/1000 loss 0.9").unwrap();
         assert_eq!(s, Some(40));
-        assert!(parse_generic_line("Loading checkpoint from /tmp/x").is_none());
-        assert!(parse_generic_line("").is_none());
+        assert!(gl("Loading checkpoint from /tmp/x").is_none());
+        assert!(gl("").is_none());
     }
 }

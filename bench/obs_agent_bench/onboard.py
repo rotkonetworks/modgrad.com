@@ -166,7 +166,8 @@ def bwrap_argv(T, envdir):
         a += ["--ro-bind", "/run/systemd/resolve", "/run/systemd/resolve"]
     a += ["--ro-bind", os.path.join(envdir, "bin"), BIN_MOUNT]
     if os.path.isdir(DIST):
-        a += ["--ro-bind", DIST, DIST]
+        # modgrad-server looks for <its crate dir>/../../obs/web/dist, so the crate dir must exist too
+        a += ["--ro-bind", DIST, DIST, "--dir", os.path.join(ROOT, "crates", "modgrad-obs-server")]
     a += ["--bind", T, T, "--remount-ro", "/", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
           "--die-with-parent", "--new-session", "--chdir", os.path.join(T, "repo"), "--clearenv"]
     env = {"PATH": f"{BIN_MOUNT}:{T}/home/.local/bin:/usr/local/bin:/usr/bin", "HOME": f"{T}/home", "TMPDIR": f"{T}/tmp",

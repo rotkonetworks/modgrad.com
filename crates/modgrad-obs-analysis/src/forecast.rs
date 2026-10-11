@@ -760,26 +760,28 @@ fn search(steps: &[f64], vals: &[f64], pool: &[(&[f64], &[f64])], opt: &Options,
     let (mut cands, n_configs) = phase1(prune);
     let mut best: [Option<(Config, f64, Vec<f64>)>; 2] = [None, None]; // (cfg, val mae, residuals per pair)
     for fam in 0..2 {
-        let mut pass = 0;
-        while best[fam].is_none() && pass < 2 {
-            if pass == 1 {
-                // every unpruned config failed in full: rescore without pruning (rare)
-                if cands[fam].is_empty() {
+        // With pruning only the best-scoring config may be taken: a config pruned against its
+        // bound can beat the runner-up, so if the best one fails in full, rescore unpruned and walk.
+        let mut exhaustive = !prune;
+        loop {
+            let cs = &mut cands[fam];
+            cs.sort_by(|a, b| a.val.partial_cmp(&b.val).unwrap_or(core::cmp::Ordering::Equal).then(a.order.cmp(&b.order))); // ties: search order, as a strict `<` scan
+            for c in cs.iter() {
+                if let Some(res) = full(c, fam == 1) {
+                    let (lambda, noise) = lam_noise(c.ci);
+                    let cfg = Config { lookback: LOOKBACKS[c.li], lambda, noise, scaler: c.scaler, pooled: fam == 1, position: c.position };
+                    best[fam] = Some((cfg, c.val, res));
                     break;
                 }
-                cands[fam] = phase1(false).0[fam].drain(..).collect();
+                if !exhaustive {
+                    break;
+                }
             }
-            pass += 1;
-        let cs = &mut cands[fam];
-        cs.sort_by(|a, b| a.val.partial_cmp(&b.val).unwrap_or(core::cmp::Ordering::Equal).then(a.order.cmp(&b.order))); // ties: search order, as a strict `<` scan
-        for c in cs.iter() {
-            if let Some(res) = full(c, fam == 1) {
-                let (lambda, noise) = lam_noise(c.ci);
-                let cfg = Config { lookback: LOOKBACKS[c.li], lambda, noise, scaler: c.scaler, pooled: fam == 1, position: c.position };
-                best[fam] = Some((cfg, c.val, res));
+            if best[fam].is_some() || exhaustive || cands[fam].is_empty() {
                 break;
             }
-        }
+            cands[fam] = phase1(false).0[fam].drain(..).collect(); // rare
+            exhaustive = true;
         }
     }
     let test_mae = |res: &[f64]| {

@@ -915,7 +915,7 @@ async function main() {
   try { await init(); } catch (e) { err('could not load ./pkg/modgrad_obs_analysis_bg.wasm (' + e + '). Build it with scripts/build_obs_wasm.sh and serve this folder over HTTP.'); return; }
   // server mode when the API answers, else static files next to the page
   try { const r = await fetch('api/index'); if (r.ok) { const j = await r.json(); if (j.server) { S.api = true; S.index = j; } } } catch (e) { /* static mode */ }
-  if (!S.api) { try { S.index = await getJSON('index.json'); } catch (e) { err('could not load index.json (' + e + '). Run scripts/obs_collect.sh and serve this folder over HTTP: python3 -m http.server --directory obs 8765'); return; } }
+  if (!S.api) { try { S.index = await getJSON('index.json'); } catch (e) { err('could not load index.json (' + e + '). Run scripts/obs_collect.sh and serve this folder over HTTP: python3 -m http.server --directory obs 8781'); return; } }
   S.runs = S.index.runs; for (const r of S.runs) S.byId.set(r.id, r);
   for (const e of S.index.errors || []) err('export error: ' + JSON.stringify(e));
   const nsrc = new Set(S.runs.map((r) => r.source)).size;

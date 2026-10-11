@@ -12,7 +12,7 @@
 # live next to the copied ones); conversion only re-runs when log.txt is
 # newer than its converted metrics.jsonl; an unreachable source is
 # reported and skipped. Serve the result over HTTP (fetch() does not work
-# from file://), e.g.:  python3 -m http.server --directory obs 8765
+# from file://), e.g.:  python3 -m http.server --directory obs 8781
 set -uo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 OBS_DIR="${OBS_DIR:-$REPO/obs}"
@@ -61,4 +61,4 @@ fi
 
 echo "== exporting index"
 "$OBS_BIN" export "$OBS_DIR"
-echo "dashboard: $OBS_DIR/dashboard.html (serve: python3 -m http.server --directory $OBS_DIR 8765)"
+echo "dashboard: $OBS_DIR/dashboard.html (serve: python3 -m http.server --directory $OBS_DIR 8781)"

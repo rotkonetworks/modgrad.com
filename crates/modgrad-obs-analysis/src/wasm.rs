@@ -510,3 +510,68 @@ pub fn forecast_n(steps: &[f64], vals: &[f64], pool_off: &[u32], pool_steps: &[f
     opt.max_points = max_points.clamp(1, 1024);
     crate::forecast::forecast(steps, vals, &pool, &opt).map(|inner| ForecastOut { inner })
 }
+
+// ------------------------------------------------------------------ LLM views
+
+/// Families of per-layer metrics among the newline-joined `names` with at
+/// least `min_layers` distinct layers, as JSON
+/// `[{"family": "layers/*/grad_norm", "layers": [0, 1, …], "metrics": [...]}]`.
+#[wasm_bindgen]
+pub fn layer_families(names: &str, min_layers: usize) -> String {
+    let n: Vec<&str> = split_names(names);
+    let fams = crate::layers::families(&n, min_layers);
+    let items: Vec<String> = fams
+        .iter()
+        .map(|f| {
+            let layers: Vec<String> = f.members.iter().map(|m| format!("{}", m.0)).collect();
+            let metrics: Vec<String> = f.members.iter().map(|m| crate::query::js_str(&m.1)).collect();
+            format!("{{\"family\":{},\"layers\":[{}],\"metrics\":[{}]}}", crate::query::js_str(&f.template), layers.join(","), metrics.join(","))
+        })
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
+/// `"<family>\t<layer>"` for a per-layer metric name, empty otherwise.
+#[wasm_bindgen]
+pub fn layer_index(name: &str) -> String {
+    crate::layers::layer_index(name).map(|(t, i)| format!("{t}\t{i}")).unwrap_or_default()
+}
+
+/// Word-level diff of two texts as JSON `{"ops": [[op, text], …], "same": n}`
+/// where op 0 = same, 1 = inserted (only in `b`), 2 = deleted (only in `a`).
+#[wasm_bindgen]
+pub fn diff_words(a: &str, b: &str) -> String {
+    let (ops, same) = crate::text::diff_words(a, b);
+    let items: Vec<String> = ops
+        .iter()
+        .map(|(o, t)| format!("[{},{}]", match o { crate::text::Op::Same => 0, crate::text::Op::Ins => 1, crate::text::Op::Del => 2 }, crate::query::js_str(t)))
+        .collect();
+    format!("{{\"ops\":[{}],\"same\":{same}}}", items.join(","))
+}
+
+/// `[lo, hi, count_0, …, count_{bins-1}]` over the finite values; empty when none.
+#[wasm_bindgen]
+pub fn histogram(vals: &[f64], bins: usize) -> Vec<f64> {
+    let (lo, hi, c) = crate::text::histogram(vals, bins);
+    if c.is_empty() {
+        return Vec::new();
+    }
+    let mut v = vec![lo, hi];
+    v.extend(c.iter().map(|&x| x as f64));
+    v
+}
+
+/// Spikes and non-finite values as flat triples `[index, kind, ratio]`:
+/// kind 0 = spike (ratio = value / trailing median), 1 = non-finite (ratio NaN).
+#[wasm_bindgen]
+pub fn anomalies(vals: &[f64], window: usize, k: f64) -> Vec<f64> {
+    let mut out = Vec::new();
+    for (i, a) in crate::curve::anomalies(vals, window, k) {
+        let (kind, r) = match a {
+            crate::curve::Anomaly::Spike { ratio } => (0.0, ratio),
+            crate::curve::Anomaly::NonFinite => (1.0, f64::NAN),
+        };
+        out.extend([i as f64, kind, r]);
+    }
+    out
+}

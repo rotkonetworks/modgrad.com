@@ -21,6 +21,7 @@
 //! stage    := 'ema' w | 'by' field | ('mean±sd'|'mean+-sd'|'mean'|'median'|'min'|'max') 'over' field
 //!           | 'split' field | 'x' axis | 'forecast' ['to' n] [method] | 'log' | 'norm' (z|minmax|first)
 //!           | 'baseline' run ['diff'|'ratio'] | 'align' (intersection|union|exact) | 'show' letters
+//!           | 'heatmap' ['over' 'layer'] ['rownorm'] ['max']
 //! ```
 //!
 //! Selector entries are lettered `a, b, c, …` in order (skipping names
@@ -46,6 +47,13 @@
 //! metric containing it, so `x tokens` finds `tokens_seen`; aggregates use
 //! their first member's x) → `ema` (display only; `raw` stays unsmoothed)
 //! → block-mean downsampling when x is step or time.
+//!
+//! `heatmap over layer` additionally groups the selector streams of each
+//! run into layer families ([`layer_index`]: `layers/<i>/<stat>` and the
+//! other recognised spellings) and builds one layer × step matrix per
+//! (run, family) from the raw values, after `norm` and before aggregation
+//! ([`heatmaps`]). The traces stay in the output (the dashboard draws one
+//! layer's line from them on click).
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -221,6 +229,10 @@ pub enum Stage {
     Baseline { run: String, ratio: bool },
     Align(String),
     Show(Vec<String>),
+    /// Layer × step matrix per (run, layer family): `over` is `layer`;
+    /// `rownorm` divides each row by its median; `max` reduces a column bin
+    /// by its maximum instead of the mean.
+    Heatmap { over: String, rownorm: bool, max: bool },
 }
 
 impl Stage {
@@ -251,6 +263,7 @@ impl Stage {
             }
             Stage::Align(m) => format!("align {m}"),
             Stage::Show(l) => format!("show {}", l.join(",")),
+            Stage::Heatmap { over, rownorm, max } => format!("heatmap over {over}{}{}", if *rownorm { " rownorm" } else { "" }, if *max { " max" } else { "" }),
         }
     }
     fn kind(&self) -> &'static str {
@@ -266,6 +279,7 @@ impl Stage {
             Stage::Baseline { .. } => "baseline",
             Stage::Align(_) => "align",
             Stage::Show(_) => "show",
+            Stage::Heatmap { .. } => "heatmap",
         }
     }
 }
@@ -519,7 +533,7 @@ fn parse_stages(src: &str, a: usize, b: usize, out: &mut Vec<Stage>) -> Result<(
         };
         if kw.is_empty() {
             let ch = src[lx.i..].chars().next().map_or(1, |c| c.len_utf8());
-            return qe(lx.i, lx.i + ch, "expected a stage (ema, by, split, mean±sd over, x, forecast, log, norm, baseline, align, show)");
+            return qe(lx.i, lx.i + ch, "expected a stage (ema, by, split, mean±sd over, x, forecast, log, norm, baseline, align, show, heatmap)");
         }
         let need = |lx: &mut Lx, what: &str| -> Result<String, QueryError> {
             let (w, a, _) = lx.word();
@@ -604,6 +618,29 @@ fn parse_stages(src: &str, a: usize, b: usize, out: &mut Vec<Stage>) -> Result<(
                     }
                 };
                 Stage::Baseline { run: v, ratio }
+            }
+            "heatmap" => {
+                let (mut over, mut rownorm, mut max) = (String::from("layer"), false, false);
+                loop {
+                    let save = lx.i;
+                    let (w, a, e) = lx.word();
+                    match w.as_str() {
+                        "over" => {
+                            let (f, fa, fe) = lx.word();
+                            if f != "layer" {
+                                return qe(fa.min(a), fe.max(e), "heatmap over takes layer (per-layer metrics named layers/<i>/<stat>)");
+                            }
+                            over = f;
+                        }
+                        "rownorm" => rownorm = true,
+                        "max" => max = true,
+                        _ => {
+                            lx.i = save;
+                            break;
+                        }
+                    }
+                }
+                Stage::Heatmap { over, rownorm, max }
             }
             "show" => {
                 let mut l = Vec::new();
@@ -899,6 +936,48 @@ pub struct Output {
     pub forecast: Option<(Option<f64>, String)>,
     pub x_label: String,
     pub downsampled: usize,
+    /// `heatmap over layer`: one matrix per (run, layer family).
+    pub heatmaps: Vec<LayerHeatmap>,
+}
+
+/// Columns per heatmap: the union of steps, block-reduced past this.
+pub const HEATMAP_COLS: usize = 400;
+
+#[derive(Clone, Debug, Default)]
+pub struct LayerHeatmap {
+    /// Catalog run index.
+    pub run: usize,
+    /// Family template (`layers/*/grad_norm`).
+    pub family: String,
+    /// Row `r` is layer `layers[r]`, logged as metric `metrics[r]`.
+    pub layers: Vec<u32>,
+    pub metrics: Vec<String>,
+    pub m: crate::layers::Matrix,
+}
+
+/// Group single-run traces into layer families per run and build their
+/// matrices ([`crate::layers::matrix`]); families need 2 or more layers.
+pub fn heatmaps(traces: &[Trace], rownorm: bool, max: bool, max_cols: usize) -> Vec<LayerHeatmap> {
+    let mut groups: Vec<(usize, String, Vec<(u32, usize)>)> = Vec::new();
+    for (ti, t) in traces.iter().enumerate() {
+        let (1, Some((fam, layer))) = (t.runs.len(), crate::layers::layer_index(&t.metric)) else { continue };
+        match groups.iter_mut().find(|g| g.0 == t.runs[0] && g.1 == fam) {
+            Some(g) => g.2.push((layer, ti)),
+            None => groups.push((t.runs[0], fam, vec![(layer, ti)])),
+        }
+    }
+    let mut out = Vec::new();
+    for (run, family, mut rows) in groups {
+        rows.sort_by_key(|r| r.0);
+        rows.dedup_by_key(|r| r.0);
+        if rows.len() < 2 {
+            continue;
+        }
+        let data: Vec<(&[f64], &[f64])> = rows.iter().map(|&(_, ti)| (&traces[ti].steps[..], &traces[ti].raw[..])).collect();
+        let m = crate::layers::matrix(&data, max_cols, rownorm, max);
+        out.push(LayerHeatmap { run, family, layers: rows.iter().map(|r| r.0).collect(), metrics: rows.iter().map(|&(_, ti)| traces[ti].metric.clone()).collect(), m });
+    }
+    out
 }
 
 fn run_label(cat: &Catalog, runs: &[usize]) -> String {
@@ -1054,6 +1133,13 @@ pub fn eval(q: &Query, cat: &Catalog, plan: &Plan, data: &[(&[f64], &[f64])], ma
     if let Some(m) = stage(q, |s| if let Stage::Norm(m) = s { Some(m.clone()) } else { None }) {
         for t in &mut traces {
             t.raw = expr::normalize(&t.raw, &m);
+        }
+    }
+    // layer heatmaps (from the per-run raw values, before aggregation and x mapping)
+    if let Some((rownorm, max)) = stage(q, |s| if let Stage::Heatmap { rownorm, max, .. } = s { Some((*rownorm, *max)) } else { None }) {
+        out.heatmaps = heatmaps(&traces, rownorm, max, HEATMAP_COLS);
+        if out.heatmaps.is_empty() {
+            out.warnings.push("heatmap: no family of per-layer metrics here (name them layers/<i>/<stat>, e.g. layers/0/grad_norm)".into());
         }
     }
     // aggregation
@@ -1244,13 +1330,30 @@ pub fn output_json(o: &Output, cat: &Catalog) -> (String, Vec<f64>) {
             js_str(&t.color)
         ));
     }
+    // heatmaps after the traces: cols (ncols) then z (rows × ncols, row-major)
+    let mut hm = Vec::new();
+    for h in &o.heatmaps {
+        let off = flat.len();
+        flat.extend_from_slice(&h.m.cols);
+        flat.extend_from_slice(&h.m.z);
+        let layers: Vec<String> = h.layers.iter().map(|l| format!("{l}")).collect();
+        hm.push(format!(
+            "{{\"run\":{},\"family\":{},\"layers\":[{}],\"metrics\":{},\"ncols\":{},\"off\":{off}}}",
+            js_str(&cat.runs[h.run].id),
+            js_str(&h.family),
+            layers.join(","),
+            js_list(&h.metrics),
+            h.m.cols.len()
+        ));
+    }
     let fc = match &o.forecast {
         None => "null".to_string(),
         Some((to, m)) => format!("{{\"to\":{},\"method\":{}}}", to.map_or("null".into(), |v| format!("{v}")), js_str(m)),
     };
     let meta = format!(
-        "{{\"traces\":[{}],\"cells\":{},\"warnings\":{},\"by\":{},\"by_numeric\":{},\"ylog\":{},\"forecast\":{fc},\"x_label\":{},\"downsampled\":{}}}",
+        "{{\"traces\":[{}],\"heatmaps\":[{}],\"cells\":{},\"warnings\":{},\"by\":{},\"by_numeric\":{},\"ylog\":{},\"forecast\":{fc},\"x_label\":{},\"downsampled\":{}}}",
         tr.join(","),
+        hm.join(","),
         js_list(&o.cells),
         js_list(&o.warnings),
         o.by.as_ref().map_or("null".into(), |b| js_str(b)),
@@ -1394,6 +1497,40 @@ R\tlocal/pilot1\nI\tname\tpilot1\nC\tsize\t494053\nM\tloss\n";
         assert_eq!(o.traces.len(), 3);
         let o = run_eval("loss; c = a - zz", sample);
         assert!(o.warnings.iter().any(|w| w.contains("unknown series 'zz'")));
+    }
+
+    #[test]
+    fn heatmap_stage_parses_and_builds_matrices() {
+        let q = parse("layers/*/grad_norm | heatmap over layer rownorm | log").unwrap();
+        assert_eq!(q.stages[0], Stage::Heatmap { over: "layer".into(), rownorm: true, max: false });
+        assert_eq!(canonical(&q), "layers/*/grad_norm | heatmap over layer rownorm | log");
+        assert_eq!(canonical(&parse("x | heatmap").unwrap()), "x | heatmap over layer");
+        assert_eq!(canonical(&parse("x | heatmap max ema .5").unwrap()), "x | heatmap over layer max | ema .5");
+        assert!(parse("x | heatmap over seed").unwrap_err().msg.contains("layer"));
+        assert_eq!(chips(&q)[1].kind, "heatmap");
+        // two runs x 3 layers; rows sorted numerically (10 after 2)
+        let cat = Catalog::parse("R\tpt/a\nM\tlayers/0/grad_norm\nM\tlayers/10/grad_norm\nM\tlayers/2/grad_norm\nM\tloss\nR\tpt/b\nM\tlayers/0/grad_norm\nM\tlayers/1/grad_norm\n");
+        let q = parse("layers/*/grad_norm | heatmap over layer").unwrap();
+        let p = plan(&q, &cat);
+        let owned: Vec<(Vec<f64>, Vec<f64>)> = p.streams.iter().map(|s| {
+            let l = crate::layers::layer_index(&s.metric).unwrap().1 as f64;
+            ((0..5).map(|i| i as f64 * 10.0).collect(), (0..5).map(|i| l + if i == 3 && l == 10.0 { 100.0 } else { 0.0 }).collect())
+        }).collect();
+        let d: Vec<(&[f64], &[f64])> = owned.iter().map(|(a, b)| (&a[..], &b[..])).collect();
+        let o = eval(&q, &cat, &p, &d, 0);
+        assert_eq!(o.heatmaps.len(), 2);
+        let h = &o.heatmaps[0];
+        assert_eq!((h.run, h.family.as_str(), h.layers.clone()), (0, "layers/*/grad_norm", vec![0, 2, 10]));
+        assert_eq!(h.metrics[2], "layers/10/grad_norm");
+        assert_eq!(h.m.cols, vec![0.0, 10.0, 20.0, 30.0, 40.0]);
+        assert_eq!(h.m.z[2 * 5 + 3], 110.0);
+        assert_eq!(o.traces.len(), 5, "traces stay for click-to-line");
+        let (meta, flat) = output_json(&o, &cat);
+        assert!(meta.contains("\"heatmaps\":[{\"run\":\"pt/a\",\"family\":\"layers/*/grad_norm\",\"layers\":[0,2,10]"), "{meta}");
+        assert_eq!(flat.len(), 5 * 6 * 5 + (5 + 15) + (5 + 10));
+        // nothing layered: a warning, no heatmap
+        let o = run_eval("loss | heatmap", sample);
+        assert!(o.heatmaps.is_empty() && o.warnings.iter().any(|w| w.contains("layers/<i>/<stat>")));
     }
 
     #[test]

@@ -243,7 +243,10 @@ impl RemoteStore {
         }
         let msg = r.error_text();
         Err(match r.status {
-            401 => format!("The obs server at {} refused the request: {msg}. Pass a token with obs mcp --url {} --token obsp_… (or set OBS_TOKEN); get one with curl -X POST {}/api/v1/projects", self.url, self.url, self.url),
+            401 => format!(
+                "The obs server at {} refused the request: {msg}. Writes need a project token: start this tool as obs mcp --url {} --token obsp_… (or set OBS_TOKEN); for the hosted /mcp endpoint, send the header Authorization: Bearer obsp_…. Get a token with curl -X POST {}/api/v1/projects",
+                self.url, self.url, self.url
+            ),
             403 => format!("The token does not cover this: {msg}"),
             _ => format!("obs server {} answered {}: {msg}", self.url, r.status),
         })

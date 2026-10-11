@@ -1,6 +1,6 @@
 //! ```text
 //! obs-server [--root <obs dir>] [--listen 127.0.0.1:8790] [--static <dir> | --no-static]
-//!            [--dev] [--no-anon] [--anon-expiry-days 30]
+//!            [--dev] [--no-anon] [--anon-expiry-days 30] [--mcp]
 //! obs-server token add <project> [--root <obs dir>] [--json]
 //! ```
 //!
@@ -8,7 +8,10 @@
 //! ingest API, selection reads, SSE) and, by default, `<root>` itself as
 //! static files so `/` opens dashboard.html in server mode.
 //! `--dev` accepts writes without a token (local use only). `token add`
-//! provisions a project token and prints it once. Logging: `RUST_LOG=info`.
+//! provisions a project token and prints it once. `--mcp` adds a hosted MCP
+//! endpoint at `/mcp` for agents that cannot run `obs mcp` locally; its
+//! tools analyse on this server's CPU (see `mcp_http.rs`). Logging:
+//! `RUST_LOG=info`.
 
 use modgrad_obs_server::auth::{Auth, AuthConfig};
 use modgrad_obs_server::{IngestConfig, http};
@@ -56,11 +59,20 @@ async fn main() {
         eprintln!("obs-server: token store under {}: {e}", root.display());
         std::process::exit(1)
     });
-    let app = http::router(http::AppState::new(ingest, read, static_dir, auth).with_boards(root.join("boards")));
     let lis = tokio::net::TcpListener::bind(&listen).await.unwrap_or_else(|e| {
         eprintln!("obs-server: bind {listen}: {e}");
         std::process::exit(1)
     });
+    let mut state = http::AppState::new(ingest, read, static_dir, auth).with_boards(root.join("boards"));
+    if has("--mcp") {
+        let mut a = lis.local_addr().expect("bound address");
+        if a.ip().is_unspecified() {
+            a.set_ip(if a.is_ipv4() { std::net::Ipv4Addr::LOCALHOST.into() } else { std::net::Ipv6Addr::LOCALHOST.into() });
+        }
+        state = state.with_mcp(format!("http://{a}"));
+        eprintln!("obs-server: hosted MCP endpoint at /mcp (tool analysis runs on this server)");
+    }
+    let app = http::router(state);
     eprintln!("obs-server: {} on http://{listen}/{}", root.display(), if cfg.dev { "  (dev mode: tokenless writes allowed)" } else { "" });
     axum::serve(lis, app).with_graceful_shutdown(async { let _ = tokio::signal::ctrl_c().await; }).await.unwrap();
 }

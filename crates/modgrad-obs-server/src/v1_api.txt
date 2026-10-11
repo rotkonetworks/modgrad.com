@@ -86,6 +86,15 @@ Boards
 
   GET /api/index with a project token (Authorization header) lists that project's runs.
 
+MCP (for coding agents)
+-----------------------
+  Preferred: run the tools locally against this server; analysis then runs on
+  your machine and the server only stores and selects:
+      obs mcp --url $OBS --token $OBS_TOKEN
+  Servers started with --mcp also serve MCP over streamable HTTP at POST /mcp
+  (Authorization: Bearer <token> for writes), for agents that cannot run a
+  local binary. Its analysis runs on the server.
+
 Live (Server-Sent Events)
 -------------------------
   GET /api/v1/stream[?runs=a,b | ?project=<p>]    all public runs, some runs, or one project

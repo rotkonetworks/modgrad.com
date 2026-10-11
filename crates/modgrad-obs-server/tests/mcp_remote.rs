@@ -114,3 +114,54 @@ async fn project_token_scopes_writes_reads_and_boards() {
     let (t, e) = call(&anon, "log", json!({"run": "x/y", "metrics": {"loss": 1.0}})).await;
     assert!(e && t.contains("--token") && t.contains("OBS_TOKEN"), "{t}");
 }
+
+/// `obs-server --mcp`: POST /mcp runs the same tools server-side. The
+/// request goes in through the router with a public Host header; the
+/// tools reach the store over the server's real loopback socket.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hosted_mcp_endpoint() {
+    use axum::body::{Body, to_bytes};
+    use axum::http::Request;
+    use tower::ServiceExt;
+    let root = tmp("hosted");
+    let (ingest, read) = open(&root, IngestConfig::default()).unwrap();
+    let auth = Auth::open(&root, AuthConfig { dev: false, ..Default::default() }).unwrap();
+    let tok = auth.add_project_token("team").unwrap();
+    let lis = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", lis.local_addr().unwrap());
+    let app = router(AppState::new(ingest, read, None, auth).with_boards(root.join("boards")).with_mcp(url.clone()));
+    let served = app.clone();
+    tokio::spawn(async move { axum::serve(lis, served).await.unwrap() });
+
+    let rpc = |body: Value, token: Option<&str>| {
+        let mut b = Request::builder().method("POST").uri("/mcp").header("host", "obs.example.org").header("accept", "application/json, text/event-stream");
+        if let Some(t) = token {
+            b = b.header("authorization", format!("Bearer {t}"));
+        }
+        let app = app.clone();
+        let req = b.body(Body::from(body.to_string())).unwrap();
+        async move {
+            let r = app.oneshot(req).await.unwrap();
+            let code = r.status();
+            let bytes = to_bytes(r.into_body(), 1 << 24).await.unwrap();
+            (code, serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null))
+        }
+    };
+    let (c, v) = rpc(json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}), None).await;
+    assert_eq!(c, 200);
+    assert_eq!(v["result"]["serverInfo"]["name"], "modgrad-obs");
+    let (c, _) = rpc(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}), None).await;
+    assert_eq!(c, 202);
+    let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}), None).await;
+    assert_eq!(v["result"]["tools"].as_array().unwrap().len(), 7);
+    let call = |id: i64, name: &str, args: Value| json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": name, "arguments": args}});
+    let (_, v) = rpc(call(3, "log", json!({"run": "demo1", "metrics": {"loss": 2.0}, "step": 1})), Some(&tok)).await;
+    assert_eq!(v["result"]["isError"], false, "{v}");
+    assert!(v["result"]["content"][0]["text"].as_str().unwrap().contains("team/demo1"), "{v}");
+    let (_, v) = rpc(call(4, "make_board", json!({"query": "loss{run=~\"demo1\"}"})), Some(&tok)).await;
+    let t = v["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(t.contains("URL: http://obs.example.org/#board=team/loss_") && !t.contains(&url), "{t}");
+    // without a token the write is refused, with the fix in the message
+    let (_, v) = rpc(call(5, "log", json!({"run": "x/y", "metrics": {"loss": 1.0}})), None).await;
+    assert_eq!(v["result"]["isError"], true);
+}

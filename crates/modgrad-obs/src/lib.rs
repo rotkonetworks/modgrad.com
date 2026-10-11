@@ -142,7 +142,7 @@ pub struct Run {
 
 /// One logged value, mirroring W&B's value types: a scalar goes to the
 /// history (`metrics.jsonl`), a histogram or tensor to `arrays.jsonl`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Item {
     Scalar(f64),
     Histogram(Histogram),

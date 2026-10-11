@@ -1,0 +1,23 @@
+[package]
+name = "modgrad-obs-server"
+version = "0.1.0"
+edition = "2024"
+description = "Zebra-style tower services (Ingest, State, ReadState) serving modgrad-obs runs; storage and selection only, no analysis"
+license = "MIT"
+
+[dependencies]
+modgrad-obs = { path = "../modgrad-obs" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }
+tower = { version = "0.5", features = ["buffer", "limit", "load-shed", "timeout", "util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "query", "tokio"] }
+base64 = "0.22"
+
+[dev-dependencies]
+tower-test = "0.4"
+proptest = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }

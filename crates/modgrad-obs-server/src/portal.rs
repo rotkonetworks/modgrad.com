@@ -540,7 +540,7 @@ async fn me(AxState(st): AxState<AppState>, h: HeaderMap) -> PResult {
         .into_iter()
         .map(|(name, o)| {
             let (runs, last) = project_stats(&st, &name);
-            json!({ "name": name, "visibility": o.visibility.as_str(), "runs": runs, "last_unix": last, "anon": name.starts_with(crate::auth::ANON_PREFIX), "created": o.created })
+            json!({ "name": name, "visibility": o.visibility.as_str(), "runs": runs, "last_unix": last, "anon": name.starts_with(crate::auth::ANON_PREFIX), "expires": Value::Null, "created": o.created })
         })
         .collect();
     let mut r = axum::Json(json!({

@@ -478,20 +478,22 @@ def scripted(task, T, envdir, url, negative=None):
         return text
 
     init = run(f"modgrad init --server {url}" if task["server"] else "modgrad init")
+    ran = ""
     name = f"{v}-demo"  # no '/': with a project token a run id must start with the project
     if negative == "fake":
         run(f"modgrad run --name {name} -- python -c \"[print(f'step {{i}} loss {{1/i:.4f}}') for i in range(10, 310, 10)]\"")
     elif v == "wandb":
         run("sed -i 's/^import wandb$/import modgrad as wandb/' train.py")
-        run(f"python {script}")
+        ran = run(f"python {script}")
     else:
-        run(f"modgrad run --name {name} -- python {script}")
+        ran = run(f"modgrad run --name {name} -- python {script}")
     if negative == "leak":
         run("git add -f .modgrad.json && git commit -qm 'add modgrad config'")
     if negative == "stub":
         tool_call(T, envdir, "write_file", {"path": script, "content": "print('step 300 loss 0.0')\n"})
     if task["server"]:
-        m = re.search(r"Dashboard[^:\n]*: (\S+)", init)
+        # the run's own link, printed by `modgrad run` when it ends
+        m = re.search(r"-> (\S+#run=\S+)", ran or "")
         answer = f"Training is logged to the server. Dashboard: {m.group(1) if m else url}"
     else:
         answer = f"Logged run {name}. View it: `modgrad-server --root obs`, then open http://127.0.0.1:8790/#run={name}"

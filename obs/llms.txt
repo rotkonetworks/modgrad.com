@@ -27,13 +27,16 @@ it:
    - the script prints nothing: add one print per logging step (see
      "2. modgrad run"). Read the file first; never rewrite or replace the
      user's training code.
-3. Check that the run has rows: `modgrad tail <name>`.
+3. Check that the run has rows: `modgrad tail <name>`. It exits non-zero
+   with "no rows yet" when nothing was logged: then the training did not
+   run under modgrad, and you are not done.
 4. Answer with the way to open it. Local mode: the command
    `modgrad-server --root obs` and the URL to open once it is up,
    `http://127.0.0.1:8790/`. Do not start `modgrad-server` yourself: it
    serves until stopped, so your command never returns. Server mode: the
-   `Dashboard:` link `modgrad init` printed (`<server>/#project=...`); the
-   server's front page does not list anonymous projects.
+   run's link that `modgrad run` printed when it ended
+   (`<server>/#run=...`). The project page `modgrad init` prints is empty
+   until a run logs, so it is not an answer on its own.
 
 Never commit `.modgrad.json` (it can hold a token; `init` gitignores it)
 and never paste a token into a tracked file.

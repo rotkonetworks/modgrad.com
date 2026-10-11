@@ -383,7 +383,9 @@ pub fn render(r: &Report) -> String {
     if let Some(v) = n["view"].as_str() {
         out.push_str(&format!("Dashboard (local mode, no server is running yet): start `{v}`, which serves until Ctrl-C, then open {}\n", n["dashboard"].as_str().unwrap_or("")));
     } else {
-        out.push_str(&format!("Dashboard (runs appear once they log): {}\n", n["dashboard"].as_str().unwrap_or("")));
+        // agents copied this line as proof of a finished setup; the run's own link comes from `modgrad run`
+        out.push_str("Not done yet: nothing is recorded until the training runs. The link to give is the one `modgrad run` prints when it ends (…/#run=…).\n");
+        out.push_str(&format!("Project page (empty until a run logs): {}\n", n["dashboard"].as_str().unwrap_or("")));
     }
     out
 }

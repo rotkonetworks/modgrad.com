@@ -107,7 +107,7 @@ fn server_init_then_run_sends_the_file_token() {
     let o = modgrad(&d, &["init", "--server", &url, "--mcp", "claude"]);
     assert!(o.status.success(), "{}", text(&o));
     let out = text(&o);
-    for want in ["project anon-abc", ".gitignore created", "MCP server \"modgrad\" added in .mcp.json", "modgrad run --name exp1 -- python train.py", "import modgrad as wandb", "Dashboard (runs appear once they log): http://x/#project=anon-abc"] {
+    for want in ["project anon-abc", ".gitignore created", "MCP server \"modgrad\" added in .mcp.json", "modgrad run --name exp1 -- python train.py", "import modgrad as wandb", "Not done yet", "Project page (empty until a run logs): http://x/#project=anon-abc"] {
         assert!(out.contains(want), "missing {want:?} in\n{out}");
     }
     let mcp: Value = serde_json::from_slice(&std::fs::read(d.join(".mcp.json")).unwrap()).unwrap();

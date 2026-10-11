@@ -112,6 +112,11 @@ pub fn tail(o: Opts) -> i32 {
                     s = Series::default();
                 }
                 s.merge(&steps, &cols);
+                // "check the run has rows" must be able to fail
+                if s.steps.is_empty() && !o.follow {
+                    eprintln!("modgrad tail: {} has no rows yet: nothing has been logged (did the training run under `modgrad run`?)", o.target);
+                    return 2;
+                }
                 let text = render(&o, &s);
                 if o.follow && tty && !o.json {
                     print!("\x1b[H\x1b[2J{text}");

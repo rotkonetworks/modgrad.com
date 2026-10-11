@@ -213,7 +213,7 @@ The tools are designed for weak local models:
   component, punctuation-insensitive, unique substring. Metric names also
   match aliases (`lr` → `learning_rate`). On a miss, the error lists the
   closest names.
-- Output is short plain text, at most 40 lines. Each result ends with a
+- Output is short plain text, kept under about 40 lines (the tests check this on fixtures; the code does not truncate). Each result ends with a
   `Next:` line that suggests the call to make next.
 - A tool failure is returned as a result with `isError: true` and an example
   call, not as a JSON-RPC error, so the model can read it and retry.

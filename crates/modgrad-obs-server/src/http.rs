@@ -398,7 +398,8 @@ fn content_type(p: &std::path::Path) -> &'static str {
 async fn static_file(AxState(st): AxState<AppState>, uri: Uri) -> ApiResult {
     let Some(root) = &st.static_dir else { return Err(ApiError::NotFound) };
     let rel = uri.path().trim_start_matches('/');
-    let rel = if rel.is_empty() { "dashboard.html" } else { rel };
+    // `/`: the obs root's dashboard.html, or the app's own index.html (obs/web/dist)
+    let rel = if !rel.is_empty() { rel } else if root.join("dashboard.html").is_file() { "dashboard.html" } else { "index.html" };
     // no traversal: every component must be a plain name
     let path = std::path::Path::new(rel);
     // and no dotfiles (the token store lives at <root>/.obs-auth.json)

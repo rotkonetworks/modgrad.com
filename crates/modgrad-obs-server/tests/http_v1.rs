@@ -364,3 +364,13 @@ async fn sse_streams_new_samples() {
     let ev = next_event(&mut body, &mut buf, "samples").await;
     assert_eq!((ev["n"].clone(), ev["samples"].as_array().map(Vec::len)), (json!(4), Some(1)), "{ev}");
 }
+
+#[tokio::test]
+async fn root_serves_dashboard_html_else_the_apps_index() {
+    let (app, root) = app("slash", true);
+    assert_eq!(send(&app, "GET", "/", None, "").await, (StatusCode::OK, json!("<html>dash</html>")));
+    // a static dir that is the built app (obs/web/dist) has index.html only
+    std::fs::remove_file(root.join("dashboard.html")).unwrap();
+    std::fs::write(root.join("index.html"), "<html>app</html>").unwrap();
+    assert_eq!(send(&app, "GET", "/", None, "").await, (StatusCode::OK, json!("<html>app</html>")));
+}

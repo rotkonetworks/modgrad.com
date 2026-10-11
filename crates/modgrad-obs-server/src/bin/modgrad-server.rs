@@ -7,7 +7,9 @@
 //! Serves the modgrad-obs store under `<root>/runs` over HTTP (the v1
 //! ingest API, selection reads, SSE) and, by default, `<root>` itself as
 //! static files so `/` opens dashboard.html in server mode (point `--static`
-//! at obs/web/dist for the app). Saved boards under `<root>/boards` are served
+//! at obs/web/dist for the app). A root without dashboard.html (a project's
+//! own `obs/`) gets the app from the checkout this binary was built in,
+//! `obs/web/dist`, when that has been built. Saved boards under `<root>/boards` are served
 //! at `/api/v1/boards/<name>` for the dashboard's `#board=<name>`.
 //! `--dev` accepts writes without a token (local use only). `token add`
 //! provisions a project token and prints it once. `--mcp` adds a hosted MCP
@@ -49,7 +51,22 @@ async fn main() {
         return;
     }
     let listen = flag("--listen").unwrap_or_else(|| "127.0.0.1:8790".into());
-    let static_dir = if has("--no-static") { None } else { Some(flag("--static").map(PathBuf::from).unwrap_or_else(|| root.clone())) };
+    let static_dir = if has("--no-static") {
+        None
+    } else {
+        Some(flag("--static").map(PathBuf::from).unwrap_or_else(|| {
+            let dist = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../obs/web/dist"));
+            if root.join("dashboard.html").is_file() || !dist.join("index.html").is_file() {
+                if !root.join("dashboard.html").is_file() {
+                    eprintln!("modgrad-server: no dashboard to serve at / (build it: cd obs/web && npm ci && npm run build, or pass --static <dist>); the API works without it");
+                }
+                root.clone()
+            } else {
+                eprintln!("modgrad-server: dashboard from {}", dist.canonicalize().unwrap_or(dist.clone()).display());
+                dist
+            }
+        }))
+    };
     let (ingest, read) = match modgrad_obs_server::open(&root, IngestConfig::default()) {
         Ok(x) => x,
         Err(e) => {

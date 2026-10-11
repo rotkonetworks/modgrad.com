@@ -1318,6 +1318,9 @@ pub fn make_board(store: &dyn Store, a: &Args) -> ToolResult {
         out.push_str(&format!("\n- {} for {} run{}: {}", p.metric, p.runs.len(), if p.runs.len() == 1 { "" } else { "s" }, p.runs.iter().take(10).cloned().collect::<Vec<_>>().join(", ")));
     }
     out.push_str(&format!("\nURL: {url}\nFile: {path}"));
+    if let Some(h) = store.view_hint() {
+        out.push_str(&format!("\n{h}"));
+    }
     out.push_str("\nGive the URL to the user. Next: add panels with make_board(query='metric_a{run=~\"…\"}; metric_b{run=~\"…\"}'), or compare(runs=\"…\", metric=\"…\") for the numbers.");
     Ok(out)
 }

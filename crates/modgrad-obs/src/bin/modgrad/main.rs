@@ -272,7 +272,9 @@ fn main() {
             use modgrad_obs::mcp::{Server, serve_stdio, store};
             let pf = project::find_cwd();
             let token = |url: &str| flag(&args, "--token").or_else(|| env("MODGRAD_TOKEN")).or_else(|| pf.as_ref().and_then(|f| f.p.token_for(url)));
-            let local = |dir: PathBuf| -> Box<dyn store::Store> { Box::new(store::LocalStore::open(&dir, flag(&args, "--base-url"))) };
+            // board links: --base-url, else the project file's server, else the local viewer
+            let base_url = flag(&args, "--base-url").or_else(|| pf.as_ref().and_then(|f| f.p.server.clone()));
+            let local = |dir: PathBuf| -> Box<dyn store::Store> { Box::new(store::LocalStore::open(&dir, base_url.clone())) };
             let url = flag(&args, "--url").or_else(|| env("MODGRAD_MCP_URL"));
             let st: Box<dyn store::Store> = match (url, flag(&args, "--dir"), pf.as_ref().and_then(|f| f.p.server.clone())) {
                 (Some(url), _, _) => Box::new(store::RemoteStore::new(&url, token(&url))),

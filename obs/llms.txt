@@ -42,12 +42,12 @@ Every door ends in the same place: a run with metrics you can query and chart.
 
 Local data (recommended; nothing else to run):
 
-    obs mcp --dir ./obs
+    obs mcp --dir ./obs                                        # or OBS_DIR=./obs
 
 Against an obs-server (the tools fetch rows and analyse locally; the server
 only stores and selects):
 
-    obs mcp --url https://obs.example.org --token obsp_...    # or OBS_TOKEN=...
+    obs mcp --url https://obs.example.org --token obsp_...    # or OBS_MCP_URL=... OBS_TOKEN=...
 
 A server started with `obs-server --mcp` also serves MCP over streamable HTTP
 at `$OBS/mcp`. That is for agents that cannot run a local binary: the

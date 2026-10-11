@@ -111,7 +111,9 @@ qwen3:8b, one trial each, before (0a52e7f) and after (4c1552f):
 | board | 1/1 | 1/1 |
 | total | **12/14** (86%) | **13/14** (93%) |
 
-The 8B misses `typo_run` both times: after the "No run named exp/meduim.
+The 8B "before" run used the harness of that time (no `--max-tokens`, data
+directly in the task dir); the base-suite checkers are unchanged, so the
+numbers compare. The 8B misses `typo_run` both times: after the "No run named exp/meduim.
 Closest: exp/mid, ..." error it asks the user which run was meant instead
 of retrying. The base suite cannot separate tool designs at 30B scale.
 

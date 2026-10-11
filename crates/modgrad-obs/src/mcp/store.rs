@@ -210,6 +210,12 @@ impl Store for LocalStore {
 /// | `append`            | `POST /api/v1/runs/<id>/log` (auto-creates)       |
 /// | `save_board`        | `PUT /api/v1/boards/<name>`                       |
 ///
+/// Known gap: `/history` returns `null` both for "not logged at this step"
+/// and for a value logged as NaN/inf, and nulls are dropped here, so the
+/// NaN/inf divergence warnings never fire in remote mode (the blow-up
+/// check still does). Fix: a NaN-preserving history encoding or a per-key
+/// fetch that keeps non-finite values.
+///
 /// The token (`obsp_…` project or `obsr_…` run) goes on every request:
 /// writes need it unless the server runs `--dev`, and on reads it scopes
 /// the run list to the token's project.

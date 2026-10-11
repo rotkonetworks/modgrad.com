@@ -39,7 +39,8 @@ const USAGE: &str = "usage:
   obs show <run_dir>
   obs mcp [--dir <obs_dir>] [--base-url URL]   MCP server on stdio for coding agents (local data)
   obs mcp --url <server> [--token T]           same tools against an obs-server (analysis stays local)
-env: OBS_URL (default http://127.0.0.1:8790), OBS_TOKEN, OBS_PROJECT";
+env: OBS_URL (default http://127.0.0.1:8790), OBS_TOKEN, OBS_PROJECT,
+     OBS_DIR (obs mcp data dir), OBS_MCP_URL (obs mcp server, same as --url)";
 
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())

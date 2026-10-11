@@ -372,7 +372,8 @@ def check_server_url(answer, url, good, sroot):
             st = str(e)
         if st != 200:
             continue
-        kv = dict(x.split("=", 1) for x in frag.split("&") if "=" in x)
+        from urllib.parse import unquote
+        kv = {k: unquote(v) for k, v in (x.split("=", 1) for x in frag.split("&") if "=" in x)}
         if "run" in kv and kv["run"] in good:
             return True, u
         if "project" in kv and any(r.startswith(kv["project"].rstrip("/") + "/") for r in good):
@@ -490,7 +491,7 @@ def scripted(task, T, envdir, url, negative=None):
     if negative == "stub":
         tool_call(T, envdir, "write_file", {"path": script, "content": "print('step 300 loss 0.0')\n"})
     if task["server"]:
-        m = re.search(r"Dashboard: (\S+)", init)
+        m = re.search(r"Dashboard[^:\n]*: (\S+)", init)
         answer = f"Training is logged to the server. Dashboard: {m.group(1) if m else url}"
     else:
         answer = f"Logged run {name}. View it: `modgrad-server --root obs`, then open http://127.0.0.1:8790/#run={name}"

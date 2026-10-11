@@ -1292,8 +1292,8 @@ async function main() {
   if (!S.api) { try { S.index = await getJSON('index.json'); } catch (e) { err('could not load index.json (' + e + '). Run scripts/obs_collect.sh and serve this folder over HTTP: python3 -m http.server --directory obs 8781. Dropped log files still work.'); S.index = { runs: [], generated_unix: Date.now() / 1000 }; } }
   S.runs = S.index.runs; for (const r of S.runs) S.byId.set(r.id, r);
   for (const e of S.index.errors || []) err('export error: ' + JSON.stringify(e));
-  const nsrc = new Set(S.runs.map((r) => r.source)).size;
-  $('genmeta').textContent = `${S.api ? 'server mode, ' : 'static mode, '}${S.runs.length} runs from ${nsrc} sources, index built ${new Date(S.index.generated_unix * 1000).toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+  const genmeta = () => { const n = new Set(S.runs.map((r) => r.source)).size; $('genmeta').textContent = `${S.api ? 'server mode, ' : 'static mode, '}${S.runs.length} runs from ${n} source${n === 1 ? '' : 's'}, index built ${new Date(S.index.generated_unix * 1000).toISOString().slice(0, 16).replace('T', ' ')} UTC`; };
+  genmeta(); document.addEventListener('obs:runs-changed', genmeta);
   for (const r of S.runs) if (!r.config.synthetic) S.sel.add(r.id);
   const modes = ['auto', 'light', 'dark']; let mi = 0;
   try { const m = localStorage.getItem('obs-theme'); if (m && modes.includes(m)) mi = modes.indexOf(m); } catch (e) { /* storage unavailable */ }

@@ -154,6 +154,7 @@ function save() { try { localStorage.setItem(LS_BOARD, Bd.serialize(U.board)); }
 function saveSettings() { try { localStorage.setItem(LS_SET, JSON.stringify(U.settings)); } catch (e) { /* ignore */ } }
 // every state change goes through here: optional undo snapshot, mutation, save, re-render
 function commit(what, fn, opts = {}) {
+  if (what) U.autoBoard = false; // the viewer shaped the board: stop rebuilding it from conventions
   if (what) U.undo.push(what, U.board);
   try { fn(); } catch (e) { if (what) U.undo.pop(); toast(String(e.message || e)); return false; }
   save(); render(); updateUndo();
@@ -1180,6 +1181,11 @@ export function mount(obs) {
   document.addEventListener('obs:runs-changed', (ev) => {
     U.catalog = Dt.catalogText(O.S.runs); U.dataVersion++;
     for (const id of (ev.detail && ev.detail.updated) || []) U.events.delete(id);
+    // until the viewer edits it, the default board follows the data (e.g. a live run's first metrics)
+    if (U.autoBoard) {
+      const nb = defaultBoard(), qs = (b) => b.panels.map((p) => p.q).join('\n');
+      if (qs(nb) !== qs(U.board)) { U.board = nb; save(); }
+    }
     renderBrowser(); render();
   });
   window.addEventListener('hashchange', syncHash);
@@ -1188,6 +1194,7 @@ export function mount(obs) {
   try { const s = localStorage.getItem(LS_BOARD); if (s) b = Bd.validBoard(JSON.parse(s)); } catch (e) { b = null; }
   if (!b) { try { const s = localStorage.getItem('obs-builder-layout-v1'); if (s) b = Bd.validBoard(JSON.parse(s)); } catch (e) { b = null; } }
   U.board = b || defaultBoard();
+  U.autoBoard = !b; // no saved board: the default tracks incoming runs until the first edit
   renderBrowser(); render(); updateUndo();
   syncHash();
   // small API for other modules and tests

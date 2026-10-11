@@ -187,6 +187,7 @@ export function attachLive(D) {
     try { S.index = await (await fetch(indexURL(), { cache: 'no-store' })).json(); } catch (e) { return; }
     S.runs = S.index.runs.concat(S.runs.filter((r) => r.local)); S.byId.clear(); for (const r of S.runs) S.byId.set(r.id, r);
     D.renderRuns(); D.refreshMetricSelect(); scheduleFull();
+    document.dispatchEvent(new CustomEvent('obs:runs-changed', { detail: { added: [], updated: S.runs.map((r) => r.id) } }));
   }
 
   client.addEventListener('hello', (e) => {
@@ -208,6 +209,7 @@ export function attachLive(D) {
     if (wanted(entry.id)) hideWaiting();
     client.watch(entry.id, entry.last_step ?? -1);
     D.renderRuns(); D.refreshMetricSelect(); ensureMetrics(); scheduleFull();
+    notifyBuilder(entry.id);
   });
 
   client.addEventListener('rows', (e) => {

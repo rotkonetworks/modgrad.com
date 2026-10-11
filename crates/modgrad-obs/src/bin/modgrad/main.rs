@@ -119,6 +119,7 @@ fn transport_flags(args: &[String]) -> net::H3 {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(|s| s.as_str()) {
+        Some("--version" | "-V" | "version") => println!("modgrad {}", env!("CARGO_PKG_VERSION")),
         Some("init") => {
             let json = args.iter().any(|a| a == "--json");
             let o = project::InitOpts {

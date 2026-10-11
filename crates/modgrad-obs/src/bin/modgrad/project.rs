@@ -142,6 +142,42 @@ pub struct Report {
     pub gitignore_lines: Vec<String>,
     /// (config file, "added" | "updated" | "unchanged") for `--mcp`.
     pub mcp: Option<(String, &'static str)>,
+    /// Training scripts found in the directory, for the next steps.
+    pub scripts: Vec<Script>,
+}
+
+/// A training script `init` found, and how to get its metrics into a run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Script {
+    pub file: String,
+    /// It imports wandb: swap the import (the client then logs), don't wrap it.
+    pub wandb: bool,
+}
+
+/// Training scripts at the top of `dir`: `*.py` whose name starts with
+/// `train` or `finetune`, or with a `__main__` block that calls `.backward(`
+/// or builds a `Trainer(` (a library like `minitrainer.py` has neither).
+/// Those names first, at most 3.
+pub fn find_scripts(dir: &Path) -> Vec<Script> {
+    let mut v: Vec<(bool, String, bool)> = Vec::new();
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if !name.ends_with(".py") || name.starts_with("test_") || name == "setup.py" || !e.path().is_file() {
+            continue;
+        }
+        let Ok(src) = std::fs::read_to_string(e.path()) else { continue };
+        let lower = name.to_lowercase();
+        let named = lower.starts_with("train") || lower.starts_with("finetune");
+        let main = src.contains("__main__") && (src.contains(".backward(") || src.contains("Trainer("));
+        if !named && !main {
+            continue;
+        }
+        let wandb = src.lines().map(str::trim).any(|l| l == "import wandb" || l.starts_with("import wandb ") || l.starts_with("from wandb "));
+        v.push((!named, name, wandb));
+    }
+    v.sort();
+    v.truncate(3);
+    v.into_iter().map(|(_, file, wandb)| Script { file, wandb }).collect()
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -262,26 +298,44 @@ pub fn init(dir: &Path, o: &InitOpts) -> Result<Report, String> {
         None => None,
         Some(rel) => Some((rel.to_string(), register_mcp(&dir.join(rel), &o.exe)?)),
     };
-    Ok(Report { p, file, gitignore: gi, gitignore_lines: lines, mcp })
+    Ok(Report { p, file, gitignore: gi, gitignore_lines: lines, mcp, scripts: find_scripts(dir) })
 }
 
-/// What to do next, as shown by `modgrad init`: `{run, python, dashboard}`.
-pub fn next_steps(p: &Project) -> Value {
+/// A one-line, in-place edit of `import wandb` (perl: the same flags on Linux and macOS, unlike `sed -i`).
+pub fn swap_command(file: &str) -> String {
+    format!("perl -pi -e 's/^import wandb$/import modgrad as wandb/' {file}")
+}
+
+/// What to do next, as shown by `modgrad init`: `{run, python, dashboard,
+/// view?, scripts}`. `scripts` has one step per training script found.
+pub fn next_steps(p: &Project, scripts: &[Script]) -> Value {
+    let d = p.data.as_deref().unwrap_or("obs");
+    let steps: Vec<Value> = scripts
+        .iter()
+        .map(|s| {
+            let stem = s.file.trim_end_matches(".py");
+            if s.wandb {
+                json!({"file": s.file, "how": "swap", "edit": swap_command(&s.file), "command": format!("python {}", s.file)})
+            } else {
+                json!({"file": s.file, "how": "wrap", "command": format!("modgrad run --name {stem} -- python {}", s.file), "run": stem})
+            }
+        })
+        .collect();
+    let run = steps.iter().find_map(|x| x["how"].eq("wrap").then(|| x["command"].as_str().unwrap_or("").to_string())).unwrap_or_else(|| "modgrad run --name exp1 -- python train.py".into());
     match &p.server {
         Some(server) => json!({
-            "run": "modgrad run --name exp1 -- python train.py",
+            "run": run,
+            "scripts": steps,
             "python": "import modgrad as wandb\nwandb.init(name=\"exp1\", config={\"lr\": 3e-4})\nwandb.log({\"loss\": 0.52})",
             "dashboard": p.board.clone().unwrap_or_else(|| format!("{server}/")),
         }),
-        None => {
-            let d = p.data.as_deref().unwrap_or("obs");
-            json!({
-                "run": "modgrad run --name exp1 -- python train.py",
-                "python": format!("import modgrad as wandb   # no server: writes {d}/runs/exp1\nwandb.init(name=\"exp1\", config={{\"lr\": 3e-4}})\nwandb.log({{\"loss\": 0.52}})"),
-                "view": format!("modgrad-server --root {d}"),
-                "dashboard": format!("{DEFAULT_SERVER}/"),
-            })
-        }
+        None => json!({
+            "run": run,
+            "scripts": steps,
+            "python": format!("import modgrad as wandb   # no server: writes {d}/runs/exp1\nwandb.init(name=\"exp1\", config={{\"lr\": 3e-4}})\nwandb.log({{\"loss\": 0.52}})"),
+            "view": format!("modgrad-server --root {d}"),
+            "dashboard": format!("{DEFAULT_SERVER}/"),
+        }),
     }
 }
 
@@ -303,18 +357,33 @@ pub fn render(r: &Report) -> String {
     if let Some((f, st)) = &r.mcp {
         out.push_str(&format!("modgrad: MCP server \"modgrad\" {st} in {f}{}\n", if *st == "unchanged" { "" } else { " (restart the agent to load it)" }));
     }
-    let n = next_steps(&r.p);
-    out.push_str("\nNext:\n");
-    out.push_str(&format!("  {}\n", n["run"].as_str().unwrap_or("")));
-    out.push_str("\nPython:\n");
+    let n = next_steps(&r.p, &r.scripts);
+    out.push_str("\nNext: nothing is recorded until the training runs through modgrad.\n");
+    let steps = n["scripts"].as_array().cloned().unwrap_or_default();
+    let mut tail = None;
+    for st in &steps {
+        let (f, c) = (st["file"].as_str().unwrap_or(""), st["command"].as_str().unwrap_or(""));
+        if st["how"] == "swap" {
+            out.push_str(&format!("  {f} uses wandb: change `import wandb` to `import modgrad as wandb` (only that line), then run it as usual:\n    {}\n    {c}\n", st["edit"].as_str().unwrap_or("")));
+        } else {
+            out.push_str(&format!("  {f}: if it prints metric lines (`step 10 loss 0.52`, Trainer dicts), run it through modgrad, no code change:\n    {c}\n"));
+            tail = tail.or(st["run"].as_str().map(String::from));
+        }
+    }
+    if steps.is_empty() {
+        out.push_str(&format!("  {}\n", n["run"].as_str().unwrap_or("")));
+        tail = Some("exp1".into());
+    }
+    out.push_str(&format!("Then check the run has rows: modgrad tail {}\n", tail.as_deref().unwrap_or("<run name>")));
+    out.push_str("\nPython (to log from code instead):\n");
     for l in n["python"].as_str().unwrap_or("").lines() {
         out.push_str(&format!("  {l}\n"));
     }
     out.push('\n');
     if let Some(v) = n["view"].as_str() {
-        out.push_str(&format!("Dashboard: {v}   then open {}\n", n["dashboard"].as_str().unwrap_or("")));
+        out.push_str(&format!("Dashboard (local mode, no server is running yet): start `{v}`, which serves until Ctrl-C, then open {}\n", n["dashboard"].as_str().unwrap_or("")));
     } else {
-        out.push_str(&format!("Dashboard: {}\n", n["dashboard"].as_str().unwrap_or("")));
+        out.push_str(&format!("Dashboard (runs appear once they log): {}\n", n["dashboard"].as_str().unwrap_or("")));
     }
     out
 }
@@ -326,7 +395,7 @@ pub fn report_json(r: &Report) -> Value {
         "file_status": r.file,
         "mode": if r.p.local() { "local" } else { "server" },
         "gitignore": r.gitignore,
-        "next": next_steps(&r.p),
+        "next": next_steps(&r.p, &r.scripts),
     });
     for (k, x) in [("server", &r.p.server), ("project", &r.p.project), ("board", &r.p.board), ("data", &r.p.data)] {
         if let Some(x) = x {
@@ -375,7 +444,7 @@ mod tests {
         let r = init(&d, &o).unwrap();
         assert_eq!((r.file, r.gitignore, r.p.data.as_deref()), ("created", "created", Some("obs")));
         // the Python client writes local runs itself: the snippet is the plain W&B one
-        let py = next_steps(&r.p)["python"].as_str().unwrap().to_string();
+        let py = next_steps(&r.p, &[])["python"].as_str().unwrap().to_string();
         assert!(py.starts_with("import modgrad as wandb") && py.contains("obs/runs/exp1"), "{py}");
         let gi = std::fs::read_to_string(d.join(".gitignore")).unwrap();
         assert!(gi.contains("/.modgrad.json\n") && gi.contains("/obs/\n"), "{gi}");
@@ -437,6 +506,25 @@ mod tests {
         assert!(init(&d, &o).unwrap_err().contains("not touching it"));
         assert_eq!(std::fs::read_to_string(d.join(".mcp.json")).unwrap(), "{oops");
         assert!(init(&d, &InitOpts { mcp: Some("vim".into()), ..Default::default() }).unwrap_err().contains("supported clients"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn next_steps_name_the_training_scripts() {
+        let d = tmp("scripts");
+        std::fs::write(d.join("train_grpo.py"), "for i in range(3):\n    print(f'step {i} reward 1')\n").unwrap();
+        std::fs::write(d.join("finetune.py"), "import wandb\nif __name__ == '__main__':\n    loss.backward()\n").unwrap();
+        std::fs::write(d.join("minitrainer.py"), "class Trainer:\n    def train(self):\n        loss.backward()\n").unwrap();
+        std::fs::write(d.join("utils.py"), "x = 1\n").unwrap();
+        let r = init(&d, &InitOpts { exe: "modgrad".into(), ..Default::default() }).unwrap();
+        let files: Vec<&str> = r.scripts.iter().map(|s| s.file.as_str()).collect();
+        assert_eq!(files, ["finetune.py", "train_grpo.py"]);
+        assert!(r.scripts[0].wandb && !r.scripts[1].wandb);
+        let text = render(&r);
+        assert!(text.contains("modgrad run --name train_grpo -- python train_grpo.py"), "{text}");
+        assert!(text.contains("finetune.py uses wandb: change `import wandb` to `import modgrad as wandb`"), "{text}");
+        assert!(text.contains("perl -pi -e 's/^import wandb$/import modgrad as wandb/' finetune.py"), "{text}");
+        assert!(text.contains("modgrad tail train_grpo") && text.contains("serves until Ctrl-C"), "{text}");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

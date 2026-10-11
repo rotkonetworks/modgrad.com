@@ -6,7 +6,40 @@
 > runs in the client, never on the server. This file is the quickstart for
 > coding agents. It is complete: you should not need anything else.
 
+## Setting up a repo: done means a run the user can open
+
+When a user asks you to add modgrad to a repo (set it up, track or log
+their training, show them a dashboard), the job is finished only when their
+training has run once through modgrad and you have told them how to open
+it:
+
+1. `modgrad init` in the repo (`modgrad init --server <url>` if they named a
+   server). It lists the training scripts it found and the exact command
+   for each.
+2. Run the training once, unchanged except as below:
+   - the script prints metrics (`step 10 loss 0.52`, Trainer dicts, ...):
+     `modgrad run --name <name> -- python <script>`. No code change.
+   - the script uses wandb: change only the line `import wandb` to
+     `import modgrad as wandb`, in place, without retyping the file:
+     `perl -pi -e 's/^import wandb$/import modgrad as wandb/' <script>`.
+     Then run it as usual (`python <script>`); the `wandb.init/log/finish`
+     calls stay as they are.
+   - the script prints nothing: add one print per logging step (see
+     "2. modgrad run"). Read the file first; never rewrite or replace the
+     user's training code.
+3. Check that the run has rows: `modgrad tail <name>`.
+4. Answer with the way to open it. Local mode: the command
+   `modgrad-server --root obs` and the URL to open once it is up,
+   `http://127.0.0.1:8790/`. Do not start `modgrad-server` yourself: it
+   serves until stopped, so your command never returns. Server mode: the
+   `Dashboard:` link `modgrad init` printed (`<server>/#project=...`); the
+   server's front page does not list anonymous projects.
+
+Never commit `.modgrad.json` (it can hold a token; `init` gitignores it)
+and never paste a token into a tracked file.
+
 Binaries: `modgrad` (CLI and MCP server) and `modgrad-server` (HTTP API, dashboard).
+If `modgrad --version` works, they are installed; skip this step.
 Install from a checkout of https://github.com/rotkonetworks/modgrad:
 
     cargo install --path crates/modgrad-obs          # -> modgrad
@@ -46,7 +79,8 @@ run in `obs/runs/sweep/exp1`; a name that is already taken gets a `-<4 hex>`
 suffix, and `init(id="exp1", resume=True)` continues a run after its last
 step. Each `log` call is appended to disk at once, so a killed script still
 leaves a readable run. `mode="offline"` (or `WANDB_MODE=offline`) writes
-locally whatever the project file says.
+locally whatever the project file says. A script that uses the client and
+is started by `modgrad run --name X` logs into run X (one run, not two).
 
 `modgrad run`, `tail`, `mcp` and the Python client find `.modgrad.json` in
 the current directory or a parent. Precedence: flag > environment variable >

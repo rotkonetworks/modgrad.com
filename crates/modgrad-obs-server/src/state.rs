@@ -25,6 +25,9 @@ pub enum Record {
     Log { step: u64, t: Option<f64>, items: Vec<(String, Item)> },
     Array { step: u64, t: Option<f64>, key: String, kind: String, shape: Vec<usize>, data: Vec<f32>, labels: Option<Vec<f32>> },
     Event { step: u64, t: Option<f64>, text: String },
+    /// A text sample (generation), appended to `samples.jsonl`; its step
+    /// resolves like an event's.
+    Sample { step: u64, t: Option<f64>, sample: modgrad_obs::Sample },
 }
 
 #[derive(Debug, Clone)]
@@ -171,6 +174,7 @@ impl State {
                             b.arrays.push(modgrad_obs::array_line(s, t.unwrap_or(now), key, kind, shape, data, labels.as_deref(), None)?)
                         }
                         Record::Event { step, t, text } => b.push_event(if *step == AUTO_STEP { last.unwrap_or(0) } else { *step }, t.unwrap_or(now), text),
+                        Record::Sample { step, t, sample } => b.push_sample(if *step == AUTO_STEP { last.unwrap_or(0) } else { *step }, t.unwrap_or(now), sample),
                     }
                 }
                 r.append_batch(&b)?;

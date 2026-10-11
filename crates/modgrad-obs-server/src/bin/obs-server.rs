@@ -6,7 +6,9 @@
 //!
 //! Serves the modgrad-obs store under `<root>/runs` over HTTP (the v1
 //! ingest API, selection reads, SSE) and, by default, `<root>` itself as
-//! static files so `/` opens dashboard.html in server mode.
+//! static files so `/` opens dashboard.html in server mode (point `--static`
+//! at obs/web/dist for the app). Saved boards under `<root>/boards` are served
+//! at `/api/v1/boards/<name>` for the dashboard's `#board=<name>`.
 //! `--dev` accepts writes without a token (local use only). `token add`
 //! provisions a project token and prints it once. Logging: `RUST_LOG=info`.
 
@@ -56,7 +58,7 @@ async fn main() {
         eprintln!("obs-server: token store under {}: {e}", root.display());
         std::process::exit(1)
     });
-    let app = http::router(http::AppState::new(ingest, read, static_dir, auth));
+    let app = http::router(http::AppState::new(ingest, read, static_dir, auth).with_boards_dir(root.join("boards")));
     let lis = tokio::net::TcpListener::bind(&listen).await.unwrap_or_else(|e| {
         eprintln!("obs-server: bind {listen}: {e}");
         std::process::exit(1)

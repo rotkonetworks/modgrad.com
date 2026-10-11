@@ -8,7 +8,7 @@ import { hideTip } from '@/lib/dom';
 import {
   findPanel, titleOf, addToNew, addTo, removeTrace, moveTrace, mergePanel, movePanel, type TraceRef,
 } from '@/stores/board';
-import { closePop, setDragging } from '@/stores/ui';
+import { closePop } from '@/stores/ui';
 
 export type Payload =
   | { type: 'series'; entries: string; q?: string; label: string }
@@ -36,7 +36,7 @@ function activate(st: Drag, x: number, y: number): void {
   if (!d) { DR = null; return; }
   st.data = d; st.active = true;
   st.ghost = h('div', { class: 'bghost' }, document.body, '');
-  document.body.classList.add('bdragging'); setDragging(true);
+  document.body.classList.add('bdragging');
   hideTip(); closePop();
   move(x, y);
 }
@@ -77,7 +77,7 @@ function endDrag(cancel: boolean): void {
   const st = DR; DR = null; if (!st) return;
   if (st.timer) clearTimeout(st.timer);
   if (!st.active) return;
-  st.ghost?.remove(); document.body.classList.remove('bdragging'); setDragging(false); clearHl();
+  st.ghost?.remove(); document.body.classList.remove('bdragging'); clearHl();
   (st.el as HTMLElement).dataset.dragged = '1'; setTimeout(() => { delete (st.el as HTMLElement).dataset.dragged; }, 0); // swallow the click after a drag
   if (!cancel && st.t) drop(st.data!, st.t);
 }

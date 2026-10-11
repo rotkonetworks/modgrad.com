@@ -75,6 +75,7 @@ Read
                                                   {"steps", "t", "columns": {key: [...]}}
   GET /api/v1/runs/<id>/config | /summary | /events
   GET /api/runs/<id %2F-encoded>/metrics/<key>?max_points=N   {"step": [...], "value": [...]}
+  GET /api/v1/boards/<name>                       a saved board ({"panels": [{"query"}]}); opens as <server>/#board=<name>
 
 Live (Server-Sent Events)
 -------------------------

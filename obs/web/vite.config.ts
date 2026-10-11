@@ -13,7 +13,7 @@ import { join, normalize, resolve } from 'path';
 const OBS_DIR = fileURLToPath(new URL('..', import.meta.url));
 const SERVER = process.env.OBS_SERVER || 'http://127.0.0.1:8790';
 
-/** dev only: serve the static export (index.json, runs/) from the obs/ directory */
+/** dev only: serve the static export (index.json, runs/, boards/) from the obs/ directory */
 function staticData(): Plugin {
   return {
     name: 'obs-static-data',
@@ -21,7 +21,7 @@ function staticData(): Plugin {
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
         const url = decodeURIComponent((req.url || '').split('?')[0]);
-        if (url !== '/index.json' && !url.startsWith('/runs/')) return next();
+        if (url !== '/index.json' && !url.startsWith('/runs/') && !url.startsWith('/boards/')) return next();
         const full = normalize(join(OBS_DIR, url));
         if (!full.startsWith(resolve(OBS_DIR)) || !existsSync(full) || !statSync(full).isFile()) return next();
         res.setHeader('Content-Type', 'application/json');

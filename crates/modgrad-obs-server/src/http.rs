@@ -31,13 +31,21 @@ pub struct AppState {
     pub auth: Auth,
     /// Change feed behind the SSE endpoints.
     pub live: Live,
+    /// Saved boards (`<obs root>/boards/<name>.json`, written by the MCP
+    /// `make_board` tool), served at `GET /api/v1/boards/<name>`; None = off.
+    pub boards_dir: Option<PathBuf>,
 }
 
 impl AppState {
     /// Wire the v1 extras around an ingest/read pair (spawns the [`Live`] task).
     pub fn new(ingest: IngestService, read: ReadState, static_dir: Option<PathBuf>, auth: Auth) -> AppState {
         let live = Live::spawn(read.clone());
-        AppState { ingest, read, static_dir, auth, live }
+        AppState { ingest, read, static_dir, auth, live, boards_dir: None }
+    }
+    /// Serve saved boards from `dir` (usually `<obs root>/boards`).
+    pub fn with_boards_dir(mut self, dir: PathBuf) -> AppState {
+        self.boards_dir = Some(dir);
+        self
     }
     /// The ingest service behind write authorisation.
     pub fn authed(&self) -> Authed {

@@ -1,5 +1,6 @@
 // Transient UI: toasts, one menu/popover at a time, the command palette, the current tab.
 import { createSignal, type JSX } from 'solid-js';
+import { lsGet, lsSet } from '@/lib/storage';
 
 export interface Toast { text: string; undo: boolean; id: number }
 const [toastSig, setToast] = createSignal<Toast | null>(null);
@@ -29,9 +30,8 @@ export { paletteOpen, setPaletteOpen };
 export type Tab = 'board' | 'cross' | 'arrays' | 'runs';
 export const TABS: [Tab, string][] = [['board', 'Board'], ['cross', 'Across runs'], ['arrays', 'Arrays / 3D'], ['runs', 'Runs']];
 
-const [railOpen, setRailOpen] = createSignal(true);
-export { railOpen, setRailOpen };
-
-// file drop: the pointer DnD of the builder sets this so the page-wide file drop zone stays out
-const [dragging, setDragging] = createSignal(false);
-export { dragging, setDragging };
+// the series/runs rail: open on wide screens, collapsed on phones; the viewer's choice is remembered
+const railSaved = lsGet('obs-rail');
+const [railOpen, setRail] = createSignal(railSaved === '1' || railSaved === '0' ? railSaved === '1' : innerWidth > 860);
+export { railOpen };
+export function setRailOpen(v: boolean): void { setRail(v); lsSet('obs-rail', v ? '1' : '0'); }

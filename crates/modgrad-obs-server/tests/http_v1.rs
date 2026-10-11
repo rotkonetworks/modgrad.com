@@ -238,3 +238,21 @@ async fn sse_project_filter_hides_other_runs() {
     let run = next_event(&mut body, &mut buf, "run").await;
     assert_eq!(run["run"], format!("{project}/mine"), "the public run must not reach a project stream");
 }
+
+#[tokio::test]
+async fn saved_boards_are_served_by_name_only() {
+    let root = tmp("boards");
+    let (ingest, read) = open(&root, IngestConfig::default()).unwrap();
+    let auth = Auth::open(&root, AuthConfig::default()).unwrap();
+    std::fs::create_dir_all(root.join("boards")).unwrap();
+    std::fs::write(root.join("boards/loss-ab12.json"), r#"{"panels": [{"query": "loss{run=~\"a|b\"}"}]}"#).unwrap();
+    std::fs::write(root.join("secret.json"), "{}").unwrap();
+    let app = router(AppState::new(ingest, read, None, auth).with_boards_dir(root.join("boards")));
+    let (c, v) = send(&app, "GET", "/api/v1/boards/loss-ab12", None, "").await;
+    assert_eq!(c, StatusCode::OK, "{v}");
+    assert_eq!(v["panels"][0]["query"], "loss{run=~\"a|b\"}");
+    for bad in ["/api/v1/boards/nope", "/api/v1/boards/..%2Fsecret", "/api/v1/boards/.hidden", "/api/v1/boards/a%20b"] {
+        let (c, _) = send(&app, "GET", bad, None, "").await;
+        assert_eq!(c, StatusCode::NOT_FOUND, "{bad}");
+    }
+}

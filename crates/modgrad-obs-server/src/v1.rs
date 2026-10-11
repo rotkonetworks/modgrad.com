@@ -490,12 +490,27 @@ async fn api_text() -> Response {
     ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], API_TEXT).into_response()
 }
 
+/// `GET /api/v1/boards/<name>`: a saved board file as written by the MCP
+/// `make_board` tool. Names are letters, digits, `.`, `_`, `~`, `-` (no
+/// leading dot), so the lookup cannot leave the boards directory.
+async fn board(AxState(st): AxState<AppState>, Path(name): Path<String>) -> Result<Response, ApiError> {
+    let ok = !name.is_empty() && !name.starts_with('.') && name.len() <= 200 && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"._~-".contains(&b));
+    let (Some(dir), true) = (st.boards_dir.clone(), ok) else { return Err(ApiError::NotFound) };
+    let path = dir.join(format!("{name}.json"));
+    let bytes = tokio::task::spawn_blocking(move || std::fs::read(path)).await.map_err(|e| ApiError::Bad(e.to_string()))?;
+    match bytes {
+        Ok(b) => Ok(([(header::CONTENT_TYPE, "application/json")], b).into_response()),
+        Err(_) => Err(ApiError::NotFound),
+    }
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1", get(api_text))
         .route("/api/v1/", get(api_text))
         .route("/api/v1/projects", post(new_project))
         .route("/api/v1/claim/:claim", get(claim))
+        .route("/api/v1/boards/:name", get(board))
         .route("/api/v1/runs", post(create))
         .route("/api/v1/stream", get(stream_all))
         .route("/api/v1/runs/*path", post(post_dispatch).get(get_dispatch))

@@ -14,6 +14,7 @@
 //!
 //! The server stores and selects; all analysis runs in the browser (wasm).
 
+pub mod account;
 pub mod auth;
 pub mod error;
 #[cfg(feature = "h3")]

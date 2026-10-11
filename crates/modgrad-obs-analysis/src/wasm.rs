@@ -148,3 +148,107 @@ pub fn downsample_shape(shape: &[u32], max_elems: usize) -> Vec<u32> {
     }
     s.into_iter().map(|x| x as u32).collect()
 }
+
+/// Ghost forecast (see [`crate::forecast`]). Getters return `NaN` for a
+/// family that had no eligible configuration.
+#[wasm_bindgen]
+pub struct ForecastOut {
+    inner: crate::forecast::Forecast,
+}
+
+#[wasm_bindgen]
+impl ForecastOut {
+    pub fn steps(&self) -> Vec<f64> {
+        self.inner.steps.clone()
+    }
+    pub fn mean(&self) -> Vec<f64> {
+        self.inner.mean.clone()
+    }
+    pub fn lo(&self) -> Vec<f64> {
+        self.inner.lo.clone()
+    }
+    pub fn hi(&self) -> Vec<f64> {
+        self.inner.hi.clone()
+    }
+    /// Ridge beat last-value naive on validation and test; when false the
+    /// drawn forecast is the last value.
+    pub fn skill(&self) -> bool {
+        self.inner.skill
+    }
+    pub fn lookback(&self) -> usize {
+        self.inner.config.lookback
+    }
+    pub fn lambda(&self) -> f64 {
+        self.inner.config.lambda
+    }
+    pub fn noise(&self) -> f64 {
+        self.inner.config.noise
+    }
+    pub fn scaler(&self) -> String {
+        self.inner.config.scaler.name().into()
+    }
+    pub fn pooled(&self) -> bool {
+        self.inner.config.pooled
+    }
+    pub fn position(&self) -> bool {
+        self.inner.config.position
+    }
+    pub fn mae_val(&self) -> f64 {
+        self.inner.mae_val
+    }
+    pub fn mae_val_naive(&self) -> f64 {
+        self.inner.mae_val_naive
+    }
+    pub fn mae_test(&self) -> f64 {
+        self.inner.mae_test
+    }
+    pub fn mae_test_naive(&self) -> f64 {
+        self.inner.mae_test_naive
+    }
+    pub fn n_val(&self) -> usize {
+        self.inner.n_val
+    }
+    pub fn n_test(&self) -> usize {
+        self.inner.n_test
+    }
+    pub fn single_mae_val(&self) -> f64 {
+        self.inner.single.map_or(f64::NAN, |b| b.mae_val)
+    }
+    pub fn single_mae_test(&self) -> f64 {
+        self.inner.single.map_or(f64::NAN, |b| b.mae_test)
+    }
+    pub fn pooled_mae_val(&self) -> f64 {
+        self.inner.pooled.map_or(f64::NAN, |b| b.mae_val)
+    }
+    pub fn pooled_mae_test(&self) -> f64 {
+        self.inner.pooled.map_or(f64::NAN, |b| b.mae_test)
+    }
+    pub fn max_backtest_h(&self) -> usize {
+        self.inner.max_backtest_h
+    }
+    pub fn n_pool(&self) -> usize {
+        self.inner.n_pool
+    }
+    pub fn spacing(&self) -> f64 {
+        self.inner.spacing
+    }
+    pub fn n_configs(&self) -> usize {
+        self.inner.n_configs
+    }
+}
+
+/// Forecast `vals` over `steps` up to `horizon_step`. The pool (other runs of
+/// the same metric) is flattened: run `i` is `pool_steps/vals[off[i]..off[i+1]]`.
+/// `None` (undefined) for series shorter than `forecast::MIN_POINTS`.
+#[wasm_bindgen]
+pub fn forecast(steps: &[f64], vals: &[f64], pool_off: &[u32], pool_steps: &[f64], pool_vals: &[f64], horizon_step: f64, allow_pool: bool) -> Option<ForecastOut> {
+    let pool: Vec<(&[f64], &[f64])> = pool_off
+        .windows(2)
+        .map(|w| (w[0] as usize, w[1] as usize))
+        .filter(|&(a, b)| a <= b && b <= pool_steps.len() && b <= pool_vals.len())
+        .map(|(a, b)| (&pool_steps[a..b], &pool_vals[a..b]))
+        .collect();
+    let mut opt = crate::forecast::Options::to_step(horizon_step);
+    opt.allow_pool = allow_pool;
+    crate::forecast::forecast(steps, vals, &pool, &opt).map(|inner| ForecastOut { inner })
+}

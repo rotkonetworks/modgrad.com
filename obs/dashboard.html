@@ -72,6 +72,9 @@ table.legend td.sw { width: 14px; padding-right: 0; }
 .legendwrap { overflow-x: auto; }
 .sw-area { display: inline-block; width: 10px; height: 10px; vertical-align: -1px; }
 .sw-line { display: inline-block; width: 12px; height: 0; border-top: 2px solid; vertical-align: 3px; }
+.sw-ghost { display: inline-block; width: 14px; height: 0; border-top: 2px dashed; opacity: .6; vertical-align: 3px; }
+.gnote { font: 11px var(--mono); color: var(--muted); margin-top: 3px; }
+.gnote div { white-space: normal; padding-left: 20px; text-indent: -20px; }
 .tip { position: fixed; pointer-events: none; background: var(--bg); border: 1px solid var(--frame); font: 11px var(--mono); padding: 3px 6px; white-space: pre; z-index: 10; display: none; }
 details.run { border: 1px solid var(--rule); padding: 4px 8px; margin: 6px 0; font: 11px var(--mono); }
 details.run summary { cursor: pointer; font-weight: 600; }
@@ -114,8 +117,11 @@ input[type=range] { width: 160px; }
   <label>x <select id="xaxis"><option value="step">step</option><option value="t">time</option></select></label>
   <label>EMA <input type="range" id="ema" min="0" max="0.99" step="0.01" value="0"><span id="emaval" style="font-family:var(--mono)">0.00</span></label>
   <label><input type="checkbox" id="xsync" checked> link x zoom</label>
+  <label title="ghost continuation from ridge regression on lag windows, hyperparameters searched on a rolling-origin backtest (SearchCast style), computed in wasm"><input type="checkbox" id="fcast"> forecast</label>
+  <label id="fhzwrap" title="forecast horizon: the run's planned total steps when its config has one, else +50% of the plotted span">to step <input id="fhz" size="7"></label>
 </div>
 <div class="note">First selected run is drawn as a solid area, the rest as 1 px lines. Legend statistics are over the raw (unsmoothed) values. Single-point series are drawn as squares.</div>
+<div class="note" id="fnote" style="display:none">Forecast (opt-in): dashed ghost and faint band per run, from one-step ridge regression on lag windows rolled forward, fitted to the raw values. Lookback, ridge strength, scaler, input-noise and pooling over the other plotted runs of the metric are chosen on early backtest origins; the MAE shown is on the later origins only, against a last-value forecast on the same points. When the ridge does not beat last-value on both splits the ghost is the last value. Band: 10 to 90% of backtest residuals per horizon. Forecasts are not counted in the legend statistics.</div>
 <div class="grid" id="history"></div>
 
 <h2>Across runs: metric over step and config</h2>
@@ -274,7 +280,16 @@ function chart2d(parent, o) {
   const tx = o.xlog ? (x) => (x > 0 ? Math.log10(x) : NaN) : (x) => x;
   const xf = o.xlog ? (t) => fmtTick(Math.pow(10, t)) : (o.xfmt || fmtTick);
   const series = o.series.map((s) => ({ ...s, X: Array.from(s.xs, tx), Y: Array.from(s.ys), S: nums(s.raw || s.ys) }));
-  let [fx0, fx1] = finiteRange(series.map((s) => s.X));
+  // ghost forecast: drawn dashed with a band, kept out of the legend stats; its x extends the
+  // default range, its mean (not its band) takes part in the y fit
+  for (const s of series) {
+    if (!s.ghost) continue;
+    let k = s.X.length - 1; while (k >= 0 && !(Number.isFinite(s.X[k]) && Number.isFinite(s.Y[k]))) k--;
+    const a = k >= 0 ? [[s.X[k]], [s.Y[k]]] : [[], []];
+    s.G = { X: a[0].concat(Array.from(s.ghost.xs, tx)), Y: a[1].concat(Array.from(s.ghost.ys)), LO: a[1].concat(Array.from(s.ghost.lo)), HI: a[1].concat(Array.from(s.ghost.hi)), n0: a[0].length };
+  }
+  const ghosts = series.filter((s) => s.G);
+  let [fx0, fx1] = finiteRange(series.map((s) => s.X).concat(ghosts.map((s) => s.G.X)));
   if (!Number.isFinite(fx0)) { fx0 = 0; fx1 = 1; }
   if (fx1 === fx0) { fx0 -= 0.5; fx1 += 0.5; }
   const cid = 'clip' + (++clipSeq);
@@ -289,7 +304,7 @@ function chart2d(parent, o) {
     else {
       // fit y to the visible points plus the nearest point either side, so lines leaving the window stay in frame
       const near = (s) => s.Y.filter((_, i) => inX(s.X[i]) || (s.X[i] < x0 && !(s.X[i + 1] < x0)) || (s.X[i] > x1 && !(s.X[i - 1] > x1)));
-      [y0, y1] = finiteRange(series.map(near));
+      [y0, y1] = finiteRange(series.map(near).concat(ghosts.map((s) => near(s.G))));
       if (!Number.isFinite(y0)) [y0, y1] = finiteRange(series.map((s) => s.Y));
       if (!Number.isFinite(y0)) { y0 = 0; y1 = 1; }
       if (y1 === y0) { const d = Math.abs(y0) * 0.05 || 0.5; y0 -= d; y1 += d; }
@@ -332,6 +347,18 @@ function chart2d(parent, o) {
         svgEl('path', { d, style: `fill:var(${s.color});stroke:none` }, plot);
       }
     }
+    for (const s of ghosts) { // band, then dashed mean line
+      const G = s.G, f = (i) => Number.isFinite(G.X[i]) && Number.isFinite(G.LO[i]) && Number.isFinite(G.HI[i]);
+      const idx = G.X.map((_, i) => i).filter(f);
+      if (idx.length > 1) {
+        const d = 'M' + idx.map((i) => X(G.X[i]).toFixed(1) + ',' + Y(G.HI[i]).toFixed(1)).join('L') + 'L' + idx.slice().reverse().map((i) => X(G.X[i]).toFixed(1) + ',' + Y(G.LO[i]).toFixed(1)).join('L') + 'Z';
+        svgEl('path', { d, style: `fill:var(${s.color});fill-opacity:0.10;stroke:var(${s.color});stroke-opacity:0.25;stroke-width:0.5` }, plot);
+      }
+      for (const sg of segs(G)) {
+        if (sg.length === 1) { svgEl('rect', { x: sg[0][0] - 2.5, y: sg[0][1] - 2.5, width: 5, height: 5, style: `fill:none;stroke:var(${s.color});stroke-opacity:0.55;stroke-dasharray:2 1` }, plot); continue; }
+        svgEl('path', { d: 'M' + sg.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join('L'), style: `fill:none;stroke:var(${s.color});stroke-width:1.2;stroke-opacity:0.55;stroke-dasharray:4 3` }, plot);
+      }
+    }
     for (const s of series.filter((s) => !s.area)) {
       for (const sg of segs(s)) {
         if (sg.length === 1) { svgEl('rect', { x: sg[0][0] - 2.5, y: sg[0][1] - 2.5, width: 5, height: 5, style: `fill:none;stroke:var(${s.color});stroke-width:1` }, plot); continue; }
@@ -349,6 +376,14 @@ function chart2d(parent, o) {
       return { name: s.name, color: s.color, area: s.area, stats: Array.from(A.legend_stats(nums(vis))) };
     });
     const nl = legendTable(h('div', {}), rows, o.legendHead).parentNode;
+    if (o.ghostNotes && o.ghostNotes.length) {
+      const gn = h('div', { class: 'gnote' }, nl);
+      for (const [color, text] of o.ghostNotes) {
+        const row = h('div', {}, gn);
+        const sw = h('span', { class: 'sw-ghost' }, row); if (color) sw.style.borderTopColor = `var(${color})`; else sw.style.visibility = 'hidden';
+        row.append(' ' + text);
+      }
+    }
     if (legend) legend.replaceWith(nl); else panel.appendChild(nl);
     legend = nl;
     sub.textContent = view
@@ -418,6 +453,14 @@ function chart2d(parent, o) {
       let bi = -1, bd = Infinity;
       for (let i = 0; i < s.X.length; i++) { const d = Math.abs(s.X[i] - xv); if (d < bd && Number.isFinite(s.Y[i]) && inX(s.X[i])) { bd = d; bi = i; } }
       if (bi >= 0) { lines.push(`${s.name.slice(0, 28).padEnd(28)} ${fmt(s.Y[bi]).padStart(9)}`); if (best === null) best = s.X[bi]; }
+    }
+    for (const s of ghosts) { // past a run's last real point its row shows the forecast and band
+      const G = s.G; if (G.n0 && !(xv > G.X[0])) continue;
+      let bi = -1, bd = Infinity;
+      for (let i = G.n0; i < G.X.length; i++) { const d = Math.abs(G.X[i] - xv); if (d < bd && Number.isFinite(G.Y[i]) && inX(G.X[i])) { bd = d; bi = i; } }
+      if (bi < 0) continue;
+      if (best === null || bd < Math.abs(best - xv)) best = G.X[bi];
+      lines.push(`${(s.name.slice(0, 19) + ' forecast').padEnd(28)} ${fmt(G.Y[bi]).padStart(9)}  [${fmt(G.LO[bi])}, ${fmt(G.HI[bi])}]`);
     }
     if (best === null) return;
     const hx = L + ((best - x0) / (x1 - x0)) * pw;
@@ -836,19 +879,64 @@ async function renderHistory() {
       let xs = s.steps;
       if (useT) { const tm = await timeOf(r); if (!tm) continue; xs = s.steps.map((st) => tm.get(st) ?? NaN); }
       const ys = w > 0 ? A.ema(s.values, w) : s.values;
-      series.push({ name: r.id, color: PALETTE[ci % PALETTE.length], area: ci === 0, xs, ys: Array.from(ys), raw: s.values });
+      series.push({ name: r.id, run: r, color: PALETTE[ci % PALETTE.length], area: ci === 0, xs, ys: Array.from(ys), raw: s.values });
       ci++;
     }
     panels.push({ k, series });
   }
   if (tok !== histToken) return;
   box.innerHTML = '';
+  const fc = $('fcast').checked && !useT;
+  $('fcast').disabled = useT; $('fhz').disabled = useT || !$('fcast').checked;
+  $('fcast').parentNode.title = useT ? 'forecasts are drawn on the step axis only' : $('fcast').parentNode.dataset.title || $('fcast').parentNode.title;
+  $('fnote').style.display = fc ? '' : 'none';
+  const hz = fc ? forecastHorizon(panels) : null;
   if (!keys.length) { h('div', { class: 'note' }, box, 'Select one or more metrics.'); return; }
   for (const p of panels) {
     if (!p.series.length) { h('div', { class: 'note' }, box, `${p.k}: no data in the selected runs`); continue; }
+    const notes = fc ? addForecasts(p.series, hz) : null;
     // legend stats on raw values; history panels share their x range
-    chart2d(box, { title: p.k + (w > 0 ? `  (EMA ${w.toFixed(2)})` : ''), xlabel: useT ? 'time' : 'step', xfmt: useT ? fmtTime : fmtTick, series: p.series.map((s) => ({ ...s })), legendHead: p.series.length > 6 ? `${p.series.length} runs (colours repeat after 6)` : '', group: $('xsync').checked ? 'history:' + (useT ? 't' : 'step') : null });
+    chart2d(box, { title: p.k + (w > 0 ? `  (EMA ${w.toFixed(2)})` : ''), xlabel: useT ? 'time' : 'step', xfmt: useT ? fmtTime : fmtTick, series: p.series.map((s) => ({ ...s })), legendHead: p.series.length > 6 ? `${p.series.length} runs (colours repeat after 6)` : '', group: $('xsync').checked ? 'history:' + (useT ? 't' : 'step' + (fc ? ':f' + hz.key : '')) : null, ghostNotes: notes });
   }
+}
+
+// ------------------------------------------------------------ forecasts (opt-in ghosts)
+const PLANNED = ['steps', 'total_steps', 'max_steps', 'train_steps', 'num_steps', 'iters', 'n_steps'];
+const plannedSteps = (r) => { for (const k of PLANNED) if (typeof r.config[k] === 'number' && r.config[k] > 0) return r.config[k]; return null; };
+// horizon: the input when the user has set it; else per run its planned total, else +50% of the plotted span
+function forecastHorizon(panels) {
+  const inp = $('fhz');
+  let lo = Infinity, hi = -Infinity;
+  for (const p of panels) for (const s of p.series) for (const x of s.xs) if (Number.isFinite(x)) { lo = Math.min(lo, x); hi = Math.max(hi, x); }
+  const dflt = Number.isFinite(lo) ? hi + 0.5 * (hi - lo) : NaN;
+  if (inp.dataset.touched && Number.isFinite(+inp.value) && inp.value !== '') return { fixed: +inp.value, dflt, key: 'u' + inp.value };
+  const planned = []; for (const p of panels) for (const s of p.series) { const ps = plannedSteps(s.run); if (ps) planned.push(ps); }
+  const shown = Math.max(Number.isFinite(dflt) ? dflt : 0, ...planned);
+  inp.value = Number.isFinite(shown) && shown > 0 ? String(Math.round(shown)) : '';
+  return { fixed: null, dflt, key: 'd' + inp.value };
+}
+function addForecasts(series, hz) {
+  const notes = [], short = [];
+  series.forEach((s, i) => {
+    const target = hz.fixed ?? plannedSteps(s.run) ?? hz.dflt;
+    const off = [0], ps = [], pv = [];
+    series.forEach((o, j) => { if (j !== i) { for (let k = 0; k < o.xs.length; k++) { ps.push(o.xs[k]); pv.push(o.raw[k]); } off.push(ps.length); } });
+    let f = null;
+    try { f = A.forecast(Float64Array.from(s.xs), nums(s.raw), Uint32Array.from(off), Float64Array.from(ps), Float64Array.from(pv), target, true); } catch (e) { err('forecast ' + s.name + ': ' + e); }
+    const name = s.name.length > 22 ? s.name.slice(0, 21) + '~' : s.name;
+    if (!f) { short.push(name); return; }
+    s.ghost = { xs: f.steps(), ys: f.mean(), lo: f.lo(), hi: f.hi() };
+    const nt = f.n_test(), mt = fmt(f.mae_test()), mn = fmt(f.mae_test_naive());
+    const cfg = `L=${f.lookback()} ${f.scaler()} lambda=${fmtTick(f.lambda())}${f.noise() ? ' noise=' + f.noise() : ''}${f.position() ? ' +step' : ''}${f.pooled() ? ` pooled(${f.n_pool()})` : ''}`;
+    const fam = Number.isFinite(f.single_mae_test()) && Number.isFinite(f.pooled_mae_test()) ? `; single ${fmt(f.single_mae_test())} vs pooled ${fmt(f.pooled_mae_test())}` : '';
+    const ext = f.max_backtest_h() < f.steps().length ? `; band past ${f.max_backtest_h() || 0} pt${f.max_backtest_h() === 1 ? '' : 's'} extrapolated` : '';
+    notes.push([s.color, f.skill()
+      ? `${name}: ridge ${cfg}; backtest MAE ${mt} vs last-value ${mn} (${nt} test pt${nt === 1 ? '' : 's'})${fam}${ext}`
+      : `${name}: no skill, ghost = last value; best ridge (${cfg}) MAE ${mt} vs last-value ${mn} (${nt} test pt${nt === 1 ? '' : 's'}, val ${fmt(f.mae_val())} vs ${fmt(f.mae_val_naive())})${fam}${ext}`]);
+    f.free();
+  });
+  if (short.length) notes.push([null, `no forecast for ${short.join(', ')}: fewer than 4 points, or horizon not past the last step`]);
+  return notes;
 }
 
 // ------------------------------------------------------------ cross-run surface
@@ -1111,6 +1199,9 @@ async function main() {
   $('xaxis').addEventListener('change', renderHistory);
   $('xsync').addEventListener('change', () => { for (const k of [...ZOOM_GROUPS.keys()]) if (k.startsWith('history:')) ZOOM_GROUPS.delete(k); renderHistory(); });
   $('ema').addEventListener('input', renderHistory);
+  $('fcast').parentNode.dataset.title = $('fcast').parentNode.title;
+  $('fcast').addEventListener('change', renderHistory);
+  $('fhz').addEventListener('change', () => { if ($('fhz').value.trim() === '') delete $('fhz').dataset.touched; else $('fhz').dataset.touched = '1'; renderHistory(); });
   $('xmetric').addEventListener('change', () => renderCross());
   $('xfield').addEventListener('change', () => { delete $('xlog').dataset.touched; renderCross(); });
   $('xlog').addEventListener('change', () => { $('xlog').dataset.touched = '1'; renderCross(); });

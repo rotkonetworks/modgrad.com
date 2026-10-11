@@ -1,0 +1,20 @@
+{
+  "name": "modgrad-obs-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "solid-js": "^1.9.10"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "unocss": "^66.5.4",
+    "vite": "^7.1.12",
+    "vite-plugin-solid": "^2.11.6"
+  }
+}

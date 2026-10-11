@@ -138,8 +138,8 @@ pub fn eta(xs: &[f64], mean: &[f64], lo: &[f64], hi: &[f64], target: f64) -> [f6
 
 /// Indices of upward spikes: points that exceed the median of the previous
 /// `window` finite points by more than `k` robust standard deviations
-/// (1.4826 × MAD, floored at 1e-3 of the median's magnitude so flat curves do
-/// not flag noise). Needs a full window before the first detection.
+/// (1.4826 × MAD, floored at 1% of the median's magnitude so smooth or
+/// block-averaged curves do not flag ripples). Needs a full window before the first detection.
 pub fn spikes(vals: &[f64], window: usize, k: f64) -> Vec<u32> {
     let window = window.max(3);
     let mut hist: Vec<f64> = Vec::new();
@@ -154,7 +154,7 @@ pub fn spikes(vals: &[f64], window: usize, k: f64) -> Vec<u32> {
             let med = w[window / 2];
             let mut dev: Vec<f64> = w.iter().map(|x| fabs(x - med)).collect();
             dev.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            let sd = (1.4826 * dev[window / 2]).max(1e-3 * fabs(med)).max(1e-12);
+            let sd = (1.4826 * dev[window / 2]).max(1e-2 * fabs(med)).max(1e-12);
             if v - med > k * sd {
                 out.push(i as u32);
             }

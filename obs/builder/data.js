@@ -96,7 +96,7 @@ export function forecastTrace(A, tr, to, opts = {}) {
     const off = [0], ps = [], pv = [];
     for (const p of opts.pool || []) { const w = windowed(p.xs, p.raw, opts.window); for (let i = 0; i < w.xs.length; i++) { ps.push(w.xs[i]); pv.push(w.raw[i]); } off.push(ps.length); }
     let f = null;
-    try { f = A.forecast(Float64Array.from(fit.xs), Float64Array.from(fit.raw), Uint32Array.from(off), Float64Array.from(ps), Float64Array.from(pv), to, ps.length > 0); } catch (e) { f = null; }
+    try { f = A.forecast_n(Float64Array.from(fit.xs), Float64Array.from(fit.raw), Uint32Array.from(off), Float64Array.from(ps), Float64Array.from(pv), to, ps.length > 0, 1024); } catch (e) { f = null; }
     if (f) {
       const r = { method: f.skill() && method !== 'last' ? 'ridge' : 'last value', skill: f.skill() && method !== 'last', mae: f.mae_test(), naive: f.mae_test_naive(), nTest: f.n_test(), xs: f.steps(), ys: f.mean(), lo: f.lo(), hi: f.hi(), cfg: `L=${f.lookback()} ${f.scaler()}${f.pooled() ? ` pooled(${f.n_pool()})` : ''}` };
       f.free();

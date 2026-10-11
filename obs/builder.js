@@ -25,7 +25,7 @@ let O, A;
 const U = {
   board: null, undo: Bd.makeUndo(), sel: new Set(), lastPick: null, selPanel: null, focus: null,
   group: 'metric', onlySel: false, filter: '', open: new Set(), catalog: '', dataVersion: 0,
-  results: new Map(), seen: new Map(), fresh: new Map(), fcHist: new Map(), events: new Map(),
+  results: new Map(), fcCache: new Map(), seen: new Map(), fresh: new Map(), fcHist: new Map(), events: new Map(),
   settings: { palette: true, events: true, spikes: true }, els: {}, panelEls: new Map(), editing: new Set(),
 };
 
@@ -201,7 +201,7 @@ const fmtStep = (n) => (n >= 1e6 ? +(n / 1e6).toPrecision(3) + 'M' : n >= 1e3 ? 
 const titleOf = (p) => {
   if (p.title) return p.title;
   const pq = parseQ(p.q); if (!pq.ok) return p.q;
-  const ms = pq.chips.filter((c) => c.kind === 'metric' || c.kind === 'formula').map((c) => c.text);
+  const ms = pq.chips.filter((c) => c.kind === 'metric' || c.kind === 'formula').map((c) => (c.text === '*' ? 'all metrics' : c.text));
   return ms.length ? ms.slice(0, 3).join(', ') + (ms.length > 3 ? ` +${ms.length - 3}` : '') : p.q;
 };
 function fieldsOf(runs) {
@@ -447,17 +447,22 @@ function render() {
   const c = U.els.canvas; if (!c) return;
   const fresh = new Map();
   c.innerHTML = '';
+  // panels whose query and view did not change keep their DOM (a 50-series chart is not rebuilt
+  // because another panel changed)
+  const reuse = (p, inFocus) => { const old = U.panelEls.get(p.id); return old && old._done && old._sig === sigOf(p, inFocus) ? old : null; };
+  const make = (p, inFocus) => { const el = panelShell(p, inFocus); el._sig = sigOf(p, inFocus); return el; };
   for (const p of U.board.panels) {
     if (U.focus === p.id) { const ph = h('div', { class: 'bnew' }, c, `"${titleOf(p)}" is open in the focus view`); void ph; continue; }
-    const el = panelShell(p, false); c.appendChild(el); fresh.set(p.id, el);
+    const el = reuse(p, false) || make(p, false); el.classList.toggle('selp', U.selPanel === p.id); c.appendChild(el); fresh.set(p.id, el);
   }
   h('div', { class: 'bnew' }, c, U.board.panels.length ? 'drop series here for a new panel' : 'Drag series from the list onto this area to make a panel (or use their + buttons); drop more onto a panel to overlay them. Presets above build a whole board.');
-  if (U.focus) { const p = findPanel(U.focus); if (p) { U.els.fmain.innerHTML = ''; const el = panelShell(p, true); U.els.fmain.appendChild(el); fresh.set(p.id, el); U.els.ftitle.textContent = titleOf(p); } }
+  if (U.focus) { const p = findPanel(U.focus); if (p) { const el = reuse(p, true) || make(p, true); if (el.parentNode !== U.els.fmain) { U.els.fmain.innerHTML = ''; U.els.fmain.appendChild(el); } fresh.set(p.id, el); U.els.ftitle.textContent = titleOf(p); } }
   U.panelEls = fresh;
   U.els.count.textContent = `${U.board.panels.length} panel${U.board.panels.length === 1 ? '' : 's'}`;
   const tok = (U.renderTok = (U.renderTok || 0) + 1);
-  (async () => { for (const [id, el] of fresh) { if (tok !== U.renderTok) return; const p = findPanel(id); if (p) await fillPanel(p, el, tok); } })();
+  (async () => { for (const [id, el] of fresh) { if (tok !== U.renderTok) return; const p = findPanel(id); if (p && !el._done) await fillPanel(p, el, tok); } })();
 }
+const sigOf = (p, inFocus) => JSON.stringify([p.q, p.title, p.view, U.dataVersion, U.editing.has(p.id), U.settings, inFocus, !!U.focus]);
 function panelShell(p, inFocus) {
   const el = h('div', { class: 'bpanel' + (U.selPanel === p.id ? ' selp' : ''), 'data-pid': p.id, tabindex: 0, role: 'group', 'aria-label': 'panel ' + titleOf(p) });
   el.addEventListener('pointerdown', () => selectPanel(p.id));
@@ -595,7 +600,9 @@ async function fillPanel(p, el, tok) {
   const host = el.querySelector('.bchart'), foot = el.querySelector('.bfootn');
   let res;
   try { res = await evaluate(p); } catch (e) { res = { ok: false, error: String(e.message || e) }; }
+  if (res.ok && U.settings.events && res.meta.x_label === 'step') await Promise.all([...new Set(res.traces.flatMap((t) => t.runs))].map(eventsOf));
   if (tok !== U.renderTok || !el.isConnected) return;
+  el._done = true;
   host.innerHTML = ''; foot.innerHTML = '';
   if (!res.ok) { h('div', { class: 'bempty' }, host, 'query error (see above)'); return; }
   const meta = res.meta;
@@ -626,11 +633,15 @@ async function fillPanel(p, el, tok) {
       if (hiddenTrace(p, t)) continue;
       const pool = p.view.fc.pool === 'none' ? [] : traces.filter((o) => o !== t && (p.view.fc.pool === 'group' ? o.letter === t.letter : o.metric === t.metric));
       let f;
-      const fr = p.view.fc.frozen && p.view.fc.frozen[t.label];
+      const fr = p.view.fc.frozen && p.view.fc.frozen[traceKey(t)];
       if (!p.view.fc.live && fr) f = fr;
-      else f = Dt.forecastTrace(A, t, to, { method: fc.method, window: p.view.fc.window, band: p.view.fc.band, pool });
+      else {
+        const ck = JSON.stringify([p.q, t.label, to, fc.method, p.view.fc.window, p.view.fc.band, p.view.fc.pool, U.dataVersion]);
+        f = U.fcCache.get(ck);
+        if (!f) { f = Dt.forecastTrace(A, t, to, { method: fc.method, window: p.view.fc.window, band: p.view.fc.band, pool }); if (U.fcCache.size > 400) U.fcCache.clear(); U.fcCache.set(ck, f); }
+      }
       fcs.set(t.label, f);
-      const hk = p.id + '\u0001' + t.label, hist = U.fcHist.get(hk);
+      const hk = p.id + '\u0001' + traceKey(t), hist = U.fcHist.get(hk);
       if (f && !f.none) {
         if (!hist) U.fcHist.set(hk, { cur: f, prev: null });
         else if (hist.cur.lastX !== f.lastX) U.fcHist.set(hk, { cur: f, prev: hist.cur });
@@ -705,13 +716,10 @@ async function fillPanel(p, el, tok) {
   } else if (meta.forecast && !isStep) h('div', { class: 'bnote' }, foot, 'forecasts are drawn on the step axis only');
   if (meta.downsampled) h('div', { class: 'bnote' }, foot, `long series block-averaged to ${MAX_POINTS} points (longest ${meta.downsampled}); legend statistics are over block means`);
   for (const w of meta.warnings) h('div', { class: 'bnote' }, foot, w);
-  // events for the overlay markers (fetched lazily, then redraw once)
-  if (U.settings.events && isStep) {
-    const ids = [...new Set(traces.flatMap((t) => t.runs))].filter((r) => !U.events.has(r));
-    if (ids.length) { await Promise.all(ids.map(eventsOf)); if (tok === U.renderTok && el.isConnected) fillPanel(p, el, tok); }
-  }
 }
 function ensureGroup(name) { return O.zoomGroup(name); }
+// stable across data updates (labels carry counts like n=3)
+const traceKey = (t) => `${t.letter}|${t.metric}|${t.runs[0]}`;
 const hiddenTrace = (p, t) => p.view.hidden.includes(t.label) || (p.view.solo && p.view.solo !== t.label);
 function defaultHorizon(traces) {
   let lo = Infinity, hi = -Infinity, planned = 0;
@@ -803,7 +811,7 @@ function drawOverlay(p, api, series, fcs, isStep, fc) {
   if (!fc) return;
   // previous forecasts: faint dotted traces, so forecast vs reality stays visible
   for (const s of vis) {
-    const hist = U.fcHist.get(p.id + '\u0001' + s.trace.label);
+    const hist = U.fcHist.get(p.id + '\u0001' + traceKey(s.trace));
     if (!hist || !hist.prev) continue;
     const f = hist.prev; const pts = [];
     for (let i = 0; i < f.xs.length; i++) { const v = ty(f.ys[i]); if (Number.isFinite(v)) pts.push(`${X(f.xs[i]).toFixed(1)},${Y(v).toFixed(1)}`); }

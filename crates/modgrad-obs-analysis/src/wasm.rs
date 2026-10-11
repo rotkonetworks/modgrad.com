@@ -493,3 +493,20 @@ pub fn forecast_eta(xs: &[f64], mean: &[f64], lo: &[f64], hi: &[f64], target: f6
 pub fn spikes(vals: &[f64], window: usize, k: f64) -> Vec<u32> {
     crate::curve::spikes(vals, window, k)
 }
+
+/// [`forecast`] with a cap on the number of rolled-out points (`forecast`
+/// uses 64); the builder's horizon handle can reach far past the data.
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn forecast_n(steps: &[f64], vals: &[f64], pool_off: &[u32], pool_steps: &[f64], pool_vals: &[f64], horizon_step: f64, allow_pool: bool, max_points: usize) -> Option<ForecastOut> {
+    let pool: Vec<(&[f64], &[f64])> = pool_off
+        .windows(2)
+        .map(|w| (w[0] as usize, w[1] as usize))
+        .filter(|&(a, b)| a <= b && b <= pool_steps.len() && b <= pool_vals.len())
+        .map(|(a, b)| (&pool_steps[a..b], &pool_vals[a..b]))
+        .collect();
+    let mut opt = crate::forecast::Options::to_step(horizon_step);
+    opt.allow_pool = allow_pool;
+    opt.max_points = max_points.clamp(1, 1024);
+    crate::forecast::forecast(steps, vals, &pool, &opt).map(|inner| ForecastOut { inner })
+}

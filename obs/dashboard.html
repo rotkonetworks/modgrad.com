@@ -816,6 +816,7 @@ const src = {
   events: (run) => S.api ? `api/runs/${enc(run.id)}/events` : run.path + '/events.json',
 };
 async function metricSeries(run, key) {
+  if (run.data && run.data[key]) return { steps: run.data[key].step, values: nums(run.data[key].value) }; // inline rows (local drop, live feed)
   if (!S.api && run.has_small) {
     const sm = await getJSON(run.path + '/metrics.small.json');
     return { steps: sm.step, values: nums(sm.keys[key] || []) };

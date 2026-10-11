@@ -115,31 +115,52 @@ pub fn trend(steps: &[f64], vals: &[f64]) -> Option<Trend> {
 /// Below this many points spikes and plateaus are not judged.
 pub const MIN_SHAPE_POINTS: usize = 7;
 
-/// Spikes: robust z-score (0.6745·r/MAD) of residuals from a centred
-/// rolling median of width 5; |z| > 3.5. Returns `(index, z)`.
+/// Spikes: robust z-score (0.6745·r/MAD) of residuals; |z| > 3.5.
+/// Interior residuals are from a centred rolling median of width 5. The
+/// first two points are never judged (the opening drop of a loss curve is
+/// not a spike); the last two are judged against a straight line through
+/// the four points before them, so a spike at the latest step is found.
+/// Returns `(index, z)`.
 pub fn spikes(vals: &[f64]) -> Vec<(usize, f64)> {
     let n = vals.len();
     if n < MIN_SHAPE_POINTS {
         return Vec::new();
     }
-    let r: Vec<f64> = (0..n)
+    let line_at = |idx: &[usize], at: usize| -> f64 {
+        let k = idx.len() as f64;
+        let mx = idx.iter().map(|&i| i as f64).sum::<f64>() / k;
+        let my = idx.iter().map(|&i| vals[i]).sum::<f64>() / k;
+        let sxx: f64 = idx.iter().map(|&i| (i as f64 - mx).powi(2)).sum();
+        let sxy: f64 = idx.iter().map(|&i| (i as f64 - mx) * (vals[i] - my)).sum();
+        let b = if sxx > 0.0 { sxy / sxx } else { 0.0 };
+        my + b * (at as f64 - mx)
+    };
+    let r: Vec<f64> = (2..n)
         .map(|i| {
-            let lo = i.saturating_sub(2);
-            let hi = (i + 3).min(n);
-            vals[i] - median(&vals[lo..hi])
+            if i + 2 < n {
+                vals[i] - median(&vals[i - 2..i + 3])
+            } else {
+                let idx: Vec<usize> = (i.saturating_sub(4)..i).collect();
+                vals[i] - line_at(&idx, i)
+            }
         })
         .collect();
-    let mr = median(&r);
-    let dev: Vec<f64> = r.iter().map(|x| (x - mr).abs()).collect();
+    let interior = &r[..r.len().saturating_sub(2)];
+    let mr = median(interior);
+    let dev: Vec<f64> = interior.iter().map(|x| (x - mr).abs()).collect();
     let mut mad = median(&dev);
     if !(mad > 0.0) {
         // more than half the residuals are exactly zero: fall back to the mean deviation
-        mad = dev.iter().sum::<f64>() / n as f64 * 0.7979;
+        mad = dev.iter().sum::<f64>() / dev.len().max(1) as f64 * 0.7979;
     }
+    // a clean curve has ~zero residuals; never call a wiggle of a few
+    // tenths of a percent of the curve's level a spike
+    let level = median(&vals.iter().map(|v| v.abs()).collect::<Vec<_>>());
+    mad = mad.max(2e-3 * level);
     if !(mad > 0.0) {
         return Vec::new();
     }
-    r.iter().enumerate().map(|(i, x)| (i, 0.6745 * (x - mr) / mad)).filter(|(_, z)| z.abs() > 3.5).collect()
+    r.iter().enumerate().map(|(j, x)| (j + 2, 0.6745 * (x - mr) / mad)).filter(|(_, z)| z.abs() > 3.5).collect()
 }
 
 /// Plateau: enough points, no clear recent trend, and the recent window
@@ -215,6 +236,17 @@ mod tests {
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].0, 17);
         assert!(spikes(&v[..5]).is_empty());
+    }
+
+    #[test]
+    fn no_spikes_on_clean_curves() {
+        let line: Vec<f64> = (0..60).map(|i| 2.0 - 0.01 * i as f64).collect();
+        assert!(spikes(&line).is_empty(), "{:?}", spikes(&line));
+        let decay: Vec<f64> = (0..31).map(|i| 2.5 + 2.5 * (-(i as f64) / 3.0).exp() + 0.03 * ((i * 7 % 5) as f64 - 2.0) / 2.0).collect();
+        assert!(spikes(&decay).iter().all(|(i, _)| *i > 3), "{:?}", spikes(&decay));
+        let mut last = line.clone();
+        last[59] += 0.5;
+        assert_eq!(spikes(&last).iter().map(|s| s.0).collect::<Vec<_>>(), vec![59]);
     }
 
     #[test]

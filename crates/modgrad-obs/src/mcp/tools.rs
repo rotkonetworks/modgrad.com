@@ -157,6 +157,71 @@ fn series(rd: &RunData, key: &str) -> (Vec<f64>, Vec<f64>) {
     (m.keys().map(|&s| s as f64).collect(), m.values().copied().collect())
 }
 
+/// Non-finite (NaN/inf) rows of `key`: `(count, first such step, last
+/// finite step before it)`. A run whose loss turns NaN has diverged.
+fn nonfinite(rd: &RunData, key: &str) -> Option<(usize, u64, Option<u64>)> {
+    let all = rd.series(key);
+    let bad: Vec<u64> = all.iter().filter(|(_, v)| !v.is_finite()).map(|(s, _)| *s).collect();
+    let first = *bad.iter().min()?;
+    let before = all.iter().filter(|(s, v)| v.is_finite() && *s < first).map(|(s, _)| *s).max();
+    Some((bad.len(), first, before))
+}
+
+fn nonfinite_line(rd: &RunData, key: &str) -> Option<String> {
+    let (n, first, before) = nonfinite(rd, key)?;
+    Some(format!(
+        "WARNING: {n} value{} of {key} {} NaN/inf (not shown above), from step {first}{}. The run diverged there.",
+        if n == 1 { "" } else { "s" },
+        if n == 1 { "is" } else { "are" },
+        before.map(|b| format!("; the last finite value is at step {b}")).unwrap_or_default()
+    ))
+}
+
+/// Divergence before NaN: the curve rose far above its best after the
+/// best point (e.g. loss tripled). Returns (best step, first step it
+/// rose past 1.5x the best, value there) for lower-is-better metrics.
+fn blowup(st: &[f64], v: &[f64], d: Dir) -> Option<(f64, f64, f64)> {
+    if d != Dir::Lower || v.len() < 5 {
+        return None;
+    }
+    let ib = (0..v.len()).fold(0, |b, i| if v[i] < v[b] { i } else { b });
+    let best = v[ib];
+    if !(best > 0.0) {
+        return None;
+    }
+    let j = (ib + 1..v.len()).find(|&i| v[i] > 1.5 * best)?;
+    // and it stays bad: the latest point is also far above the best
+    (v[v.len() - 1] > 1.3 * best).then_some((st[ib], st[j], v[j]))
+}
+
+/// Other metrics that changed sharply at or just before `step` (within
+/// `window` steps): e.g. lr 1e-4 -> 1e-3. Only metrics with no better
+/// direction (lr, batch size, grad norm, ...) are considered.
+fn changes_near(rd: &RunData, skip: &str, step: f64, window: f64) -> Vec<String> {
+    let mut out = Vec::new();
+    for k in rd.metric_keys() {
+        if k == skip || analysis::direction(&k) != Dir::Unknown {
+            continue;
+        }
+        let (st, v) = series(rd, &k);
+        let mut best: Option<(f64, usize)> = None;
+        for i in 1..v.len() {
+            if st[i] > step || st[i] < step - window {
+                continue;
+            }
+            let (a, b) = (v[i - 1], v[i]);
+            let rel = if a.abs() > 0.0 { ((b - a) / a).abs() } else if b != 0.0 { f64::INFINITY } else { 0.0 };
+            if rel > 0.3 && best.is_none_or(|(r, _)| rel > r) {
+                best = Some((rel, i));
+            }
+        }
+        if let Some((_, i)) = best {
+            out.push(format!("{k} changed {} → {} at step {}", fmt(v[i - 1]), fmt(v[i]), step_s(st[i])));
+        }
+    }
+    out
+}
+
 fn resolve_metric_in(q: &str, keys: &[String], run_label: &str, tool: &str, run_arg: &str) -> Result<(String, Option<String>), String> {
     match resolve_metric(q, keys) {
         Resolved::One { key, note } => Ok((key, note)),
@@ -471,7 +536,8 @@ pub fn read_metric(store: &dyn Store, a: &Args) -> ToolResult {
     let (key, note) = resolve_metric_in(&mq, &keys, &format!("run {run}"), "read_metric", &format!("run=\"{run}\""))?;
     let (st, v) = series(&rd, &key);
     if v.is_empty() {
-        return Err(format!("Metric {key} in run {run} has no finite values. Try another metric: {}.", keys.iter().take(10).cloned().collect::<Vec<_>>().join(", ")));
+        let why = nonfinite_line(&rd, &key).map(|l| format!(" {l}")).unwrap_or_default();
+        return Err(format!("Metric {key} in run {run} has no finite values.{why} Try another metric: {}.", keys.iter().take(10).cloned().collect::<Vec<_>>().join(", ")));
     }
     let want = a.num(&["last", "n", "limit", "count", "rows", "tail"]).map(|x| x.max(1.0) as usize).unwrap_or(15);
     let show = want.min(40).min(v.len());
@@ -487,6 +553,9 @@ pub fn read_metric(store: &dyn Store, a: &Args) -> ToolResult {
     }
     let (imin, imax) = (0..v.len()).fold((0, 0), |(a, b), i| (if v[i] < v[a] { i } else { a }, if v[i] > v[b] { i } else { b }));
     out.push_str(&format!("\nmin {} at step {}, max {} at step {}, last {} at step {}.", fmt(v[imin]), st[imin], fmt(v[imax]), st[imax], fmt(v[v.len() - 1]), st[st.len() - 1]));
+    if let Some(l) = nonfinite_line(&rd, &key) {
+        out.push_str(&format!("\n{l}"));
+    }
     out.push_str(&format!("\nNext: summarize(run=\"{run}\", metric=\"{key}\") for trend and forecast, or compare(runs=\"{run},OTHER\", metric=\"{key}\")."));
     Ok(out)
 }
@@ -564,6 +633,12 @@ fn metric_report(rd: &RunData, key: &str, target: Option<f64>, pool: &[(Vec<f64>
         format!("; best {} at step {} ({} points ago)", fmt(v[ib]), step_s(st[ib]), n - 1 - ib)
     };
     out.push(format!("- {key} ({}): last {} at step {}{best}; {n} points.", d.phrase(), fmt(last), step_s(st[n - 1])));
+    if let Some(l) = nonfinite_line(rd, key) {
+        out.push(format!("  {l}"));
+    }
+    if let Some((bs, js, jv)) = blowup(&st, &v, d) {
+        out.push(format!("  Blow-up: best at step {}, then it rose to {} by step {} (over 1.5x the best) and stayed high.", step_s(bs), fmt(jv), step_s(js)));
+    }
     match analysis::trend(&st, &v) {
         Some(t) => {
             out.push(format!(
@@ -583,15 +658,30 @@ fn metric_report(rd: &RunData, key: &str, target: Option<f64>, pool: &[(Vec<f64>
                 } else {
                     sp.iter().take(4).map(|(i, z)| format!("step {} ({}, robust z {})", step_s(st[*i]), fmt(v[*i]), fmt(*z))).collect::<Vec<_>>().join(", ")
                 };
+                // what else changed right before the biggest spike
+                let ctx = sp.iter().max_by(|a, b| a.1.abs().total_cmp(&b.1.abs())).map(|(i, _)| {
+                    let w = 3.0 * analysis::spacing(&st);
+                    (st[*i], changes_near(rd, key, st[*i], w))
+                });
                 let pl = if analysis::plateau(&v, &t) { "yes, the recent points moved less than 10% of the curve's range" } else { "no" };
                 out.push(format!("  Spikes: {sp_s}. Plateau: {pl}."));
+                if let Some((at, ch)) = ctx.filter(|(_, c)| !c.is_empty()) {
+                    out.push(format!("  Just before the spike at step {}: {}. That change is a likely cause.", step_s(at), ch.join("; ")));
+                }
             } else {
                 out.push(format!("  Spikes/plateau: too few points to judge ({n}, need {}).", analysis::MIN_SHAPE_POINTS));
             }
         }
         None => out.push(format!("  Trend: too few points ({n}, need 3).")),
     }
-    // forecast
+    // forecast (meaningless once the run diverged)
+    if nonfinite(rd, key).is_some() || blowup(&st, &v, d).is_some() {
+        out.push("  Forecast: none, the run diverged.".to_string());
+        if let Some(y) = target {
+            out.push(format!("  Target {}: no ETA, the run diverged.", fmt(y)));
+        }
+        return out;
+    }
     match analysis::forecast_points(&st, &v, pool, horizon) {
         None => {
             let why = if n < modgrad_obs_analysis::forecast::MIN_POINTS {
@@ -669,6 +759,58 @@ fn metric_report(rd: &RunData, key: &str, target: Option<f64>, pool: &[(Vec<f64>
     out
 }
 
+/// One plain sentence on where `key` stands: diverged, improving (with or
+/// without a skilled forecast), no clear progress, or getting worse.
+fn verdict(rd: &RunData, key: &str, pool: &[(Vec<f64>, Vec<f64>)]) -> Option<String> {
+    if let Some((_, first, _)) = nonfinite(rd, key) {
+        return Some(format!("{key} DIVERGED: it became NaN/inf at step {first}. Do not continue this run as is."));
+    }
+    let (st, v) = series(rd, key);
+    let d = analysis::direction(key);
+    if let Some((bs, js, _)) = blowup(&st, &v, d) {
+        return Some(format!("{key} DIVERGED: best at step {}, then it blew up from step {}. Do not continue this run as is.", step_s(bs), step_s(js)));
+    }
+    let t = analysis::trend(&st, &v)?;
+    let fc = analysis::forecast_points(&st, &v, pool, 8);
+    let fc_s = match &fc {
+        Some(f) if f.skill => format!("the forecast (which beat last-value on backtest) says {} by step {}", fmt(f.mean[f.mean.len() - 1]), step_s(f.steps[f.steps.len() - 1])),
+        Some(_) => "the forecast has no skill (it did not beat repeating the last value), so expect about the current value".to_string(),
+        None => "too little history for a forecast".to_string(),
+    };
+    let words = trend_words(&t, d);
+    Some(if !t.clear() || analysis::plateau(&v, &t) {
+        format!("{key} shows no clear progress (plateau / change smaller than the noise); {fc_s}. More steps of the same are unlikely to help much.")
+    } else if words == "improving" {
+        format!("{key} is still improving ({} per {} steps); {fc_s}. Continuing is likely to help.", fmt_signed(t.slope * t.per), step_s(t.per))
+    } else if words == "getting worse" {
+        format!("{key} is getting worse ({} per {} steps).", fmt_signed(t.slope * t.per), step_s(t.per))
+    } else {
+        format!("{key} is {words} ({} per {} steps); {fc_s}.", fmt_signed(t.slope * t.per), step_s(t.per))
+    })
+}
+
+/// "val loss rising while train loss falls": the overfitting signature.
+fn overfit_note(rd: &RunData) -> Option<String> {
+    let keys = rd.metric_keys();
+    let is_eval = |k: &str| ["val", "heldout", "eval", "test", "valid"].iter().any(|w| k.to_lowercase().contains(w));
+    let lossy = |k: &str| analysis::direction(k) == Dir::Lower;
+    let ev = keys.iter().find(|k| is_eval(k) && lossy(k))?;
+    let tr = keys.iter().find(|k| !is_eval(k) && lossy(k) && k.to_lowercase().contains("loss"))?;
+    let tr_t = { let (s, v) = series(rd, tr); analysis::trend(&s, &v)? };
+    let ev_t = { let (s, v) = series(rd, ev); analysis::trend(&s, &v)? };
+    if !(ev_t.clear() && ev_t.slope > 0.0 && tr_t.clear() && tr_t.slope < 0.0) {
+        return None;
+    }
+    let (es, evv) = series(rd, ev);
+    let ib = (0..evv.len()).fold(0, |b, i| if evv[i] < evv[b] { i } else { b });
+    Some(format!(
+        "OVERFITTING: {ev} is getting worse while {tr} still improves. {ev} was best at step {} ({}); continuing will likely make it worse, so stop or use the step-{} checkpoint.",
+        step_s(es[ib]),
+        fmt(evv[ib]),
+        step_s(es[ib])
+    ))
+}
+
 /// Runs in the same seed group as `run` (including itself), sorted.
 fn seed_group(names: &[String], run: &str) -> Vec<String> {
     let base = analysis::seed_base(run);
@@ -726,6 +868,17 @@ pub fn summarize(store: &dyn Store, a: &Args) -> ToolResult {
         out.push(format!("(target applies to {})", metrics[0]));
     }
     let others: Vec<RunData> = group.iter().filter(|g| **g != run).filter_map(|g| store.load(g).ok()).collect();
+    {
+        let pool: Vec<(Vec<f64>, Vec<f64>)> = others.iter().map(|o| series(o, &metrics[0])).filter(|(s, _)| s.len() >= 2).collect();
+        let mut v: Vec<String> = Vec::new();
+        match overfit_note(&rd) {
+            Some(o) => v.push(o),
+            None => v.extend(verdict(&rd, &metrics[0], &pool)),
+        }
+        if !v.is_empty() {
+            out.push(format!("Verdict: {}", v.join(" ")));
+        }
+    }
     for (i, k) in metrics.iter().enumerate() {
         let pool: Vec<(Vec<f64>, Vec<f64>)> = others.iter().map(|o| series(o, k)).filter(|(s, _)| s.len() >= 2).collect();
         out.extend(metric_report(&rd, k, if i == 0 { target } else { None }, &pool, horizon));
@@ -746,6 +899,21 @@ pub fn summarize(store: &dyn Store, a: &Args) -> ToolResult {
             }
         }
     }
+    if group.len() >= 2 {
+        // other seed groups next to this one: abl/base_s* -> abl/wd_s*, abl/warmup_s*
+        let parent = run.rsplit_once('/').map(|(p, _)| format!("{p}/")).unwrap_or_default();
+        let base = analysis::seed_base(&run);
+        let sibs: BTreeSet<String> = names.iter().filter(|n| n.starts_with(&parent) && analysis::seed_base(n) != base && analysis::seed_base(n) != **n).map(|n| analysis::seed_base(n)).collect();
+        if let Some(sib) = sibs.iter().next() {
+            out.push(format!(
+                "Other seed groups here: {}. To test a difference against seed noise: compare(runs=\"{}*,{}*\", metric=\"{}\").",
+                sibs.iter().take(6).cloned().collect::<Vec<_>>().join(", "),
+                group[0].trim_end_matches(|c: char| c.is_ascii_digit()),
+                names.iter().find(|n| analysis::seed_base(n) == *sib).map(|n| n.trim_end_matches(|c: char| c.is_ascii_digit()).to_string()).unwrap_or_default(),
+                metrics[0]
+            ));
+        }
+    }
     out.push(format!(
         "Next: read_metric(run=\"{run}\", metric=\"{}\") for the raw values; summarize(run=\"{run}\", metric=\"{}\", target=…) for an ETA; compare(runs=\"{}\", metric=\"{}\").",
         metrics[0],
@@ -757,6 +925,66 @@ pub fn summarize(store: &dyn Store, a: &Args) -> ToolResult {
 }
 
 // ---------------------------------------------------------------- compare
+
+fn datas_name(runs: &[String], keep: &[usize], i: usize) -> String {
+    keep.iter().position(|&k| k == i).map(|j| runs[j].clone()).unwrap_or_default()
+}
+
+/// When the runs form seed groups (`x_s1, x_s2, …`), mean ± sd per group
+/// at one step and whether each difference to the best group is within
+/// seed noise (Welch t = diff / sqrt(sd1²/n1 + sd2²/n2); |t| < 2 = noise).
+fn seed_groups_report(runs: &[String], ser: &[BTreeMap<u64, f64>], common: &[u64], d: Dir, key: &str) -> Option<Vec<String>> {
+    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    for (i, r) in runs.iter().enumerate() {
+        let b = analysis::seed_base(r);
+        match groups.iter_mut().find(|(g, _)| *g == b) {
+            Some((_, v)) => v.push(i),
+            None => groups.push((b, vec![i])),
+        }
+    }
+    if groups.len() < 2 || !groups.iter().any(|(_, v)| v.len() >= 2) {
+        return None;
+    }
+    let mut out = vec![format!("Seed groups ({} groups; mean ± sd over seeds):", groups.len())];
+    let mut stats: Vec<(String, f64, f64, usize, u64)> = Vec::new();
+    for (g, idx) in &groups {
+        // one step for all groups if possible, else this group's latest shared step
+        let step = common.last().copied().or_else(|| {
+            let sets: Vec<BTreeSet<u64>> = idx.iter().map(|&i| ser[i].keys().copied().collect()).collect();
+            sets.iter().skip(1).fold(sets[0].clone(), |a, s| a.intersection(s).copied().collect()).into_iter().next_back()
+        })?;
+        let vals: Vec<f64> = idx.iter().filter_map(|&i| ser[i].get(&step).copied()).collect();
+        let (m, sd) = analysis::mean_sd(&vals);
+        out.push(format!("  {g}: {} ± {} at step {step} (n={})", fmt(m), if vals.len() >= 2 { fmt(sd) } else { "n/a".into() }, vals.len()));
+        stats.push((g.clone(), m, if vals.len() >= 2 { sd } else { f64::NAN }, vals.len(), step));
+    }
+    let bi = (0..stats.len()).fold(0, |b, i| if d.better(stats[i].1, stats[b].1) { i } else { b });
+    let bg = stats[bi].0.clone();
+    // every pair when there are few groups, else each group against the best
+    let pairs: Vec<(usize, usize)> = if stats.len() <= 4 {
+        (0..stats.len()).flat_map(|i| (i + 1..stats.len()).map(move |j| (i, j))).collect()
+    } else {
+        (0..stats.len()).filter(|&i| i != bi).map(|i| (i, bi)).collect()
+    };
+    for (i, j) in pairs {
+        // report "worse vs better" so the difference reads as how much worse
+        let (i, j) = if d.better(stats[i].1, stats[j].1) { (j, i) } else { (i, j) };
+        let (g, m, sd, n, _) = &stats[i];
+        let (bg, bm, bsd, bn, _) = stats[j].clone();
+        let diff = m - bm;
+        let se = (bsd.powi(2) / bn as f64 + sd.powi(2) / *n as f64).sqrt();
+        let line = if !se.is_finite() || se == 0.0 {
+            format!("  {g} vs {bg}: difference {} on {key}; cannot judge against seed noise (needs ≥2 seeds per group).", fmt_signed(diff))
+        } else {
+            let t = diff / se;
+            let verdict = if t.abs() < 2.0 { "WITHIN seed noise: not a real difference at this sample size" } else { "BEYOND seed noise: a real difference" };
+            format!("  {g} vs {bg}: difference {} (standard error {}, t = {}) → {verdict}.", fmt_signed(diff), fmt(se), fmt(t))
+        };
+        out.push(line);
+    }
+    out.push(format!("  ({bg} is the best group by mean. With few seeds this is a rough check; more seeds tighten it.)"));
+    Some(out)
+}
 
 fn short_names(runs: &[String]) -> Vec<String> {
     let first = runs[0].rsplit_once('/').map(|(p, _)| format!("{p}/"));
@@ -789,7 +1017,7 @@ pub fn compare(store: &dyn Store, a: &Args) -> ToolResult {
     if keep.len() < 2 {
         return Err(format!("Only {} of these runs log {key} ({}). Pick runs that have it; list_runs() shows names.", keep.len(), keep.iter().map(|&i| runs[i].as_str()).collect::<Vec<_>>().join(", ")));
     }
-    let cap_runs = 8;
+    let cap_runs = 12;
     let truncated_runs = keep.len() > cap_runs;
     let keep: Vec<usize> = keep.into_iter().take(cap_runs).collect();
     runs = keep.iter().map(|&i| runs[i].clone()).collect();
@@ -866,6 +1094,21 @@ pub fn compare(store: &dyn Store, a: &Args) -> ToolResult {
     let bb = pick_best(&bests);
     if d != Dir::Unknown && bb != bl {
         out.push(format!("Best value ever: {} = {}.", runs[bb], fmt(bests[bb].1)));
+    }
+    if let Some(seed_lines) = seed_groups_report(&runs, &ser, &common, d, &key) {
+        out.extend(seed_lines);
+    }
+    let diverged: Vec<String> = keep.iter().filter_map(|&i| nonfinite(&datas[i], &key).map(|(_, f, _)| format!("{} (NaN/inf from step {f})", datas_name(&runs, &keep, i)))).collect();
+    if !diverged.is_empty() {
+        out.push(format!("DIVERGED: {}. Their NaN/inf rows are left out of the table.", diverged.join(", ")));
+    }
+    for (j, &i) in keep.iter().enumerate() {
+        let (st, v) = series(&datas[i], &key);
+        if nonfinite(&datas[i], &key).is_none()
+            && let Some((bs, js, _)) = blowup(&st, &v, d)
+        {
+            out.push(format!("DIVERGED: {} blew up after its best at step {} (over 1.5x the best from step {}).", runs[j], step_s(bs), step_s(js)));
+        }
     }
     if !missing.is_empty() {
         out.push(format!("Not compared (no {key}): {}.", missing.join(", ")));

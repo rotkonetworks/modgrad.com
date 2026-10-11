@@ -2,6 +2,7 @@
 //! formatting for the MCP tools.
 
 use serde_json::Value;
+use std::collections::BTreeSet;
 
 /// A number from JSON: `3.4`, `"3.4"`, `"7.5%"` (→ 7.5), `"3e-4"`,
 /// `"1,234"` (→ 1234). `None` for anything else.
@@ -87,6 +88,48 @@ const ALIASES: &[&[&str]] = &[
     &["memory", "rss", "rss_kb", "mem", "peak_mem"],
 ];
 
+/// Words that mean the same thing in metric names, by concept. A query
+/// matches a key by meaning when every concept of the query is among the
+/// key's concepts ("validation loss" -> `eval/nll`, not `train/loss`).
+const CONCEPTS: &[(&str, &[&str])] = &[
+    ("EVAL", &["val", "valid", "validation", "eval", "evaluation", "heldout", "held", "holdout", "dev", "test"]),
+    ("TRAIN", &["train", "training", "tr"]),
+    ("LOSS", &["loss", "nll", "ce", "xent", "crossentropy", "objective"]),
+    ("ACC", &["acc", "accuracy", "top1", "acc1", "correct"]),
+    ("PPL", &["ppl", "perplexity"]),
+    ("LR", &["lr", "learning", "learningrate"]),
+    ("REWARD", &["reward", "rewards", "return", "returns", "rew"]),
+    ("KL", &["kl", "approx_kl", "approxkl", "kld", "divergence"]),
+    ("ENTROPY", &["entropy", "ent"]),
+    ("GRAD", &["grad", "gradient", "gnorm", "gradnorm"]),
+];
+
+/// The concepts named by a metric name's tokens (unknown tokens are kept
+/// as themselves, minus filler words).
+fn concepts(name: &str) -> BTreeSet<String> {
+    let n = norm_key(name);
+    let mut out = BTreeSet::new();
+    for t in n.split('_').filter(|t| !t.is_empty()) {
+        if ["the", "of", "set", "mean", "avg", "average", "value", "rate", "metric", "score", "ep", "rollout", "approx"].contains(&t) {
+            continue;
+        }
+        match CONCEPTS.iter().find(|(_, ws)| ws.contains(&t)) {
+            Some((c, _)) => out.insert(c.to_string()),
+            None => out.insert(t.to_string()),
+        };
+    }
+    out
+}
+
+/// Keys whose concepts include all of the query's.
+fn by_meaning(q: &str, keys: &[String]) -> Vec<String> {
+    let qc = concepts(q);
+    if qc.is_empty() {
+        return Vec::new();
+    }
+    keys.iter().filter(|k| qc.is_subset(&concepts(k))).cloned().collect()
+}
+
 /// Outcome of resolving a user-typed metric name against a run's keys.
 pub enum Resolved {
     /// One clear match; `note` says how it was matched when not exact.
@@ -137,9 +180,29 @@ pub fn resolve_metric(q: &str, keys: &[String]) -> Resolved {
         .cloned()
         .collect();
     match sub.len() {
-        1 => Resolved::One { key: sub[0].clone(), note: Some(format!("{q:?} matched {:?}", sub[0])) },
-        0 => Resolved::None(closest(q, keys, 5).into_iter().map(String::from).collect()),
-        _ => Resolved::Many(sub),
+        1 => return Resolved::One { key: sub[0].clone(), note: Some(format!("{q:?} matched {:?}", sub[0])) },
+        0 => {}
+        _ => return Resolved::Many(sub),
+    }
+    // by meaning: "validation loss" -> eval/nll
+    let mean = by_meaning(q, keys);
+    match mean.len() {
+        1 => Resolved::One { key: mean[0].clone(), note: Some(format!("{q:?} matched {:?} by meaning ({}); check this is the metric you meant", mean[0], concepts(q).into_iter().collect::<Vec<_>>().join(" + ").to_lowercase())) },
+        0 => {
+            // suggestions: keys sharing the most concepts first, then by spelling
+            let qc = concepts(q);
+            let mut sug: Vec<String> = Vec::new();
+            let mut scored: Vec<(usize, &String)> = keys.iter().map(|k| (qc.intersection(&concepts(k)).count(), k)).filter(|(n, _)| *n > 0).collect();
+            scored.sort_by(|a, b| b.0.cmp(&a.0));
+            sug.extend(scored.into_iter().take(5).map(|(_, k)| k.clone()));
+            for c in closest(q, keys, 5) {
+                if sug.len() < 5 && !sug.iter().any(|s| s == c) {
+                    sug.push(c.to_string());
+                }
+            }
+            Resolved::None(sug)
+        }
+        _ => Resolved::Many(mean),
     }
 }
 

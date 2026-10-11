@@ -34,7 +34,11 @@ function Spark(props: { col: EvalCol; runs: string[]; data: Map<string, SeriesDa
 
 /** Evals tab: checkpoints x benchmarks for metrics named eval/<benchmark>/<metric> */
 export default function EvalsView() {
-  const runs = createMemo(() => { runsVersion(); catalogVersion(); const sel = selectedRuns(); return (sel.length ? sel : S.runs).filter((r) => Object.keys(r.metrics).some((m) => m.startsWith('eval/'))); });
+  // the selected runs with evals; when none of them has any (e.g. the selection leaves out the demo
+  // runs that do), every run with evals, said so above the table rather than an empty tab
+  const hasEval = (r: { metrics: Record<string, unknown> }) => Object.keys(r.metrics).some((m) => m.startsWith('eval/'));
+  const scope = createMemo((): 'selected' | 'every' | 'unselected' => { runsVersion(); catalogVersion(); const sel = selectedRuns(); return !sel.length ? 'every' : sel.some(hasEval) ? 'selected' : 'unselected'; });
+  const runs = createMemo(() => { runsVersion(); catalogVersion(); return (scope() === 'selected' ? selectedRuns() : S.runs).filter(hasEval); });
   const cols = createMemo(() => evalColumns(runs().flatMap((r) => Object.keys(r.metrics))));
   const runIds = () => runs().map((r) => r.id);
   const [data] = createResource(() => ({ ids: runIds(), cols: cols().map((c) => c.name), v: runIds().map((r) => runVersion(r)).join(',') }), async ({ ids, cols }) => {
@@ -61,10 +65,10 @@ export default function EvalsView() {
     <section class="evalsview">
       <h2>Evals</h2>
       <Show when={cols().length} fallback={
-        <div class="note">No eval metrics in the {selectedRuns().length ? 'selected' : ''} runs. Log them as <code>eval/&lt;benchmark&gt;/&lt;metric&gt;</code> at each checkpoint step, e.g. <code>{'{'}"step": 2000, "eval/gsm8k/acc": 0.41, "eval/wikitext/ppl": 18.2{'}'}</code>.</div>
+        <div class="note">No eval metrics in any run. Log them as <code>eval/&lt;benchmark&gt;/&lt;metric&gt;</code> at each checkpoint step, e.g. <code>{'{'}"step": 2000, "eval/gsm8k/acc": 0.41, "eval/wikitext/ppl": 18.2{'}'}</code>.</div>
       }>
         <div class="controls">
-          <span class="note">{rows().length} checkpoints from {runs().length} run{runs().length === 1 ? '' : 's'} ({selectedRuns().length ? 'the selected runs' : 'every run'}) x {cols().length} metrics. Best per column is marked; lower is better for loss, nll, ppl and error rates. Click a header to sort, a value for actions.</span>
+          <span class="note">{rows().length} checkpoints from {runs().length} run{runs().length === 1 ? '' : 's'} ({scope() === 'selected' ? 'the selected runs' : scope() === 'every' ? 'every run' : 'none of the selected runs has evals, so these are runs outside the selection'}) x {cols().length} metrics. Best per column is marked; lower is better for loss, nll, ppl and error rates. Click a header to sort, a value for actions.</span>
           <button type="button" title="one board panel per benchmark (every metric of it, across these runs)" aria-label="add every benchmark to the board"
             onClick={() => { for (const b of [...new Set(cols().map((c) => c.bench))]) addToNew(`eval/${b}/*${runsMatcher(runIds())}`); showToast('added one panel per benchmark'); }}>add every benchmark to the board</button>
         </div>

@@ -95,7 +95,7 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
     const cur = model(); if (!cur) return;
     // keep keyboard/wheel focus on the same chart across a redraw (click-then-wheel zoom)
     const fi = [...host.querySelectorAll('svg')].indexOf(document.activeElement as SVGSVGElement);
-    drawnW = chartWidth(host.clientWidth);
+    drawnW = chartWidth(host.clientWidth); drawnH = hStep();
     const out = drawPanel({ panel: cur, host, foot, res, events, inFocus: !!props.inFocus, focusOpen: !!focusId(), dataKey: dataKey(), title: title(), redraw: () => { draw(); } }); // the latest draw: a timer set by an earlier one must still land
     if (fi >= 0) host.querySelectorAll('svg')[fi]?.focus({ preventScroll: true });
     setBadge(out.badge);
@@ -103,10 +103,16 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
   }
   createEffect(on(sig, () => { draw(); }));
   // charts are drawn at the box's width (rounded to 60 px): redraw when that step changes
-  let drawnW = -1;
+  // in the focus view the chart height follows the window height too (drawPanel: innerHeight - 300)
+  let drawnW = -1, drawnH = -1;
+  const hStep = () => (props.inFocus ? Math.floor(innerHeight / 30) : 0);
   onMount(() => {
     const ro = new ResizeObserver(() => { const w = chartWidth(host.clientWidth); if (drawnW >= 0 && w !== drawnW && !pending()) draw(); });
     ro.observe(host); onCleanup(() => ro.disconnect());
+    if (props.inFocus) {
+      const onResize = () => { if (drawnH >= 0 && hStep() !== drawnH && !pending()) draw(); };
+      addEventListener('resize', onResize); onCleanup(() => removeEventListener('resize', onResize));
+    }
   });
   createEffect(on(() => props.panel.view.follow, (f) => { if (f) draw(); }, { defer: true }));
   onCleanup(() => { tok++; });

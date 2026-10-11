@@ -149,6 +149,7 @@ input[type=range] { width: 160px; }
 
 <script type="module">
 import init, * as A from './pkg/modgrad_obs_analysis.js';
+import { initDrop } from './drop.js';
 
 const NS = 'http://www.w3.org/2000/svg';
 const $ = (id) => document.getElementById(id);
@@ -763,7 +764,20 @@ const src = {
   array: (run, key) => S.api ? `api/runs/${enc(run.id)}/arrays/${enc(key)}?max_steps=200` : run.path + '/' + run.arrays[key].file,
   events: (run) => S.api ? `api/runs/${enc(run.id)}/events` : run.path + '/events.json',
 };
+// Local runs (dropped onto the page, see drop.js) are served from memory:
+// run.local = { metrics: {key: {step, value}}, t: {step, value} | null, arrays: {key: array JSON}, events: [] }.
+// Like the server's ?max_points, long series are strided (never averaged).
+const LOCAL_MAX_POINTS = 4000;
+function localSeries(m) {
+  const n = m.step.length;
+  if (n <= LOCAL_MAX_POINTS) return { steps: Array.from(m.step), values: Float64Array.from(m.value) };
+  const k = Math.ceil(n / LOCAL_MAX_POINTS), steps = [], values = [];
+  for (let i = 0; i < n; i++) if (i % k === 0 || i === n - 1) { steps.push(m.step[i]); values.push(m.value[i]); }
+  return { steps, values: Float64Array.from(values) };
+}
+const localJSON = { array: (run, key) => run.local.arrays[key], events: (run) => run.local.events || [] };
 async function metricSeries(run, key) {
+  if (run.local) return run.local.metrics[key] ? localSeries(run.local.metrics[key]) : null;
   if (!S.api && run.has_small) {
     const sm = await getJSON(run.path + '/metrics.small.json');
     return { steps: sm.step, values: nums(sm.keys[key] || []) };
@@ -773,6 +787,7 @@ async function metricSeries(run, key) {
   return { steps: j.step, values: nums(j.value) };
 }
 async function timeOf(run) { // step -> t, from any metric with t; legacy: elapsed_min
+  if (run.local) { const t = run.local.t; if (!t || !t.step.length) return null; const map = new Map(); t.step.forEach((s, i) => map.set(s, t.value[i])); return map; }
   const m = run.metrics['elapsed_min'];
   if (m) { const j = await getJSON(src.metric(run, 'elapsed_min')); const map = new Map(); j.step.forEach((s, i) => map.set(s, j.value[i] * 60)); return map; }
   return null;
@@ -810,6 +825,7 @@ function renderRuns() {
     const idc = h('td', {}, tr); const a = h('a', { href: '#' }, idc, r.id);
     a.addEventListener('click', (e) => { e.preventDefault(); showDetails(r); });
     if (r.config.synthetic) { idc.append(' '); h('span', { class: 'tag' }, idc, 'synthetic'); }
+    if (r.local) { idc.append(' '); h('span', { class: 'tag', title: 'parsed in this browser from a dropped file; not uploaded' }, idc, 'local'); }
     h('td', {}, tr, r.source); h('td', {}, tr, r.project || '');
     h('td', { class: 'num' }, tr, r.last_step ?? '-');
     h('td', { class: 'num' }, tr, r.config.brain_params !== undefined ? fmt(r.config.brain_params) : '-');
@@ -834,7 +850,7 @@ function showDetails(r) {
   const kv2 = h('div', { class: 'kv' }, det);
   for (const [k, v] of Object.entries(r.summary)) { const row = h('div', {}, kv2); h('span', {}, row, k); h('span', {}, row, typeof v === 'number' ? fmt(v) : String(v)); }
   if (r.unparsed.length) { h('div', { style: 'font-weight:600;margin-top:6px' }, det, 'unparsed log lines'); h('pre', {}, det, r.unparsed.join('\n')); }
-  getJSON(src.events(r)).then((ev) => {
+  (r.local ? Promise.resolve(localJSON.events(r)) : getJSON(src.events(r))).then((ev) => {
     if (!ev.length) return;
     h('div', { style: 'font-weight:600;margin-top:6px' }, det, 'events');
     h('pre', {}, det, ev.map((e) => `step ${e.step}: ${e.text}`).join('\n'));
@@ -1002,7 +1018,7 @@ async function renderArrays(keepStep) {
   const tok = ++arrToken;
   const box = $('arrays'); const r = S.byId.get($('arun').value); const key = $('akey').value;
   if (!r || !key) { box.innerHTML = ''; $('anote').textContent = 'No run with logged arrays.'; return; }
-  let j; try { j = await getJSON(src.array(r, key)); } catch (e) { err(String(e)); return; }
+  let j; try { j = r.local ? localJSON.array(r, key) : await getJSON(src.array(r, key)); } catch (e) { err(String(e)); return; }
   if (tok !== arrToken) return;
   box.innerHTML = '';
   const nrec = j.step.length;
@@ -1164,6 +1180,36 @@ function drawVolume(box, title, shape, data, step) {
   chart2d(box, { title: `${title}: mean value per tick`, xlabel: 'tick', series: [{ name: 'mean over cells', color: '--c1', area: true, xs: per.map((_, t) => t), ys: per }], marker: [ti] });
 }
 
+// ------------------------------------------------------------ local runs
+// addRuns / removeRuns: the one place runs enter or leave after load (drop.js
+// calls these). MERGE NOTE: the graph-builder branch exposes window.obsAddRuns /
+// a runsChanged event for the same purpose; unify the two here at merge.
+function addRuns(runs, { select = true } = {}) {
+  for (const r of runs) {
+    let id = r.id, k = 2; while (S.byId.has(id)) id = `${r.id}~${k++}`; r.id = id;
+    S.runs.push(r); S.byId.set(r.id, r); if (select) S.sel.add(r.id);
+  }
+  renderRuns(); refreshMetricSelect();
+  // every new run gets its headline metric plotted: its first loss-like key (else its first
+  // key) unless one of its loss-like keys is already selected; eight panels at most
+  const sel = $('metrics'), on = new Set([...sel.selectedOptions].map((o) => o.value)), fresh = [];
+  const lossy = (k) => /loss|nll|perplexity|ppl/i.test(k);
+  if (select) for (const r of runs) {
+    const ks = Object.keys(r.metrics), ls = ks.filter(lossy);
+    if (!ks.length || (ls.length ? ls : ks).some((k) => on.has(k)) || on.size >= 8) continue;
+    const k = ls[0] || ks[0]; on.add(k); fresh.push(k);
+  }
+  if (fresh.length) { for (const o of sel.options) o.selected = on.has(o.value); $('xmetric').value = fresh[0]; }
+  refreshArrayRuns(); rerenderAll();
+  document.dispatchEvent(new CustomEvent('runsChanged'));
+}
+function removeRuns(pred) {
+  S.runs = S.runs.filter((r) => !pred(r)); S.byId.clear(); for (const r of S.runs) S.byId.set(r.id, r);
+  for (const id of [...S.sel]) if (!S.byId.has(id)) S.sel.delete(id);
+  renderRuns(); refreshMetricSelect(); refreshArrayRuns(); rerenderAll();
+  document.dispatchEvent(new CustomEvent('runsChanged'));
+}
+
 // ------------------------------------------------------------ wiring
 function onSelection() {
   renderRuns(); refreshMetricSelect(); renderHistory(); renderCross();
@@ -1173,7 +1219,7 @@ async function main() {
   try { await init(); } catch (e) { err('could not load ./pkg/modgrad_obs_analysis_bg.wasm (' + e + '). Build it with scripts/build_obs_wasm.sh and serve this folder over HTTP.'); return; }
   // server mode when the API answers, else static files next to the page
   try { const r = await fetch('api/index'); if (r.ok) { const j = await r.json(); if (j.server) { S.api = true; S.index = j; } } } catch (e) { /* static mode */ }
-  if (!S.api) { try { S.index = await getJSON('index.json'); } catch (e) { err('could not load index.json (' + e + '). Run scripts/obs_collect.sh and serve this folder over HTTP: python3 -m http.server --directory obs 8781'); return; } }
+  if (!S.api) { try { S.index = await getJSON('index.json'); } catch (e) { err('could not load index.json (' + e + '). Run scripts/obs_collect.sh and serve this folder over HTTP: python3 -m http.server --directory obs 8781. Dropped log files still work.'); S.index = { runs: [], generated_unix: Date.now() / 1000 }; } }
   S.runs = S.index.runs; for (const r of S.runs) S.byId.set(r.id, r);
   for (const e of S.index.errors || []) err('export error: ' + JSON.stringify(e));
   const nsrc = new Set(S.runs.map((r) => r.source)).size;
@@ -1186,11 +1232,12 @@ async function main() {
   $('theme').addEventListener('click', () => { mi = (mi + 1) % 3; applyTheme(); try { localStorage.setItem('obs-theme', modes[mi]); } catch (e) { /* ignore */ } rerenderAll(); });
   renderRuns(); refreshMetricSelect(); refreshArrayRuns();
   renderHistory(); renderCross(); renderArrays();
+  initDrop({ addRuns, removeRuns, err });
   $('filter').addEventListener('input', renderRuns);
   $('reload').addEventListener('click', async () => {
     S.cache.clear();
     try { S.index = S.api ? await (await fetch('api/index')).json() : await getJSON('index.json'); } catch (e) { err(String(e)); return; }
-    S.runs = S.index.runs; S.byId.clear(); for (const r of S.runs) S.byId.set(r.id, r);
+    S.runs = S.index.runs.concat(S.runs.filter((r) => r.local)); S.byId.clear(); for (const r of S.runs) S.byId.set(r.id, r);
     renderRuns(); refreshMetricSelect(); refreshArrayRuns(); rerenderAll();
   });
   $('selall').addEventListener('click', () => { for (const r of S.runs.filter((r) => matches(r, $('filter').value))) S.sel.add(r.id); onSelection(); });

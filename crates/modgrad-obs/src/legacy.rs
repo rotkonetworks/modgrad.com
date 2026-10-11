@@ -15,7 +15,8 @@
 //! * `LM weights hash-identical: yes; peak RSS K kB` → summary
 //! * `LlmWeights …`, `hf_llama …`, `loaded checkpoint …` → events
 
-use crate::{Meta, Run};
+use crate::Meta;
+use crate::sink::{OpenSink, RunAt, Sink};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::io;
@@ -168,6 +169,17 @@ pub fn convert(text: &str, out_dir: &Path, name: &str, source: &str, log_path: &
     for f in ["metrics.jsonl", "arrays.jsonl", "events.jsonl", "summary.json"] {
         let _ = std::fs::remove_file(out_dir.join(f));
     }
+    convert_into(text, RunAt(out_dir), name, source, log_path, mtime_unix).map(|(rep, ())| rep)
+}
+
+/// Cheap check: does `text` look like a `ctmlm_pilot` log?
+pub fn looks_like(text: &str) -> bool {
+    text.lines().take(40).any(|l| l.trim_start().starts_with("CTM-LM PILOT:"))
+        || text.lines().take(40).any(|l| l.trim_start().starts_with("step ") && l.contains("train loss (ema)") && l.contains("BRAIN"))
+}
+
+/// As [`convert`], into any [`Sink`] (e.g. an in-memory run in the browser).
+pub fn convert_into<O: OpenSink>(text: &str, open: O, name: &str, source: &str, log_path: &str, mtime_unix: f64) -> io::Result<(LegacyReport, <O::Sink as Sink>::Output)> {
     // First pass for config + elapsed (config.json is written at create).
     let mut st = State::default();
     let mut last_min = 0.0;
@@ -200,7 +212,7 @@ pub fn convert(text: &str, out_dir: &Path, name: &str, source: &str, log_path: &
         extra: Some(json!({ "legacy_log": log_path, "source": source, "converter": "modgrad-obs legacy ctmlm_pilot" })),
     };
     let cfg = Value::Object(std::mem::take(&mut st.cfg));
-    let mut run = Run::create_in(out_dir, name, &cfg, meta)?;
+    let mut run = open.open(name, &cfg, meta)?;
     let mut rep = LegacyReport::default();
     let err = |e: crate::ObsError| io::Error::other(e.to_string());
 
@@ -393,15 +405,16 @@ pub fn convert(text: &str, out_dir: &Path, name: &str, source: &str, log_path: &
     st.summary.insert("legacy_unparsed".into(), json!(rep.unparsed));
     let finished = st.summary.contains_key("lm_hash_identical");
     let summary = Value::Object(std::mem::take(&mut st.summary));
-    if finished {
-        run.finish_with_time(&summary, t)?;
+    let out = if finished {
+        run.finish_with_time(&summary, t)?
     } else {
         // still running (or died): write the summary but don't mark finished
         for (k, v) in summary.as_object().unwrap() {
-            run.summary(k, v)?;
+            run.summary_value(k, v)?;
         }
-    }
-    Ok(rep)
+        run.close()?
+    };
+    Ok((rep, out))
 }
 
 #[cfg(test)]

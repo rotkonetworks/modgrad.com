@@ -215,9 +215,35 @@ fn item_key(key: &str, nested: &[String]) -> String {
 /// `wandb/<display_name or run_id>`).
 pub fn import_file(path: &Path, obs_root: &Path, name: Option<&str>) -> io::Result<ImportReport> {
     let recs = read_records(path)?;
+    let run_name = default_name(&recs, name);
+    let dir = obs_root.join("runs").join(&run_name);
+    for f in ["metrics.jsonl", "arrays.jsonl", "events.jsonl", "summary.json"] {
+        let _ = std::fs::remove_file(dir.join(f));
+    }
+    let (mut rep, ()) = import_records(&recs, &path.to_string_lossy(), &run_name, modgrad_obs::RunAt(&dir))?;
+    rep.run_dir = dir;
+    Ok(rep)
+}
+
+/// Decode the records of a `.wandb` file held in memory.
+pub fn read_records_from_bytes(bytes: &[u8]) -> io::Result<Vec<Record>> {
+    let payloads = log::read_all(bytes).map_err(io::Error::other)?;
+    payloads.iter().map(|p| Record::decode(&p[..]).map_err(io::Error::other)).collect()
+}
+
+/// The run name [`import_file`] uses: `name`, else `wandb/<display_name or run_id>`.
+pub fn default_name(recs: &[Record], name: Option<&str>) -> String {
+    let run = recs.iter().find_map(|r| if let Some(RecordType::Run(x)) = &r.record_type { Some(x.clone()) } else { None }).unwrap_or_default();
+    name.map(String::from).unwrap_or_else(|| format!("wandb/{}", if run.display_name.is_empty() { &run.run_id } else { &run.display_name }).replace(|c: char| !(c.is_ascii_alphanumeric() || "_-./".contains(c)), "_"))
+}
+
+/// Replay decoded records into any [`modgrad_obs::Sink`] (a run directory,
+/// or an in-memory run in the browser). `source_file` is recorded in the
+/// run's meta. `rep.run_dir` is left empty.
+pub fn import_records<O: modgrad_obs::OpenSink>(recs: &[Record], source_file: &str, run_name: &str, open: O) -> io::Result<(ImportReport, <O::Sink as modgrad_obs::Sink>::Output)> {
+    use modgrad_obs::Sink;
     let mut rep = ImportReport { records: recs.len(), ..Default::default() };
     let run = recs.iter().find_map(|r| if let Some(RecordType::Run(x)) = &r.record_type { Some(x.clone()) } else { None }).unwrap_or_default();
-    let run_name = name.map(String::from).unwrap_or_else(|| format!("wandb/{}", if run.display_name.is_empty() { &run.run_id } else { &run.display_name }).replace(|c: char| !(c.is_ascii_alphanumeric() || "_-./".contains(c)), "_"));
     let mut config = Map::new();
     let apply_config = |c: &ConfigRecord, config: &mut Map<String, Value>| {
         for it in &c.update {
@@ -230,7 +256,7 @@ pub fn import_file(path: &Path, obs_root: &Path, name: Option<&str>) -> io::Resu
     if let Some(c) = &run.config {
         apply_config(c, &mut config);
     }
-    for r in &recs {
+    for r in recs {
         if let Some(RecordType::Config(c)) = &r.record_type {
             apply_config(c, &mut config);
         }
@@ -241,18 +267,14 @@ pub fn import_file(path: &Path, obs_root: &Path, name: Option<&str>) -> io::Resu
         git: None,
         hostname: (!run.host.is_empty()).then(|| run.host.clone()),
         start_unix: start,
-        extra: Some(json!({ "source": "wandb", "wandb_run_id": run.run_id, "wandb_file": path.to_string_lossy() })),
+        extra: Some(json!({ "source": "wandb", "wandb_run_id": run.run_id, "wandb_file": source_file })),
     };
-    let dir = obs_root.join("runs").join(&run_name);
-    for f in ["metrics.jsonl", "arrays.jsonl", "events.jsonl", "summary.json"] {
-        let _ = std::fs::remove_file(dir.join(f));
-    }
-    let mut out = modgrad_obs::Run::create_in(&dir, &run_name, &Value::Object(config), meta)?;
+    let mut out = open.open(run_name, &Value::Object(config), meta)?;
     let err = |e: modgrad_obs::ObsError| io::Error::other(e.to_string());
     let mut summary = Map::new();
     let mut exit: Option<RunExitRecord> = None;
     let mut last_t = 0.0;
-    for r in &recs {
+    for r in recs {
         match &r.record_type {
             Some(RecordType::History(h)) => {
                 let mut step = h.step.as_ref().map(|s| s.num.max(0) as u64);
@@ -313,22 +335,22 @@ pub fn import_file(path: &Path, obs_root: &Path, name: Option<&str>) -> io::Resu
         }
     }
     let summary = Value::Object(summary);
-    match exit {
+    let done = match exit {
         Some(e) => {
             let mut s = summary;
             s["wandb_exit_code"] = json!(e.exit_code);
-            out.finish_with_time(&s, e.runtime as f64)?;
+            out.finish_with_time(&s, e.runtime as f64)?
         }
         None => {
             if let Value::Object(m) = summary {
                 for (k, v) in m {
-                    out.summary(&k, v)?;
+                    out.summary_value(&k, &v)?;
                 }
             }
+            out.close()?
         }
-    }
-    rep.run_dir = dir;
-    Ok(rep)
+    };
+    Ok((rep, done))
 }
 
 #[cfg(test)]

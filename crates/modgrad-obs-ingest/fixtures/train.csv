@@ -1,0 +1,6 @@
+"step","train/loss","val acc","lr","note"
+0,3.50,,3e-4,"warmup, start"
+100,2.91,"12.5%",3e-4,
+200,NaN,25%,3e-4,"he said ""ok"""
+300,2.10,inf,1.5e-4,x
+400,1.95,40.0%,1.5e-4,

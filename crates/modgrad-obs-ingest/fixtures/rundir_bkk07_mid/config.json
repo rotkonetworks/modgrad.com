@@ -1,0 +1,41 @@
+{
+  "config": {
+    "batch": 2.0,
+    "brain_params": 10106037.0,
+    "c": 32.0,
+    "facts": 2.0,
+    "filler": "natural text from /root/ctmlm/wikitext (65229 train / 7996 held-out sentences, disjoint)",
+    "gap_hi": 4.0,
+    "gap_lo": 2.0,
+    "model": "SmolLM2-360M",
+    "n": 6.0,
+    "natural_replay_pct": 25.0,
+    "persistent": true,
+    "read_heads": [
+      9.0,
+      12.0,
+      14.0,
+      4.0
+    ],
+    "read_params": 983044.0,
+    "slots_m": 16.0,
+    "tap": 22.0,
+    "text_heldout_paragraphs": 2183.0,
+    "text_train_paragraphs": 17556.0,
+    "ticks_hi": 16.0,
+    "ticks_lo": 8.0,
+    "window": 5.0
+  },
+  "meta": {
+    "extra": {
+      "converter": "modgrad-obs legacy ctmlm_pilot",
+      "legacy_log": "bkk07:mid/log.txt",
+      "source": "bkk07"
+    },
+    "git": null,
+    "hostname": "bkk07",
+    "project": "ctmlm",
+    "start_unix": 1791691780.657731
+  },
+  "name": "mid"
+}

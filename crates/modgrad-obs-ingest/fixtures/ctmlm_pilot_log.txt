@@ -1,0 +1,22 @@
+filler: natural text from /root/ctmlm/wikitext (65229 train / 7996 held-out sentences, disjoint)
+natural text: 17556 train / 2183 held-out paragraphs
+LlmWeights (safetensors): loaded 290 tensors, 1308 MB host RAM
+hf_llama: safetensors → f32 in 1.0s
+CTM-LM PILOT: SmolLM2-360M, persistent gated slots true, tap 22, read heads [9, 12, 14, 4], M 16; C 32, n 6, facts 2, gap (2, 4), W 5, K (8, 16), batch 2, natural/replay 25%, brain 10106037 + read 983044 params
+NONE (fixed): in-dist   5.0% nll 7.49, held-out   7.5% nll 8.99
+step     1: train loss (ema) 3.727; BRAIN in-dist   5.0% nll 7.49 | held-out   7.5% nll 9.00  [2.23 s/step, 1 min, RSS 2240056 kB]
+  natural text (held-out contiguous wikitext, 60 docs × 5 chunks): BRAIN +3.5127 ± 0.7168 (sem 0.0414) | NONE +3.5129 ± 0.7168 (sem 0.0414) | FULL +2.3985 ± 0.7032 (sem 0.0406) | BRAIN−NONE -0.0002 ± 0.0017 (sem 0.0001) | FULL−NONE -1.1145 ± 0.4549 (sem 0.0263)
+step   250: train loss (ema) 3.635; BRAIN in-dist   0.0% nll 4.43 | held-out   5.0% nll 5.98  [2.19 s/step, 11 min, RSS 2758160 kB]
+  natural text (held-out contiguous wikitext, 60 docs × 5 chunks): BRAIN +3.4967 ± 0.6967 (sem 0.0402) | NONE +3.5129 ± 0.7168 (sem 0.0414) | FULL +2.3985 ± 0.7032 (sem 0.0406) | BRAIN−NONE -0.0163 ± 0.1018 (sem 0.0059) | FULL−NONE -1.1145 ± 0.4549 (sem 0.0263)
+step   500: train loss (ema) 3.538; BRAIN in-dist   7.5% nll 4.06 | held-out   7.5% nll 5.65  [2.19 s/step, 21 min, RSS 2843260 kB]
+  natural text (held-out contiguous wikitext, 60 docs × 5 chunks): BRAIN +3.4918 ± 0.6974 (sem 0.0403) | NONE +3.5129 ± 0.7168 (sem 0.0414) | FULL +2.3985 ± 0.7032 (sem 0.0406) | BRAIN−NONE -0.0212 ± 0.1116 (sem 0.0064) | FULL−NONE -1.1145 ± 0.4549 (sem 0.0263)
+step   750: train loss (ema) 3.495; BRAIN in-dist   5.0% nll 3.84 | held-out   7.5% nll 5.27  [2.19 s/step, 31 min, RSS 2857516 kB]
+  natural text (held-out contiguous wikitext, 60 docs × 5 chunks): BRAIN +3.4754 ± 0.6916 (sem 0.0399) | NONE +3.5129 ± 0.7168 (sem 0.0414) | FULL +2.3985 ± 0.7032 (sem 0.0406) | BRAIN−NONE -0.0375 ± 0.1123 (sem 0.0065) | FULL−NONE -1.1145 ± 0.4549 (sem 0.0263)
+step  1000: train loss (ema) 3.448; BRAIN in-dist  10.0% nll 4.02 | held-out  12.5% nll 5.52  [2.20 s/step, 41 min, RSS 2866548 kB]
+  natural text (held-out contiguous wikitext, 60 docs × 5 chunks): BRAIN +3.4834 ± 0.6935 (sem 0.0400) | NONE +3.5129 ± 0.7168 (sem 0.0414) | FULL +2.3985 ± 0.7032 (sem 0.0406) | BRAIN−NONE -0.0295 ± 0.1233 (sem 0.0071) | FULL−NONE -1.1145 ± 0.4549 (sem 0.0263)
+step  1250: train loss (ema) 3.475; BRAIN in-dist   5.0% nll 3.85 | held-out   7.5% nll 5.04  [2.22 s/step, 52 min, RSS 2866548 kB]
+  natural text (held-out contiguous wikitext, 60 docs × 5 chunks): BRAIN +3.4718 ± 0.6964 (sem 0.0402) | NONE +3.5129 ± 0.7168 (sem 0.0414) | FULL +2.3985 ± 0.7032 (sem 0.0406) | BRAIN−NONE -0.0411 ± 0.1037 (sem 0.0060) | FULL−NONE -1.1145 ± 0.4549 (sem 0.0263)
+step  1500: train loss (ema) 3.434; BRAIN in-dist  12.5% nll 3.66 | held-out   5.0% nll 5.58  [2.23 s/step, 63 min, RSS 2866548 kB]
+  natural text (held-out contiguous wikitext, 60 docs × 5 chunks): BRAIN +3.4840 ± 0.6888 (sem 0.0398) | NONE +3.5129 ± 0.7168 (sem 0.0414) | FULL +2.3985 ± 0.7032 (sem 0.0406) | BRAIN−NONE -0.0289 ± 0.1334 (sem 0.0077) | FULL−NONE -1.1145 ± 0.4549 (sem 0.0263)
+step  1750: train loss (ema) 3.459; BRAIN in-dist  10.0% nll 3.58 | held-out  10.0% nll 4.84  [2.25 s/step, 73 min, RSS 2866548 kB]
+  natural text (held-out contiguous wikitext, 60 docs × 5 chunks): BRAIN +3.4778 ± 0.6895 (sem 0.0398) | NONE +3.5129 ± 0.7168 (sem 0.0414) | FULL +2.3985 ± 0.7032 (sem 0.0406) | BRAIN−NONE -0.0351 ± 0.1268 (sem 0.0073) | FULL−NONE -1.1145 ± 0.4549 (sem 0.0263)

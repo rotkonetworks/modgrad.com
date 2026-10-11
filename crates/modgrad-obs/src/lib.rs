@@ -791,6 +791,25 @@ fn num(v: &Value) -> f64 {
     v.as_f64().unwrap_or(f64::NAN)
 }
 
+/// One parsed `arrays.jsonl` line (`None` if malformed).
+pub fn array_record(v: &Value) -> Option<ArrayRecord> {
+    let shape: Vec<usize> = v.get("shape")?.as_array()?.iter().map(|x| x.as_u64().map(|u| u as usize)).collect::<Option<_>>()?;
+    let data = decode_f32(v.get("b64")?.as_str()?)?;
+    if shape.iter().product::<usize>() != data.len() {
+        return None;
+    }
+    Some(ArrayRecord {
+        step: v.get("step")?.as_u64()?,
+        t: v.get("t").map(num).unwrap_or(f64::NAN),
+        key: v.get("key")?.as_str()?.to_string(),
+        shape,
+        data,
+        kind: v.get("kind").and_then(|k| k.as_str()).unwrap_or("tensor").to_string(),
+        edges: v.get("edges").and_then(|e| e.as_array()).map(|e| e.iter().map(num).collect()),
+        labels: v.get("labels_b64").and_then(|b| b.as_str()).and_then(decode_f32),
+    })
+}
+
 /// Read a run directory written by [`Run`].
 pub fn read_run(dir: &Path) -> io::Result<RunData> {
     read_run_limited(dir, None)
@@ -829,24 +848,7 @@ pub fn read_run_limited(dir: &Path, limits: Option<[u64; 3]>) -> io::Result<RunD
     let (lines, s) = read_jsonl_limited(&dir.join("arrays.jsonl"), lim(1))?;
     rd.skipped += s;
     for v in lines {
-        let rec = (|| {
-            let shape: Vec<usize> = v.get("shape")?.as_array()?.iter().map(|x| x.as_u64().map(|u| u as usize)).collect::<Option<_>>()?;
-            let data = decode_f32(v.get("b64")?.as_str()?)?;
-            if shape.iter().product::<usize>() != data.len() {
-                return None;
-            }
-            Some(ArrayRecord {
-                step: v.get("step")?.as_u64()?,
-                t: v.get("t").map(num).unwrap_or(f64::NAN),
-                key: v.get("key")?.as_str()?.to_string(),
-                shape,
-                data,
-                kind: v.get("kind").and_then(|k| k.as_str()).unwrap_or("tensor").to_string(),
-                edges: v.get("edges").and_then(|e| e.as_array()).map(|e| e.iter().map(num).collect()),
-                labels: v.get("labels_b64").and_then(|b| b.as_str()).and_then(decode_f32),
-            })
-        })();
-        match rec {
+        match array_record(&v) {
             Some(r) => rd.arrays.push(r),
             None => rd.skipped += 1,
         }
@@ -1032,3 +1034,5 @@ mod tests {
 
 pub mod export;
 pub mod legacy;
+pub mod sink;
+pub use sink::{OpenSink, RunAt, Sink};

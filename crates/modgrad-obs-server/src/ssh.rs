@@ -28,13 +28,14 @@ use crate::ingest::IngestRequest;
 use crate::read::{ReadRequest, ReadResponse};
 use crate::state::{Record, valid_run_name};
 use crate::v1::{TextLine, TextParser, run_url};
-use crate::{AuthedRequest, AuthedResponse, BoxError};
+use crate::{AuthedRequest, AuthedResponse, IngestError};
 use modgrad_obs::spark;
 use russh::keys::{HashAlg, PrivateKey, PublicKey, ssh_key};
 use russh::server::{Auth as SshAuth, Handler, Msg, Session};
 use russh::{Channel, ChannelId, ChannelMsg, ChannelOpenFailure, MethodKind, MethodSet};
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -141,12 +142,14 @@ pub async fn serve(lis: tokio::net::TcpListener, key: PrivateKey, st: AppState, 
             let _permit = permit;
             let authed = Arc::new(AtomicBool::new(false));
             let h = Conn { door: door.clone(), fp: None, project: None, channels: Arc::new(AtomicUsize::new(0)), authed: authed.clone() };
-            let session = match russh::server::run_stream(rcfg, sock, h).await {
-                Ok(s) => s,
-                Err(e) => {
+            // the version exchange happens in here: bound it like auth
+            let session = match tokio::time::timeout(door.cfg.auth_timeout, russh::server::run_stream(rcfg, sock, h)).await {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => {
                     tracing::debug!("ssh: {peer}: {e:?}");
                     return;
                 }
+                Err(_) => return,
             };
             let handle = session.handle();
             let timeout = door.cfg.auth_timeout;
@@ -267,8 +270,28 @@ impl Door {
         Some(KeySlot { door: self, fp: fp.to_string() })
     }
 
-    async fn ingest(&self, project: &str, req: IngestRequest) -> Result<AuthedResponse, BoxError> {
-        self.st.authed().oneshot(AuthedRequest { token: None, cred: Some(Cred::Project(project.to_string())), req }).await
+    /// Through [`crate::Authed`] as the key's project. Overload and timeouts
+    /// are retried a few times: an HTTP client retries a 503 itself, but
+    /// nobody is there to retry for a pipe.
+    async fn ingest_retry(&self, project: &str, req: IngestRequest) -> Result<AuthedResponse, String> {
+        use crate::http::ApiError;
+        let mut wait = Duration::from_millis(200);
+        for attempt in 1.. {
+            let e = match self.st.authed().oneshot(AuthedRequest { token: None, cred: Some(Cred::Project(project.to_string())), req: req.clone() }).await {
+                Ok(a) => return Ok(a),
+                Err(e) => ApiError::from_box(e),
+            };
+            match e {
+                ApiError::Ingest(IngestError::Overloaded | IngestError::Timeout) if attempt < 4 => {
+                    tokio::time::sleep(wait).await;
+                    wait *= 2;
+                }
+                ApiError::Auth(e) => return Err(e.to_string()),
+                ApiError::Ingest(e) => return Err(e.to_string()),
+                e => return Err(format!("{e:?}")),
+            }
+        }
+        unreachable!()
     }
 
     fn usage(&self) -> String {
@@ -287,18 +310,38 @@ impl Door {
     }
 }
 
-/// Bytes to stdout / stderr; false once the channel is gone.
-async fn out(ch: &Channel<Msg>, s: impl Into<bytes::Bytes>) -> bool {
-    ch.data_bytes(s.into()).await.is_ok()
-}
-async fn err(ch: &Channel<Msg>, s: impl Into<bytes::Bytes>) -> bool {
-    ch.extended_data_bytes(1, s.into()).await.is_ok()
+/// The channel is gone, or the client stopped reading for `idle`.
+struct Gone;
+
+/// Every write is bounded by the idle time. A client that stops reading
+/// stdout (but keeps the connection open) stalls our writes; our task then
+/// stops draining the channel, and russh's session loop, which waits for
+/// that inbox inline, can stop reading the socket, its idle timer
+/// included. Giving up drops the channel, which unblocks it.
+async fn send(idle: Duration, f: impl Future<Output = Result<(), russh::Error>>) -> Result<(), Gone> {
+    match tokio::time::timeout(idle, f).await {
+        Ok(Ok(())) => Ok(()),
+        _ => Err(Gone),
+    }
 }
 
-async fn exit(ch: &Channel<Msg>, code: u32) {
-    let _ = ch.exit_status(code).await;
-    let _ = ch.eof().await;
-    let _ = ch.close().await;
+/// Bytes to stdout.
+async fn out(door: &Door, ch: &Channel<Msg>, s: impl Into<bytes::Bytes>) -> Result<(), Gone> {
+    send(door.cfg.idle, ch.data_bytes(s.into())).await
+}
+
+/// Bytes to stderr.
+async fn err(door: &Door, ch: &Channel<Msg>, s: impl Into<bytes::Bytes>) -> Result<(), Gone> {
+    send(door.cfg.idle, ch.extended_data_bytes(1, s.into())).await
+}
+
+async fn exit(door: &Door, ch: &Channel<Msg>, code: u32) {
+    let _ = send(door.cfg.idle, async {
+        ch.exit_status(code).await?;
+        ch.eof().await?;
+        ch.close().await
+    })
+    .await;
 }
 
 /// Wait for shell/exec on a fresh channel, then run the verb.
@@ -314,32 +357,28 @@ async fn run_channel(door: &Door, mut ch: Channel<Msg>, fp: &str, project: &str)
         }
     };
     let Some(_slot) = door.slot(fp) else {
-        err(&ch, format!("modgrad: too many concurrent ssh sessions for this key (limit {}); end one and retry\n", door.cfg.max_per_key)).await;
-        return exit(&ch, 1).await;
+        if err(door, &ch, format!("modgrad: too many concurrent ssh sessions for this key (limit {}); end one and retry\n", door.cfg.max_per_key)).await.is_ok() {
+            exit(door, &ch, 1).await;
+        }
+        return;
     };
     let words: Vec<&str> = command.as_deref().unwrap_or("").split_whitespace().collect();
     let code = match (command.is_none(), words.as_slice()) {
         // an interactive login (`ssh <server>` from a terminal) is not a log
-        (true, _) if pty => {
-            err(&ch, door.usage().replace('\n', "\r\n")).await;
-            0
-        }
+        (true, _) if pty => err(door, &ch, door.usage().replace('\n', "\r\n")).await.map(|_| 0),
         (_, []) => ingest(door, &mut ch, project, None).await,
         (_, ["run"]) => ingest(door, &mut ch, project, None).await,
         (_, ["run", name]) => ingest(door, &mut ch, project, Some(name)).await,
         (_, ["token"]) => token(door, &ch, project).await,
         (_, ["runs"]) => runs(door, &ch, project).await,
         (_, ["tail", run]) => tail(door, &ch, project, run).await,
-        (_, ["help" | "-h" | "--help" | "usage"]) => {
-            out(&ch, door.usage()).await;
-            0
-        }
-        (_, w) => {
-            err(&ch, format!("modgrad: unknown command {:?}\n\n{}", w.join(" "), door.usage())).await;
-            2
-        }
+        (_, ["help" | "-h" | "--help" | "usage"]) => out(door, &ch, door.usage()).await.map(|_| 0),
+        (_, w) => err(door, &ch, format!("modgrad: unknown command {:?}\n\n{}", w.join(" "), door.usage())).await.map(|_| 2),
     };
-    exit(&ch, code).await;
+    // a gone channel just drops (no exit status to deliver)
+    if let Ok(code) = code {
+        exit(door, &ch, code).await;
+    }
 }
 
 /// The id of run `name` in `project` (always inside it), if valid.
@@ -384,23 +423,24 @@ impl Lines {
     }
 }
 
-async fn ingest(door: &Door, ch: &mut Channel<Msg>, project: &str, name: Option<&str>) -> u32 {
+/// A verb's exit status, or [`Gone`].
+type Exit = Result<u32, Gone>;
+
+async fn ingest(door: &Door, ch: &mut Channel<Msg>, project: &str, name: Option<&str>) -> Exit {
     let name = name.map(String::from).unwrap_or_else(|| crate::v1::auto_name(modgrad_obs::now_unix(), &crate::v1::suffix()));
     let Some(id) = run_id(project, &name) else {
-        err(ch, format!("modgrad: bad run name {name:?}: use 1-2 '/'-separated parts of [A-Za-z0-9_.-]\n")).await;
-        return 2;
+        err(door, ch, format!("modgrad: bad run name {name:?}: use 1-2 '/'-separated parts of [A-Za-z0-9_.-]\n")).await?;
+        return Ok(2);
     };
     let create = IngestRequest::CreateRun { name: id.clone(), project: None, config: json!({}), meta: Some(json!({ "via": "ssh" })) };
-    let run = match door.ingest(project, create).await {
+    let run = match door.ingest_retry(project, create).await {
         Ok(a) => a.run,
         Err(e) => {
-            err(ch, format!("modgrad: cannot create run {id}: {}\n", e)).await;
-            return 1;
+            err(door, ch, format!("modgrad: cannot create run {id}: {e}\n")).await?;
+            return Ok(1);
         }
     };
-    if !err(ch, format!("modgrad: run {run} -> {}\n", run_url(&door.public, &run))).await {
-        return 1;
-    }
+    err(door, ch, format!("modgrad: run {run} -> {}\n", run_url(&door.public, &run))).await?;
     let mut lines = Lines { buf: Vec::new(), max: door.cfg.max_line, parser: TextParser::default() };
     let mut warned = false;
     loop {
@@ -408,45 +448,44 @@ async fn ingest(door: &Door, ch: &mut Channel<Msg>, project: &str, name: Option<
         match ch.wait().await {
             Some(ChannelMsg::Data { data }) => {
                 // pass through unchanged, first
-                if !out(ch, data.clone()).await {
-                    return 1;
-                }
+                out(door, ch, data.clone()).await?;
                 lines.feed(&data, &mut recs);
             }
             Some(ChannelMsg::Eof) => {
                 lines.flush(&mut recs);
-                send_rows(door, ch, project, &run, recs, &mut warned).await;
-                if let Err(e) = door.ingest(project, IngestRequest::Finish { run: run.clone(), summary: json!({ "exit_code": 0 }) }).await {
-                    err(ch, format!("modgrad: could not finish {run}: {}\n", e)).await;
+                send_rows(door, ch, project, &run, recs, &mut warned).await?;
+                if let Err(e) = door.ingest_retry(project, IngestRequest::Finish { run: run.clone(), summary: json!({ "exit_code": 0 }) }).await {
+                    err(door, ch, format!("modgrad: could not finish {run}: {e}\n")).await?;
                 }
-                return 0;
+                return Ok(0);
             }
             // the connection dropped without EOF: the run stays unfinished
-            Some(ChannelMsg::Close) | None => return 1,
+            Some(ChannelMsg::Close) | None => return Err(Gone),
             _ => {}
         }
-        send_rows(door, ch, project, &run, recs, &mut warned).await;
+        send_rows(door, ch, project, &run, recs, &mut warned).await?;
     }
 }
 
-async fn send_rows(door: &Door, ch: &Channel<Msg>, project: &str, run: &str, records: Vec<Record>, warned: &mut bool) {
+async fn send_rows(door: &Door, ch: &Channel<Msg>, project: &str, run: &str, records: Vec<Record>, warned: &mut bool) -> Result<(), Gone> {
     if records.is_empty() {
-        return;
+        return Ok(());
     }
-    if let Err(e) = door.ingest(project, IngestRequest::Rows { run: run.to_string(), records }).await {
+    if let Err(e) = door.ingest_retry(project, IngestRequest::Rows { run: run.to_string(), records }).await {
         // tell the user once; their output keeps flowing either way
         if !std::mem::replace(warned, true) {
-            err(ch, format!("modgrad: rows not stored: {}\n", e)).await;
+            err(door, ch, format!("modgrad: rows not stored: {e}\n")).await?;
         }
     }
+    Ok(())
 }
 
-async fn token(door: &Door, ch: &Channel<Msg>, project: &str) -> u32 {
+async fn token(door: &Door, ch: &Channel<Msg>, project: &str) -> Exit {
     let (t, expires) = match door.st.auth.ssh_project_token(project) {
         Ok(x) => x,
         Err(e) => {
-            err(ch, format!("modgrad: {e}\n")).await;
-            return 1;
+            err(door, ch, format!("modgrad: {e}\n")).await?;
+            return Ok(1);
         }
     };
     let base = &door.public;
@@ -454,8 +493,9 @@ async fn token(door: &Door, ch: &Channel<Msg>, project: &str) -> u32 {
         Some(e) => format!("expires in {:.0} days; `ssh <server> token` again for a new one", ((e - modgrad_obs::now_unix()) / 86400.0).max(0.0)),
         None => "does not expire".into(),
     };
-    out(ch, format!("{t}\n")).await;
+    out(door, ch, format!("{t}\n")).await?;
     err(
+        door,
         ch,
         format!(
             "modgrad: project token for {project} ({exp}). Use it with:\n\
@@ -464,25 +504,25 @@ async fn token(door: &Door, ch: &Channel<Msg>, project: &str) -> u32 {
              \x20 board: {base}/#project={project}\n"
         ),
     )
-    .await;
-    0
+    .await?;
+    Ok(0)
 }
 
-async fn runs(door: &Door, ch: &Channel<Msg>, project: &str) -> u32 {
+async fn runs(door: &Door, ch: &Channel<Msg>, project: &str) -> Exit {
     let prefix = format!("{project}/");
     let list = match door.st.read.clone().oneshot(ReadRequest::ListRuns { filter: Some(prefix.clone()) }).await {
         Ok(ReadResponse::Runs(r)) => r,
         Ok(_) => Vec::new(),
         Err(e) => {
-            err(ch, format!("modgrad: {e}\n")).await;
-            return 1;
+            err(door, ch, format!("modgrad: {e}\n")).await?;
+            return Ok(1);
         }
     };
     let mut rows: Vec<&Value> = list.iter().filter(|r| r["id"].as_str().is_some_and(|id| id.starts_with(&prefix))).collect();
     rows.sort_by(|a, b| a["meta"]["start_unix"].as_f64().unwrap_or(0.0).total_cmp(&b["meta"]["start_unix"].as_f64().unwrap_or(0.0)));
     if rows.is_empty() {
-        out(ch, format!("no runs yet in {project}; start one with: python train.py 2>&1 | ssh <server>\n")).await;
-        return 0;
+        out(door, ch, format!("no runs yet in {project}; start one with: python train.py 2>&1 | ssh <server>\n")).await?;
+        return Ok(0);
     }
     let w = rows.iter().filter_map(|r| r["id"].as_str()).map(|id| id.len() - prefix.len()).max().unwrap_or(3).max(3);
     let mut s = format!("{:w$}  {:>8}  {:>7}  {:8}  dashboard\n", "run", "step", "rows", "status");
@@ -493,26 +533,26 @@ async fn runs(door: &Door, ch: &Channel<Msg>, project: &str) -> u32 {
         s.push_str(&format!("{:w$}  {step:>8}  {:>7}  {status:8}  {}\n", &id[prefix.len()..], r["n_rows"].as_u64().unwrap_or(0), run_url(&door.public, id)));
     }
     s.push_str(&format!("project board: {}/#project={project}\n", door.public));
-    out(ch, s).await;
-    0
+    out(door, ch, s).await?;
+    Ok(0)
 }
 
-async fn tail(door: &Door, ch: &Channel<Msg>, project: &str, name: &str) -> u32 {
+async fn tail(door: &Door, ch: &Channel<Msg>, project: &str, name: &str) -> Exit {
     let Some(id) = run_id(project, name) else {
-        err(ch, format!("modgrad: {name:?} is not a run name in this key's project\n")).await;
-        return 2;
+        err(door, ch, format!("modgrad: {name:?} is not a run name in this key's project\n")).await?;
+        return Ok(2);
     };
     match door.st.read.clone().oneshot(ReadRequest::History { run: id.clone(), keys: Vec::new(), range: 0..u64::MAX, stride: 1 }).await {
         Ok(ReadResponse::History(h)) => {
             let cols = h.columns.into_iter().collect();
-            out(ch, spark::table(&id[project.len() + 1..], &h.steps, &cols, 30)).await;
-            out(ch, format!("{}\n", run_url(&door.public, &id))).await;
-            0
+            out(door, ch, spark::table(&id[project.len() + 1..], &h.steps, &cols, 30)).await?;
+            out(door, ch, format!("{}\n", run_url(&door.public, &id))).await?;
+            Ok(0)
         }
-        Ok(_) => 1,
+        Ok(_) => Ok(1),
         Err(e) => {
-            err(ch, format!("modgrad: {e} (`ssh <server> runs` lists them)\n")).await;
-            1
+            err(door, ch, format!("modgrad: {e} (`ssh <server> runs` lists them)\n")).await?;
+            Ok(1)
         }
     }
 }

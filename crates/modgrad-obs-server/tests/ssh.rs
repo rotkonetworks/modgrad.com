@@ -263,3 +263,44 @@ fn ssh_limits() {
     let (o, out, _) = run(ssh(&s, Some(&k1), &[], &["runs"]), b"");
     assert!(o.status.success() && out.contains("long"), "{out}");
 }
+
+#[test]
+fn ssh_stalled_reader_frees_its_slot() {
+    if !have("ssh") || !have("ssh-keygen") {
+        eprintln!("skipped: no ssh / ssh-keygen");
+        return;
+    }
+    // One connection slot: a session that never frees it locks everyone out.
+    // (With OpenSSH as the client this passes even without the server's
+    // write timeouts: the dead client's socket errors the session's next
+    // write. The timeouts cover clients that keep the socket open.)
+    let s = server("stall", 18964, 18965, &["--ssh-idle", "2", "--ssh-max-conns", "1"]);
+    let keys = tmp("stall-keys");
+    let (k1, k2) = (keygen(&keys, "k1"), keygen(&keys, "k2"));
+    // a client that pipes fast but never reads its stdout: the echo stalls
+    let mut c = ssh(&s, Some(&k1), &[], &["run", "stalled"]);
+    let mut ch = c.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+    let mut stdin = ch.stdin.take().unwrap();
+    let w = std::thread::spawn(move || {
+        let line = b"step 1: loss 1 ............................................................\n";
+        for _ in 0..(8 << 20) / line.len() {
+            if stdin.write_all(line).is_err() {
+                break;
+            }
+        }
+    });
+    std::thread::sleep(Duration::from_secs(3));
+    ch.kill().unwrap();
+    ch.wait().unwrap();
+    w.join().unwrap();
+    let t0 = Instant::now();
+    loop {
+        let (o, out, err) = run(ssh(&s, Some(&k2), &[], &["runs"]), b"");
+        if o.status.success() {
+            assert!(out.contains("no runs yet"), "{out}");
+            break;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(15), "the stalled session never let go of its connection slot: {err}");
+        std::thread::sleep(Duration::from_millis(300));
+    }
+}

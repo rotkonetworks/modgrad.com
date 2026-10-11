@@ -70,6 +70,9 @@ function logTicks(a: number, b: number): number[] {
 const nice = (a: number, b: number, n: number): number[] => Array.from(A.nice_ticks(a, b, n));
 
 let clipSeq = 0;
+// drags in progress on any chart: callers that rebuild charts (live panels) wait for them to end
+let activeDrags = 0;
+export const chartBusy = (): boolean => activeDrags > 0;
 export function chart2d(parent: Element, o: Chart2DOpts): HTMLDivElement & { chart?: Chart2D } {
   const hasY2 = o.series.some((s) => s.y2) && o.series.some((s) => !s.y2);
   const W = 540, H = 210, L = 58, R = hasY2 ? 52 : 14, T = 10, B = 28;
@@ -265,6 +268,7 @@ export function chart2d(parent: Element, o: Chart2DOpts): HTMLDivElement & { cha
   hit.addEventListener('pointerdown', (ev) => {
     if (ev.button !== 0) return;
     const p = local(ev);
+    if (!drag) activeDrags++;
     drag = { mode: ev.shiftKey ? 'pan' : ev.altKey ? 'box' : 'x', px: p.x, py: p.y, x0, x1, y0, y1, moved: false, hadY: !!(view && view.y0 !== undefined) };
     hit.setPointerCapture(ev.pointerId); hideTip(); hair.style.display = 'none';
     if (drag.mode === 'pan') hit.style.cursor = 'grabbing';
@@ -314,7 +318,7 @@ export function chart2d(parent: Element, o: Chart2DOpts): HTMLDivElement & { cha
   });
   const endDrag = (ev: PointerEvent) => {
     if (!drag) return;
-    const d = drag; drag = null; band.style.display = 'none'; hit.style.cursor = 'crosshair';
+    const d = drag; drag = null; activeDrags = Math.max(0, activeDrags - 1); band.style.display = 'none'; hit.style.cursor = 'crosshair';
     if (!d.moved) { if (o.onclick && ev.type === 'pointerup') o.onclick(ev); return; }
     if (d.mode === 'pan') return;
     const p = local(ev);
@@ -329,6 +333,8 @@ export function chart2d(parent: Element, o: Chart2DOpts): HTMLDivElement & { cha
   };
   hit.addEventListener('pointerup', endDrag);
   hit.addEventListener('pointercancel', endDrag);
+  // the chart was removed or capture was taken away mid-drag: release the gesture count
+  hit.addEventListener('lostpointercapture', () => { if (drag) { drag = null; activeDrags = Math.max(0, activeDrags - 1); band.style.display = 'none'; } });
   hit.addEventListener('mouseleave', () => { hair.style.display = 'none'; hideTip(); });
   hit.addEventListener('dblclick', () => me.setView(null));
   svg.addEventListener('keydown', (ev) => { if (ev.key === 'Escape' && view) { me.setView(null); ev.preventDefault(); } });

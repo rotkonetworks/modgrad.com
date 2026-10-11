@@ -12,6 +12,7 @@ import {
 } from '@/stores/board';
 import { openMenu, openPopover } from '@/stores/ui';
 import { drawPanel, MAX_POINTS, type DrawOut } from '@/board/drawPanel';
+import { chartBusy } from '@/charts/chart2d';
 import { draggable } from '@/board/dnd';
 import { loader } from '@/board/loader';
 import ForecastControls from '@/components/ForecastControls';
@@ -42,7 +43,10 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
     const runs = [...new Set(planOf(props.panel.q, cat).map(([r]) => r))].sort();
     return catalogVersion() + ':' + runs.map((r) => r + '@' + runVersion(r)).join(',');
   });
-  const sig = createMemo(() => JSON.stringify([props.panel.q, props.panel.title, props.panel.view, dataKey(), settings.events, settings.spikes, settings.linkX, themeVersion(), !!props.inFocus, !!focusId()]));
+  // follow is left out: pausing it (a zoom on the chart) must not rebuild the chart mid-gesture;
+  // switching it on redraws once below so the window jumps to the newest data
+  const viewSig = () => { const { follow: _f, ...rest } = props.panel.view; return rest; };
+  const sig = createMemo(() => JSON.stringify([props.panel.q, props.panel.title, viewSig(), dataKey(), settings.events, settings.spikes, settings.linkX, themeVersion(), !!props.inFocus, !!focusId()]));
 
   let tok = 0, cached: { key: string; res: QueryResult } | null = null;
   async function draw(): Promise<void> {
@@ -71,12 +75,18 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
       ids.forEach((r, i) => events.set(r, evs[i]));
     }
     if (t !== tok || !host.isConnected) return;
+    // never rebuild a chart under a drag (live rows land mid-gesture): retry when it ends
+    if (chartBusy()) { setTimeout(() => { if (t === tok) draw(); }, 250); return; }
     const cur = model(); if (!cur) return;
+    // keep keyboard/wheel focus on the same chart across a redraw (click-then-wheel zoom)
+    const fi = [...host.querySelectorAll('svg')].indexOf(document.activeElement as SVGSVGElement);
     const out = drawPanel({ panel: cur, host, foot, res, events, inFocus: !!props.inFocus, focusOpen: !!focusId(), dataKey: dataKey(), title: title() });
+    if (fi >= 0) host.querySelectorAll('svg')[fi]?.focus({ preventScroll: true });
     setBadge(out.badge);
     setPending(false);
   }
   createEffect(on(sig, () => { draw(); }));
+  createEffect(on(() => props.panel.view.follow, (f) => { if (f) draw(); }, { defer: true }));
   onCleanup(() => { tok++; });
 
   const select = () => { if (selPanel() !== id) setSelPanel(id); };

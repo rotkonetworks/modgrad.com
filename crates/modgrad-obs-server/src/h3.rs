@@ -25,8 +25,9 @@ use std::time::Duration;
 use tower::ServiceExt;
 
 /// Request bodies over h3 are buffered before routing; larger ones get 413.
-/// (The router's own extractor limits still apply after this.)
-pub const MAX_BODY: usize = 32 << 20;
+/// Same as axum's default body limit, which the TCP path enforces: buffering
+/// more would only hold memory for requests the router refuses anyway.
+pub const MAX_BODY: usize = 2 << 20;
 
 pub struct Tls {
     chain: Vec<CertificateDer<'static>>,

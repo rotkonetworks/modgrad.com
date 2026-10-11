@@ -1,6 +1,7 @@
 //! HTTP/3 listener over real sockets: a self-signed server on loopback,
 //! rows pushed with the CLI's client (`modgrad_obs::net::push_request`),
-//! read back over HTTP/3 and over TCP. Ports stay in 18950-18952.
+//! read back over HTTP/3 and over TCP. Ports 18950, 18951 and 18957 (the
+//! CLI's transport tests use 18952-18956).
 #![cfg(feature = "h3")]
 
 use modgrad_obs::net;
@@ -124,8 +125,8 @@ fn bodies_over_the_cap_are_refused() {
 fn sse_streams_over_h3() {
     use bytes::Buf;
     let root = tmp("sse");
-    serve(root.clone(), 18952);
-    let base = "http://127.0.0.1:18952";
+    serve(root.clone(), 18957);
+    let base = "http://127.0.0.1:18957";
     let (r, n) = net::push_request("POST", &format!("{base}/api/v1/runs/sse/log"), None, Some(br#"{"step": 0, "loss": 1}"#), "application/json", Duration::from_secs(10), net::H3::Force);
     let r = r.unwrap();
     assert!(r.ok());
@@ -145,10 +146,10 @@ fn sse_streams_over_h3() {
         tls.alpn_protocols = vec![b"h3".to_vec()];
         let mut ep = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
         ep.set_default_client_config(quinn::ClientConfig::new(std::sync::Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(tls).unwrap())));
-        let conn = ep.connect("127.0.0.1:18952".parse().unwrap(), "127.0.0.1").unwrap().await.unwrap();
+        let conn = ep.connect("127.0.0.1:18957".parse().unwrap(), "127.0.0.1").unwrap().await.unwrap();
         let (mut driver, mut send) = ::h3::client::new(h3_quinn::Connection::new(conn)).await.unwrap();
         tokio::spawn(async move { std::future::poll_fn(|cx| driver.poll_close(cx)).await });
-        let req = axum::http::Request::get("https://127.0.0.1:18952/api/v1/runs/sse/stream").body(()).unwrap();
+        let req = axum::http::Request::get("https://127.0.0.1:18957/api/v1/runs/sse/stream").body(()).unwrap();
         let mut s = send.send_request(req).await.unwrap();
         s.finish().await.unwrap();
         let resp = s.recv_response().await.unwrap();

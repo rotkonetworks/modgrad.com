@@ -56,7 +56,7 @@ async fn main() {
         eprintln!("obs-server: token store under {}: {e}", root.display());
         std::process::exit(1)
     });
-    let app = http::router(http::AppState::new(ingest, read, static_dir, auth));
+    let app = http::router(http::AppState::new(ingest, read, static_dir, auth).with_boards(root.join("boards")));
     let lis = tokio::net::TcpListener::bind(&listen).await.unwrap_or_else(|e| {
         eprintln!("obs-server: bind {listen}: {e}");
         std::process::exit(1)

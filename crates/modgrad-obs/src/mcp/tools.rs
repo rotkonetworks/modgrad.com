@@ -259,7 +259,8 @@ pub fn log(store: &dyn Store, a: &Args) -> ToolResult {
     }
     // reuse the run if it exists under exactly this name (case-insensitive)
     let names = store.run_names().unwrap_or_default();
-    let existing = names.iter().find(|n| n.eq_ignore_ascii_case(&run)).cloned();
+    let full = store.qualify(&run);
+    let existing = names.iter().find(|n| n.eq_ignore_ascii_case(&run) || n.eq_ignore_ascii_case(&full)).cloned();
     let run = existing.clone().unwrap_or(run);
     if !valid_run_name(&run) {
         return Err(format!("Invalid run name {run:?}: use letters, digits, '.', '_', '-' (and '/' for a group). Example: {ex}"));
@@ -276,7 +277,7 @@ pub fn log(store: &dyn Store, a: &Args) -> ToolResult {
         (None, Some(l)) => (l + 1, " (step not given: used last step + 1)"),
         (None, None) => (0, " (step not given: first row is step 0)"),
     };
-    let created = store.append(&run, &vec![(step, kv.clone())])?;
+    let (created, run) = store.append(&run, &vec![(step, kv.clone())])?;
     let shown: Vec<String> = kv.iter().take(12).map(|(k, v)| format!("{k}={}", fmt(*v))).collect();
     let mut out = format!("Logged {} metric{} to run {run} at step {step}{how}: {}{}.", kv.len(), if kv.len() == 1 { "" } else { "s" }, shown.join(", "), if kv.len() > 12 { ", …" } else { "" });
     if created {
@@ -309,7 +310,8 @@ pub fn ingest_log(store: &dyn Store, a: &Args) -> ToolResult {
     };
     let run = strip_quotes(&run).trim_start_matches("runs/").trim_matches('/').to_string();
     let names = store.run_names().unwrap_or_default();
-    let existing = names.iter().find(|n| n.eq_ignore_ascii_case(&run)).cloned();
+    let full = store.qualify(&run);
+    let existing = names.iter().find(|n| n.eq_ignore_ascii_case(&run) || n.eq_ignore_ascii_case(&full)).cloned();
     let run = existing.clone().unwrap_or(run);
     if !valid_run_name(&run) {
         return Err(format!("Invalid run name {run:?}: use letters, digits, '.', '_', '-' (and '/' for a group). Example: {ex}"));
@@ -367,7 +369,7 @@ pub fn ingest_log(store: &dyn Store, a: &Args) -> ToolResult {
             if skipped.is_empty() { String::new() } else { format!(" Skipped e.g.: {}.", skipped.join(", ")) }
         ));
     }
-    let created = store.append(&run, &rows)?;
+    let (created, run) = store.append(&run, &rows)?;
     let n_vals: usize = rows.iter().map(|(_, kv)| kv.len()).sum();
     let keys: BTreeSet<&str> = rows.iter().flat_map(|(_, kv)| kv.iter().map(|(k, _)| k.as_str())).collect();
     let (lo, hi) = rows.iter().fold((u64::MAX, 0), |(a, b), (s, _)| (a.min(*s), b.max(*s)));

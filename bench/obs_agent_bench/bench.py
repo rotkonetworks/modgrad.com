@@ -258,6 +258,25 @@ SYSTEM = (
 )
 
 
+def start_server(binary, root):
+    """`obs-server --dev` on a free loopback port, storing under `root`."""
+    import socket
+    import subprocess
+    with socket.socket() as so:
+        so.bind(("127.0.0.1", 0))
+        port = so.getsockname()[1]
+    p = subprocess.Popen([binary, "--root", root, "--listen", f"127.0.0.1:{port}", "--dev", "--no-static"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    url = f"http://127.0.0.1:{port}"
+    for _ in range(100):
+        try:
+            requests.get(url + "/api/index", timeout=1)
+            return p, url
+        except requests.RequestException:
+            time.sleep(0.05)
+    p.kill()
+    raise RuntimeError(f"obs-server did not start on {url}")
+
+
 def mcp_to_openai(tools):
     return [{"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["inputSchema"]}} for t in tools]
 
@@ -315,11 +334,13 @@ def main():
     ap.add_argument("--max-turns", type=int, default=10)
     ap.add_argument("--timeout", type=float, default=900, help="seconds per model request")
     ap.add_argument("--only", help="comma-separated task ids")
+    ap.add_argument("--remote", action="store_true", help="run each task against its own `obs-server --dev` (root = the task dir) through `obs mcp --url`")
+    ap.add_argument("--obs-server", default=os.path.join(root, "target", "debug", "obs-server"), help="obs-server binary for --remote")
     ap.add_argument("--out", help="JSONL transcript path (default <data>/<label>.jsonl)")
     a = ap.parse_args()
 
     tasks = [t for t in TASKS if not a.only or t["id"] in a.only.split(",")]
-    label = "scripted" if a.scripted else re.sub(r"[^\w.-]", "_", a.model) + ("-think" if a.think else "")
+    label = ("scripted" if a.scripted else re.sub(r"[^\w.-]", "_", a.model) + ("-think" if a.think else "")) + ("-remote" if a.remote else "")
     os.makedirs(a.data, exist_ok=True)
     out_path = a.out or os.path.join(a.data, f"{label}.jsonl")
     out = open(out_path, "w")
@@ -330,7 +351,12 @@ def main():
             import shutil
             shutil.rmtree(d)
         os.makedirs(d)
-        c = McpClient([a.obs, "mcp", "--dir", d])
+        srv = None
+        if a.remote:
+            srv, url = start_server(a.obs_server, d)
+            c = McpClient([a.obs, "mcp", "--url", url])
+        else:
+            c = McpClient([a.obs, "mcp", "--dir", d])
         try:
             build_fixture(c)
             tools = mcp_to_openai(c.tools())
@@ -342,6 +368,9 @@ def main():
             dt = time.time() - t0
         finally:
             c.close()
+            if srv:
+                srv.terminate()
+                srv.wait(timeout=10)
         ok, why = t["check"](answer, d)
         ok = bool(ok)
         errs = sum(1 for x in calls if x["is_error"])

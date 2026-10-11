@@ -31,13 +31,21 @@ pub struct AppState {
     pub auth: Auth,
     /// Change feed behind the SSE endpoints.
     pub live: Live,
+    /// Where `PUT /api/v1/boards/<name>` stores board JSON; None = no boards.
+    pub boards: Option<PathBuf>,
 }
 
 impl AppState {
     /// Wire the v1 extras around an ingest/read pair (spawns the [`Live`] task).
     pub fn new(ingest: IngestService, read: ReadState, static_dir: Option<PathBuf>, auth: Auth) -> AppState {
         let live = Live::spawn(read.clone());
-        AppState { ingest, read, static_dir, auth, live }
+        AppState { ingest, read, static_dir, auth, live, boards: None }
+    }
+    /// Store boards under `dir` (`<obs root>/boards`, the same place
+    /// `obs mcp --dir` writes them).
+    pub fn with_boards(mut self, dir: PathBuf) -> AppState {
+        self.boards = Some(dir);
+        self
     }
     /// The ingest service behind write authorisation.
     pub fn authed(&self) -> Authed {
@@ -238,9 +246,13 @@ async fn finish(AxState(st): AxState<AppState>, Path(run): Path<String>, body: O
 
 // ------------------------------------------------------------ read routes
 
-pub(crate) async fn index(AxState(st): AxState<AppState>, Query(q): Query<HashMap<String, String>>) -> ApiResult {
-    // anonymous projects are listed only when asked for by name (their board URL)
-    let project = q.get("project").cloned();
+pub(crate) async fn index(AxState(st): AxState<AppState>, Query(q): Query<HashMap<String, String>>, h: HeaderMap) -> ApiResult {
+    // anonymous projects are listed only when asked for by name (their board
+    // URL) or by a project token, which scopes the list to its project
+    let project = q.get("project").cloned().or_else(|| match st.auth.cred(crate::v1::bearer(&h).as_deref()) {
+        Ok(crate::auth::Cred::Project(p)) => Some(p),
+        _ => None,
+    });
     let keep = |e: &Value| {
         let id = e["id"].as_str().unwrap_or("");
         match &project {

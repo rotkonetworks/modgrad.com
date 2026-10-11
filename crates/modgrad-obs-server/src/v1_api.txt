@@ -76,6 +76,16 @@ Read
   GET /api/v1/runs/<id>/config | /summary | /events
   GET /api/runs/<id %2F-encoded>/metrics/<key>?max_points=N   {"step": [...], "value": [...]}
 
+Boards
+------
+  PUT /api/v1/boards/<name>                       store a dashboard board (JSON object, e.g.
+      {"title", "panels": [{"query": "loss{run=~\"a|b\"}", "metric": "loss", "runs": ["a", "b"]}]})
+      A project token stores it as "<project>/<name>"; tokenless needs --dev.
+      -> {"board": "<id>", "url": "<server>/#board=<id>", "get": "<url>"}
+  GET /api/v1/boards/<id>                         the stored board JSON
+
+  GET /api/index with a project token (Authorization header) lists that project's runs.
+
 Live (Server-Sent Events)
 -------------------------
   GET /api/v1/stream[?runs=a,b | ?project=<p>]    all public runs, some runs, or one project

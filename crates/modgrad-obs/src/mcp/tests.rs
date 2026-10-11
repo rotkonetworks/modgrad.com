@@ -261,8 +261,9 @@ fn board_tool() {
 }
 
 #[test]
-fn remote_mode_refuses_clearly() {
-    let s = Server::new(Box::new(store::RemoteStore { url: "https://obs.example".into(), token: None }));
+fn remote_mode_unreachable_server_teaches() {
+    // port 1 refuses connections; the full remote tests live in modgrad-obs-server
+    let s = Server::new(Box::new(store::RemoteStore::new("http://127.0.0.1:1", None)));
     let (t, e) = s.call_tool("list_runs", &json!({}));
-    assert!(e && t.contains("not implemented") && t.contains("obs mcp --dir"), "{t}");
+    assert!(e && t.contains("Cannot reach") && t.contains("obs mcp --dir"), "{t}");
 }

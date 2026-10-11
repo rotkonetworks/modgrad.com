@@ -102,7 +102,7 @@ def test_offline_then_obs_push(tmp_path, server, monkeypatch):
     assert meta["finish"] == {"exit_code": 0} and meta["name"] == run.id and meta["project"] == "offl"
     assert "offl/" + run.id not in server.runs("offl")
     if not OBS_BIN.exists():
-        pytest.skip("obs CLI not built")
+        pytest.skip("modgrad CLI not built")
     out = subprocess.run([str(OBS_BIN), "push", str(d), "--json"], capture_output=True, text=True, timeout=60,
                          env=subprocess_env(MODGRAD_URL=server.url))
     assert out.returncode == 0, out.stderr

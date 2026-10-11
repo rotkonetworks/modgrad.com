@@ -43,7 +43,7 @@ pub fn say(json_mode: bool, v: Value, text: impl AsRef<str>) {
     if json_mode {
         eprintln!("{v}");
     } else {
-        eprintln!("obs: {}", text.as_ref());
+        eprintln!("modgrad: {}", text.as_ref());
     }
 }
 
@@ -401,7 +401,7 @@ impl Local {
                 Item::Event(e) => self.run.event_with_time(e["step"].as_u64().unwrap_or(0), e["t"].as_f64().unwrap_or(0.0), e["text"].as_str().unwrap_or("")),
             };
             if let Err(e) = r {
-                eprintln!("obs: local write: {e}");
+                eprintln!("modgrad: local write: {e}");
             }
         }
     }
@@ -497,7 +497,7 @@ pub fn run(o: Opts) -> i32 {
                 local = Some(Local { run, dir });
             }
             Err(e) => {
-                eprintln!("obs: cannot create local run: {e}");
+                eprintln!("modgrad: cannot create local run: {e}");
                 return 1;
             }
         }
@@ -508,7 +508,7 @@ pub fn run(o: Opts) -> i32 {
                 match (&r.run, &r.dashboard) {
                     (Some(run), Some(d)) => say(o.json, json!({"event": "start", "mode": "server", "run": run, "dashboard": d, "server": r.server, "spool": r.dir}), format!("run {run} -> {d}")),
                     _ if r.fatal.is_some() => {
-                        eprintln!("obs: not starting the command; fix the error above (or use --offline)");
+                        eprintln!("modgrad: not starting the command; fix the error above (or use --offline)");
                         return 1;
                     }
                     _ => say(o.json, json!({"event": "start", "mode": "spooling", "run": name, "server": r.server, "spool": r.dir}), format!("run {name}: waiting for {}", r.server)),
@@ -516,7 +516,7 @@ pub fn run(o: Opts) -> i32 {
                 remote = Some(r);
             }
             Err(e) => {
-                eprintln!("obs: cannot open spool under {}: {e}", o.spool_root.display());
+                eprintln!("modgrad: cannot open spool under {}: {e}", o.spool_root.display());
                 return 1;
             }
         }
@@ -532,7 +532,7 @@ pub fn run(o: Opts) -> i32 {
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("obs: cannot start {:?}: {e}", o.cmd[0]);
+            eprintln!("modgrad: cannot start {:?}: {e}", o.cmd[0]);
             if let Some(mut r) = remote {
                 r.close(&json!({ "exit_code": 127, "error": e.to_string() }), Instant::now() + Duration::from_secs(5));
             }
@@ -586,7 +586,7 @@ pub fn run(o: Opts) -> i32 {
         std::thread::spawn(move || {
             let mut s = Sampler::new(pid, gpu);
             if s.gpu_name() != "none" && !json_mode {
-                eprintln!("obs: sampling GPU via {} every {:.0}s", s.gpu_name(), interval.as_secs_f64());
+                eprintln!("modgrad: sampling GPU via {} every {:.0}s", s.gpu_name(), interval.as_secs_f64());
             }
             while !stop.load(Ordering::Relaxed) {
                 let v = s.sample();
@@ -631,7 +631,7 @@ pub fn run(o: Opts) -> i32 {
                     l.write(items);
                 } else if let Some(r) = remote.as_mut() {
                     if let Err(e) = r.spool(items) {
-                        eprintln!("obs: spool write failed: {e}");
+                        eprintln!("modgrad: spool write failed: {e}");
                     }
                     r.flush();
                 }

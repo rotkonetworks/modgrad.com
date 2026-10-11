@@ -9,11 +9,14 @@
 //!   [`v1`] is the documented, authenticated ingest API on top of it.
 //! * [`Authed`] — write tokens in front of the ingest stack.
 //! * [`Live`] — the change feed behind the SSE endpoints.
+//! * `h3` (feature `h3`) — the same router over HTTP/3 (QUIC).
 //!
 //! The server stores and selects; all analysis runs in the browser (wasm).
 
 pub mod auth;
 pub mod error;
+#[cfg(feature = "h3")]
+pub mod h3;
 pub mod http;
 pub mod ingest;
 pub mod live;

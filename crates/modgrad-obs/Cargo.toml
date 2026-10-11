@@ -30,3 +30,7 @@ http = { version = "1", optional = true }
 modgrad-obs-server = { path = "../modgrad-obs-server" }
 tokio = { version = "1", features = ["rt-multi-thread", "net"] }
 axum = { version = "0.7", default-features = false, features = ["http1", "tokio"] }
+
+[[example]]
+name = "push_bench"
+required-features = ["h3"]

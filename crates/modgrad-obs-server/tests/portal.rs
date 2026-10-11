@@ -442,13 +442,13 @@ async fn methods_passkeys_and_app_paths() {
     assert_eq!(o["pubKeyCredParams"].as_array().unwrap().iter().map(|p| p["alg"].as_i64().unwrap()).collect::<Vec<_>>(), vec![-8, -7, -257]);
     let (_, _, l) = call(&t, "POST", "/api/v1/auth/passkey/login/options", Req::default(), Value::Null).await;
     assert_eq!((l["rpId"].as_str(), l["allowCredentials"].as_array().map(Vec::len)), (Some("obs.test"), Some(0)));
-    // verification is not in this build: 501 after the challenge checks
+    // a garbage attestation is refused after the challenge checks, which spends the challenge
     use base64::Engine;
     let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
     let cdj = json!({ "type": "webauthn.create", "challenge": o["challenge"], "origin": ORIGIN }).to_string();
     let reg = json!({ "id": "x", "rawId": "x", "response": { "clientDataJSON": b64(cdj.as_bytes()), "attestationObject": b64(b"att") } });
     let (c, _, e) = call(&t, "POST", "/api/v1/auth/passkey/register/verify", as_cookie(Some(&cookie)), reg.clone()).await;
-    assert_eq!((c, e["code"].as_str()), (StatusCode::NOT_IMPLEMENTED, Some("passkey_unsupported")));
+    assert_eq!((c, e["code"].as_str()), (StatusCode::BAD_REQUEST, Some("bad_passkey")));
     let (c, _, e) = call(&t, "POST", "/api/v1/auth/passkey/register/verify", as_cookie(Some(&cookie)), reg).await;
     assert_eq!((c, e["code"].as_str()), (StatusCode::UNAUTHORIZED, Some("bad_token")), "challenges are single use");
     // the app answers at /login and /account
@@ -475,4 +475,74 @@ async fn delete_account_removes_its_projects() {
     assert_eq!(call(&t, "GET", "/api/v1/me", as_cookie(Some(&cookie)), Value::Null).await.0, StatusCode::UNAUTHORIZED);
     assert_eq!(call(&t, "POST", "/api/v1/runs/r/log", Req { token: Some(&token), ..Default::default() }, json!({ "loss": 1 })).await.0, StatusCode::UNAUTHORIZED);
     assert!(call(&t, "GET", "/api/index", Req::default(), Value::Null).await.2["runs"].as_array().unwrap().is_empty());
+}
+
+/// A software Ed25519 passkey through the four routes: signed out it makes an
+/// account, then signs in to it; challenges are single use, counts must rise.
+#[tokio::test]
+async fn passkey_registers_and_signs_in_over_http() {
+    use base64::Engine;
+    use ciborium::value::Value as C;
+    use ring::signature::{Ed25519KeyPair, KeyPair};
+    use sha2::{Digest, Sha256};
+    let b64e = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+    let cbor = |v: &C| {
+        let mut out = Vec::new();
+        ciborium::ser::into_writer(v, &mut out).unwrap();
+        out
+    };
+    let t = app("pk-http");
+    let rng = ring::rand::SystemRandom::new();
+    let kp = Ed25519KeyPair::from_pkcs8(Ed25519KeyPair::generate_pkcs8(&rng).unwrap().as_ref()).unwrap();
+    let cred_id = vec![0x5a; 16];
+    let auth_data = |count: u32, attested: bool| {
+        let mut d = Sha256::digest(b"obs.test").to_vec();
+        d.push(0x05 | if attested { 0x40 } else { 0 });
+        d.extend_from_slice(&count.to_be_bytes());
+        if attested {
+            d.extend_from_slice(&[0; 16]);
+            d.extend_from_slice(&(cred_id.len() as u16).to_be_bytes());
+            d.extend_from_slice(&cred_id);
+            let i = |k: i64| C::Integer(k.into());
+            d.extend_from_slice(&cbor(&C::Map(vec![(i(1), i(1)), (i(3), i(-8)), (i(-1), i(6)), (i(-2), C::Bytes(kp.public_key().as_ref().to_vec()))])));
+        }
+        d
+    };
+    let cd = |ty: &str, ch: &Value| json!({ "type": ty, "challenge": ch, "origin": ORIGIN }).to_string().into_bytes();
+
+    // register, signed out: a new account and a session
+    let (_, _, o) = call(&t, "POST", "/api/v1/auth/passkey/register/options", Req::default(), Value::Null).await;
+    let att = cbor(&C::Map(vec![("fmt".into(), "none".into()), ("attStmt".into(), C::Map(vec![])), ("authData".into(), C::Bytes(auth_data(0, true)))]));
+    let reg = json!({ "id": b64e(&cred_id), "rawId": b64e(&cred_id), "label": "soft key", "response": { "clientDataJSON": b64e(&cd("webauthn.create", &o["challenge"])), "attestationObject": b64e(&att) } });
+    let (c, h, r) = call(&t, "POST", "/api/v1/auth/passkey/register/verify", Req::default(), reg).await;
+    assert_eq!(c, StatusCode::OK, "{r}");
+    assert_eq!(r["created"], true);
+    let id = r["account"]["id"].as_str().unwrap().to_string();
+    assert!(set_cookie(&h).is_some());
+
+    let login = |count: u32, ch: Value| {
+        let cdj = cd("webauthn.get", &ch);
+        let ad = auth_data(count, false);
+        let mut msg = ad.clone();
+        msg.extend_from_slice(&Sha256::digest(&cdj));
+        let sig = kp.sign(&msg);
+        json!({ "id": b64e(&cred_id), "rawId": b64e(&cred_id), "response": { "clientDataJSON": b64e(&cdj), "authenticatorData": b64e(&ad), "signature": b64e(sig.as_ref()), "userHandle": null } })
+    };
+    // sign in to the same account
+    let (_, _, l) = call(&t, "POST", "/api/v1/auth/passkey/login/options", Req::default(), Value::Null).await;
+    let body = login(1, l["challenge"].clone());
+    let (c, h, r) = call(&t, "POST", "/api/v1/auth/passkey/login/verify", Req::default(), body.clone()).await;
+    assert_eq!((c, r["account"]["id"].as_str()), (StatusCode::OK, Some(id.as_str())), "{r}");
+    let cookie = set_cookie(&h).unwrap();
+    let (_, _, me) = call(&t, "GET", "/api/v1/me", as_cookie(Some(&cookie)), Value::Null).await;
+    assert_eq!(me["creds"][0]["kind"], "passkey");
+    assert_eq!(me["creds"][0]["label"], "soft key", "signing in keeps the label");
+    // the same assertion again: its challenge is spent
+    let (c, _, e) = call(&t, "POST", "/api/v1/auth/passkey/login/verify", Req::default(), body).await;
+    assert_eq!((c, e["code"].as_str()), (StatusCode::UNAUTHORIZED, Some("bad_token")));
+    // a fresh challenge but a count that did not rise: a cloned authenticator
+    let (_, _, l) = call(&t, "POST", "/api/v1/auth/passkey/login/options", Req::default(), Value::Null).await;
+    let (c, _, e) = call(&t, "POST", "/api/v1/auth/passkey/login/verify", Req::default(), login(1, l["challenge"].clone())).await;
+    assert_eq!((c, e["code"].as_str()), (StatusCode::BAD_REQUEST, Some("bad_passkey")));
+    let _ = std::fs::remove_dir_all(&t.root);
 }

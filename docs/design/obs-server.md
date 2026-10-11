@@ -168,3 +168,58 @@ HTTP maps them to 400, 404, 503 and 504.
   interleavings and compares the store with sequential ingest.
 - A crash test writes a torn batch and checks that the store is still readable
   and that the next append is intact.
+
+## MCP server for coding agents (`obs mcp`)
+
+`obs mcp` is a Model Context Protocol server on stdio, built into the `obs`
+CLI (`crates/modgrad-obs/src/mcp/`). It is a client of the store, not part
+of the server. Analysis (trend, spikes, plateau, forecast) runs in the
+`obs mcp` process using `modgrad-obs-analysis`, the same code the dashboard
+runs as wasm. Invariant 6 still holds: the server does no analysis.
+
+```
+obs mcp [--dir <obs root>] [--base-url <dashboard url>]
+claude mcp add obs -- /path/to/obs mcp --dir /path/to/obs
+```
+
+`--dir` is the root that holds `runs/` (default `$OBS_DIR`, else `./obs`).
+`--base-url` is the dashboard to link boards to. Without it, boards link to
+`file://<root>/dashboard.html#board=…`. `--url <server> [--token T]` selects
+remote mode. Remote mode is not implemented yet: every tool returns an error
+that tells the agent to use `--dir`.
+
+The protocol layer is hand-written JSON-RPC 2.0, one message per line. It
+implements `initialize`, `ping`, `tools/list` and `tools/call`, and returns
+empty lists for resources and prompts. The official SDK would pull tokio and
+schemars into a crate that has neither.
+
+| tool          | does                                                                 |
+|---------------|----------------------------------------------------------------------|
+| `log`         | append one row `{metric: number}` at a step (default: last step + 1); creates the run |
+| `ingest_log`  | parse raw stdout (`step N loss=…`, `step N \| loss … \| acc …%`, `ctmlm_pilot` lines) into rows; reports skipped lines |
+| `list_runs`   | table of runs: last step, metric count, finished / running / idle, last update |
+| `read_metric` | last N values of one metric, plus min / max / last with steps        |
+| `summarize`   | per key metric: latest value, best value, trend with ± and verdict, spikes, plateau, backtested forecast, ETA to a target, mean ± sd across seeds (`name`, `name_s2`, …) |
+| `compare`     | one metric across runs: table at the steps they share, differences, best at each run's own last step and at the latest shared step |
+| `make_board`  | save `boards/<slug>.json` from `metric{run=~"a\|b"}` queries; return its URL |
+
+The tools are designed for weak local models:
+
+- Arguments are flat strings and numbers. Argument names and tool names
+  are matched case-insensitively and with aliases (`run_name`, `metric_name`,
+  `listRuns`). Numbers may be strings (`"7.5%"`, `"3e-4"`). Arguments sent
+  as a JSON string are parsed.
+- Run names resolve in this order: exact, case-insensitive, last path
+  component, punctuation-insensitive, unique substring. Metric names also
+  match aliases (`lr` → `learning_rate`). On a miss, the error lists the
+  closest names.
+- Output is short plain text, at most 40 lines. Each result ends with a
+  `Next:` line that suggests the call to make next.
+- A tool failure is returned as a result with `isError: true` and an example
+  call, not as a JSON-RPC error, so the model can read it and retry.
+- The forecast is a ridge model backtested against repeating the last value.
+  If it does not beat the last value, the output says "no skill" and gives no
+  ETA.
+
+`bench/obs_agent_bench/` checks these claims against a local model; see its
+README.

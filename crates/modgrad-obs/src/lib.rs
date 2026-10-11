@@ -459,6 +459,31 @@ impl Run {
         self.write_summary(Some(e))
     }
 
+    /// Merge `extra` into the summary and rewrite `summary.json` (not
+    /// finished). W&B `run.summary.update({...})` mid-run.
+    pub fn update_summary(&mut self, extra: &impl Serialize) -> io::Result<()> {
+        self.merge_summary(extra)?;
+        self.write_summary(None)
+    }
+
+    /// Merge the keys of `patch` (a JSON object) into `config.json`'s
+    /// `config`, atomically (temp file + rename). W&B `run.config.update`.
+    pub fn update_config(&mut self, patch: &Value) -> io::Result<()> {
+        let Value::Object(p) = patch else { return Ok(()) };
+        let path = self.dir.join("config.json");
+        let mut cfg: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        if !cfg["config"].is_object() {
+            cfg["config"] = json!({});
+        }
+        let c = cfg["config"].as_object_mut().unwrap();
+        for (k, v) in p {
+            c.insert(k.clone(), v.clone());
+        }
+        let tmp = self.dir.join("config.json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(&cfg)?)?;
+        std::fs::rename(tmp, path)
+    }
+
     /// W&B-style `run.log({...}, step=…)`: scalars become one history line
     /// in `metrics.jsonl`; each histogram/tensor becomes one line in
     /// `arrays.jsonl`. Items: anything `Into<Item>` (`f64`, `f32`,

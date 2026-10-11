@@ -32,7 +32,7 @@ async fn state_and_read_oneshot() {
     let (state, rx) = State::open(&root).unwrap();
     let read = ReadState::new(rx);
     let mut state = tower::buffer::Buffer::new(state, 16);
-    let r = state.ready().await.unwrap().call(StateRequest::CreateRun { name: "proj/a".into(), project: Some("p".into()), config: json!({"d": 8}) }).await.unwrap();
+    let r = state.ready().await.unwrap().call(StateRequest::CreateRun { name: "proj/a".into(), project: Some("p".into()), config: json!({"d": 8}), meta: None }).await.unwrap();
     assert_eq!(r, StateResponse::Created { run: "proj/a".into() });
     let recs = vec![
         Record::Log { step: 1, t: Some(1.0), items: vec![("loss".into(), Item::Scalar(2.0)), ("acc".into(), Item::Scalar(0.1))] },
@@ -64,7 +64,7 @@ async fn state_and_read_oneshot() {
     assert_eq!(runs[0]["config"]["d"], 8);
     assert!(matches!(read.clone().oneshot(ReadRequest::Config("nope".into())).await, Err(ReadError::UnknownRun(_))));
     // invalid names are refused
-    let e = state.ready().await.unwrap().call(StateRequest::CreateRun { name: "../x".into(), project: None, config: json!({}) }).await.unwrap_err();
+    let e = state.ready().await.unwrap().call(StateRequest::CreateRun { name: "../x".into(), project: None, config: json!({}), meta: None }).await.unwrap_err();
     assert!(matches!(e.downcast_ref::<StateError>(), Some(StateError::InvalidRunName(_))));
 }
 
@@ -72,7 +72,7 @@ async fn state_and_read_oneshot() {
 async fn ingest_stack_end_to_end() {
     let root = tmp("ingest");
     let (ingest, read) = open(&root, IngestConfig::default()).unwrap();
-    ingest.clone().oneshot(IngestRequest::CreateRun { name: "r".into(), project: None, config: json!({}) }).await.unwrap();
+    ingest.clone().oneshot(IngestRequest::CreateRun { name: "r".into(), project: None, config: json!({}), meta: None }).await.unwrap();
     let futs: Vec<_> = (0..50u64).map(|s| ingest.clone().oneshot(log("r", s, s as f64))).collect();
     for f in futures_join(futs).await {
         assert_eq!(f.unwrap(), IngestResponse::Accepted);
@@ -166,7 +166,7 @@ async fn crash_mid_batch_leaves_store_readable() {
     let root = tmp("crash");
     {
         let (ingest, _read) = open(&root, IngestConfig::default()).unwrap();
-        ingest.clone().oneshot(IngestRequest::CreateRun { name: "r".into(), project: None, config: json!({}) }).await.unwrap();
+        ingest.clone().oneshot(IngestRequest::CreateRun { name: "r".into(), project: None, config: json!({}), meta: None }).await.unwrap();
         for s in 0..5 {
             ingest.clone().oneshot(log("r", s, s as f64)).await.unwrap();
         }
@@ -193,7 +193,7 @@ async fn crash_mid_batch_leaves_store_readable() {
 async fn reader_never_sees_uncommitted_bytes() {
     let root = tmp("commit");
     let (ingest, read) = open(&root, IngestConfig::default()).unwrap();
-    ingest.clone().oneshot(IngestRequest::CreateRun { name: "r".into(), project: None, config: json!({}) }).await.unwrap();
+    ingest.clone().oneshot(IngestRequest::CreateRun { name: "r".into(), project: None, config: json!({}), meta: None }).await.unwrap();
     ingest.clone().oneshot(log("r", 0, 0.0)).await.unwrap();
     // bytes beyond the committed length (a write in progress) are invisible
     let m = root.join("runs/r/metrics.jsonl");
@@ -221,7 +221,7 @@ proptest! {
             let a = tmp("seq");
             let (ingest, _r) = open(&a, cfg).unwrap();
             for r in 0..nruns {
-                ingest.clone().oneshot(IngestRequest::CreateRun { name: format!("r{r}"), project: None, config: json!({}) }).await.unwrap();
+                ingest.clone().oneshot(IngestRequest::CreateRun { name: format!("r{r}"), project: None, config: json!({}), meta: None }).await.unwrap();
             }
             for (r, &n) in steps.iter().enumerate() {
                 for s in 0..n as u64 {
@@ -231,7 +231,7 @@ proptest! {
             let b = tmp("con");
             let (ingest, _r) = open(&b, cfg).unwrap();
             for r in 0..nruns {
-                ingest.clone().oneshot(IngestRequest::CreateRun { name: format!("r{r}"), project: None, config: json!({}) }).await.unwrap();
+                ingest.clone().oneshot(IngestRequest::CreateRun { name: format!("r{r}"), project: None, config: json!({}), meta: None }).await.unwrap();
             }
             let mut hs = Vec::new();
             for (r, &n) in steps.iter().enumerate() {

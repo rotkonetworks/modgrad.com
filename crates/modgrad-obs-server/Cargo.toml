@@ -16,6 +16,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 axum = { version = "0.7", default-features = false, features = ["http1", "json", "query", "tokio"] }
 base64 = "0.22"
+sha2 = "0.10"
+async-stream = "0.3"
+futures-util = { version = "0.3", default-features = false }
 
 [dev-dependencies]
 tower-test = "0.4"

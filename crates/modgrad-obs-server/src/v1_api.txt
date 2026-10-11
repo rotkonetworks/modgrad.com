@@ -137,6 +137,19 @@ Naming conventions the dashboard understands
   loss, grad_norm, lr, tokens_seen, reward, kl, entropy, response_length:
                            the default board
 
+Transports
+----------
+  The API is served over HTTP/1.1 on TCP and, on servers started with
+  --h3 <udp addr>, also over HTTP/3 (QUIC, UDP). Those servers add
+      Alt-Svc: h3=":<udp port>"; ma=86400
+  to every TCP response: HTTP/3 is on that UDP port of the same hostname,
+  with a certificate for that name. Paths, bodies, tokens, errors and SSE
+  are the same on both.
+  TCP is always there: curl, browsers and the Python client use it.
+  `modgrad run` / `modgrad push` switch to HTTP/3 when an https server
+  advertises it (or with --h3), and fall back to TCP if the UDP handshake
+  does not finish within 1.5 s (UDP blocked); --no-h3 skips the attempt.
+
 Errors
 ------
   Every error is JSON {"error", "example", "help", "message"}: what was wrong, a

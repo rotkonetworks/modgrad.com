@@ -99,13 +99,22 @@ second) and appends them to that run's cached series in place; only panels
 whose query reads the run re-evaluate and redraw, and zoom groups keep the
 zoom across redraws. The run table and badges are reactive.
 
-## QUIC (planned, not built)
+## QUIC
 
-Today the CLI talks HTTP/1.1 with one short connection per POST (`net.rs`,
-std only, and `https://` through the `curl` binary so that no TLS stack is
-linked). That is enough at the default rate. The costs show up at high log
-rates and on lossy links: one handshake per batch, head-of-line blocking,
-and a reconnect after every network change.
+Built: HTTP/3 as a second transport for the unchanged v1 API (feature `h3`).
+`modgrad-server --h3 <udp addr>` bridges h3 requests into the same axum
+router (`crates/modgrad-obs-server/src/h3.rs`) and advertises it with
+`Alt-Svc`. `modgrad run` / `push` (`net::push_request`) keep one QUIC
+connection per server and fall back to TCP when the handshake does not
+finish in 1.5 s or the connection dies. The rest of this section was the
+original plan. The per-run stream with spool offsets is not built: requests
+are still one POST per batch, now multiplexed on one connection.
+
+Before this, the CLI talked HTTP/1.1 with one short connection per POST
+(`net.rs`, std only, and `https://` through the `curl` binary so that no
+TLS stack is linked). The costs show up at high log rates and on lossy
+links: one handshake per batch, head-of-line blocking, and a reconnect
+after every network change.
 
 Plan:
 
@@ -122,7 +131,8 @@ Plan:
 - **Reuse, don't add:** `modgrad-io` already ships a `quinn` + `rustls`
   telemetry transport (`telemetry_transport.rs`, feature `telemetry`). The
   obs transport should share its endpoint setup instead of adding a second
-  QUIC stack.
+  QUIC stack. (Not done: modgrad-io is not in the obs container's standalone
+  workspace. The two use the same quinn/rustls versions and the ring provider.)
 - **HTTP stays canonical.** The CLI tries QUIC and falls back to HTTP when
   UDP is blocked, and `curl` and the browser never need QUIC. The server
   read path (SSE) does not change.

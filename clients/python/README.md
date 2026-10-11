@@ -12,7 +12,9 @@ wandb.finish()
 ```
 
 The package is pure Python with no required dependencies (it uses stdlib `urllib`). Its
-syntax targets Python 3.8 and later; it has been tested only on Python 3.14.
+syntax targets Python 3.8 and later; it has been tested only on Python 3.14. It always
+talks to the server over TCP (HTTP/1.1, or HTTPS). HTTP/3 would need a QUIC library, so the
+client ignores a server's `Alt-Svc` header. Only the Rust `modgrad run` / `push` use HTTP/3.
 
 ## Install (from the repo)
 

@@ -40,7 +40,10 @@ export { methods, available, me, meError, consuming, consumeError };
 /** the signed-in account id (from /me, or from /auth/methods before /me has loaded) */
 export const accountId = (): string | null => me()?.account.id ?? methods()?.account?.id ?? null;
 
-onSignedOut(() => { setMe(null); setMethods((m) => (m ? { ...m, account: null } : m)); });
+onSignedOut(() => {
+  setMe(null); setMethods((m) => (m ? { ...m, account: null } : m));
+  if (portalView() === 'account') { showToast('your session ended; sign in again'); goLogin(); }
+});
 
 export async function refreshMe(): Promise<void> {
   try { setMe(await api.me()); setMeError(''); }

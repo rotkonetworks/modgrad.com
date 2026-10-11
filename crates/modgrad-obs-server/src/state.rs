@@ -171,6 +171,8 @@ impl State {
                         }
                         Record::Array { step, t, key, kind, shape, data, labels } => {
                             let s = if *step == AUTO_STEP { last.unwrap_or(0) } else { *step };
+                            // an array-only step is a logged step too
+                            last = Some(last.map_or(s, |l| l.max(s)));
                             b.arrays.push(modgrad_obs::array_line(s, t.unwrap_or(now), key, kind, shape, data, labels.as_deref(), None)?)
                         }
                         Record::Event { step, t, text } => b.push_event(if *step == AUTO_STEP { last.unwrap_or(0) } else { *step }, t.unwrap_or(now), text),
@@ -211,10 +213,16 @@ impl State {
     }
 }
 
-/// Step of the last complete line of `metrics.jsonl` (reads the tail only).
+/// Last logged step: the larger of the last complete lines of
+/// `metrics.jsonl` and `arrays.jsonl` (a step may hold only arrays).
 fn last_logged_step(dir: &Path) -> Option<u64> {
+    ["metrics.jsonl", "arrays.jsonl"].into_iter().filter_map(|f| tail_step(&dir.join(f))).max()
+}
+
+/// Step of the last complete line of a jsonl file (reads the tail only).
+fn tail_step(path: &Path) -> Option<u64> {
     use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::fs::File::open(dir.join("metrics.jsonl")).ok()?;
+    let mut f = std::fs::File::open(path).ok()?;
     let len = f.metadata().ok()?.len();
     let from = len.saturating_sub(64 * 1024);
     f.seek(SeekFrom::Start(from)).ok()?;

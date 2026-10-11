@@ -299,3 +299,45 @@ async fn samples_are_stored_and_served() {
     let (c, _) = send(&app, "GET", "/api/v1/runs/nope/x/samples", None, "").await;
     assert_eq!(c, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn index_tracks_late_config_and_array_only_steps() {
+    let (app, _root) = app("late-config", true);
+    let (c, v) = send(&app, "POST", "/api/v1/runs/late/log", None, r#"{"rows": [{"step": 0, "loss": 1.0}, {"step": 1, "loss": 0.9}], "config": {"lr": 1}}"#).await;
+    assert_eq!(c, StatusCode::OK, "{v}");
+    let entry = |v: &Value| v["runs"].as_array().unwrap().iter().find(|e| e["id"] == "late").cloned().unwrap();
+    let (_, idx) = send(&app, "GET", "/api/index", None, "").await;
+    assert_eq!(entry(&idx)["config"]["lr"], 1, "{idx}");
+    // config changed after the first rows
+    let (c, v) = send(&app, "POST", "/api/v1/runs/late/log", None, r#"{"config": {"lr": 2, "warmup": 100}}"#).await;
+    assert_eq!(c, StatusCode::OK, "{v}");
+    let (_, idx) = send(&app, "GET", "/api/index", None, "").await;
+    let e = entry(&idx);
+    assert_eq!((e["config"]["lr"].clone(), e["config"]["warmup"].clone()), (json!(2), json!(100)), "{e}");
+    // the last row holds only a histogram: it still counts as a logged step
+    let (c, v) = send(&app, "POST", "/api/v1/runs/late/log", None, r#"{"step": 5, "grad": {"histogram": {"edges": [0, 1, 2], "counts": [3, 4]}}}"#).await;
+    assert_eq!(c, StatusCode::OK, "{v}");
+    let (_, idx) = send(&app, "GET", "/api/index", None, "").await;
+    assert_eq!(entry(&idx)["last_step"], 5, "{}", entry(&idx));
+    // and an auto-step row continues after it
+    send(&app, "POST", "/api/v1/runs/late/log", None, r#"{"loss": 0.5}"#).await;
+    let (_, idx) = send(&app, "GET", "/api/index", None, "").await;
+    assert_eq!(entry(&idx)["last_step"], 6, "{}", entry(&idx));
+}
+
+#[tokio::test]
+async fn sse_resends_the_entry_when_config_changes() {
+    let (app, _) = app("ssecfg", true);
+    send(&app, "POST", "/api/v1/runs/c/log", None, r#"{"rows": [{"step": 0, "loss": 1}], "config": {"lr": 1}}"#).await;
+    let resp = app.clone().oneshot(Request::get("/api/v1/stream").body(Body::empty()).unwrap()).await.unwrap();
+    let mut body = resp.into_body().into_data_stream();
+    let mut buf = String::new();
+    next_event(&mut body, &mut buf, "hello").await;
+    send(&app, "POST", "/api/v1/runs/c/log", None, r#"{"config": {"lr": 2}}"#).await;
+    let run = next_event(&mut body, &mut buf, "run").await;
+    assert_eq!((run["run"].clone(), run["entry"]["config"]["lr"].clone()), (json!("c"), json!(2)), "{run}");
+    // an array-only step re-sends it too, with the step counted
+    send(&app, "POST", "/api/v1/runs/c/log", None, r#"{"step": 7, "g": {"histogram": {"edges": [0, 1], "counts": [2]}}}"#).await;
+    let run = next_event(&mut body, &mut buf, "run").await;
+    assert_eq!((run["entry"]["last_step"].clone(), run["entry"]["arrays"]["g"]["kind"].clone()), (json!(7), json!("histogram")), "{run}");
+}

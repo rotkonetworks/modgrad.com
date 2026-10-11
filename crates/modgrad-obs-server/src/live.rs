@@ -69,6 +69,7 @@ struct Seen {
     committed: [u64; 3],
     finished: bool,
     summary_mtime: Option<std::time::SystemTime>,
+    config_mtime: Option<std::time::SystemTime>,
 }
 
 /// Lines in `[from, to)` of a JSONL file, parsed (bad lines skipped).
@@ -101,7 +102,7 @@ impl Live {
         let mut seen: HashMap<String, Seen> = first
             .runs
             .iter()
-            .map(|(k, c)| (k.clone(), Seen { committed: c.committed, finished: c.finished, summary_mtime: mtime(&c.dir.join("summary.json")) }))
+            .map(|(k, c)| (k.clone(), Seen { committed: c.committed, finished: c.finished, summary_mtime: mtime(&c.dir.join("summary.json")), config_mtime: mtime(&c.dir.join("config.json")) }))
             .collect();
         let reader = live.clone();
         tokio::spawn(async move {
@@ -151,8 +152,11 @@ impl Live {
         };
         for (run, c) in &snap.runs {
             let fresh = !seen.contains_key(run);
-            let prev = seen.get(run).copied().unwrap_or(Seen { committed: [0; 3], finished: false, summary_mtime: None });
-            if fresh {
+            let prev = seen.get(run).copied().unwrap_or(Seen { committed: [0; 3], finished: false, summary_mtime: None, config_mtime: None });
+            let cm = mtime(&c.dir.join("config.json"));
+            // the entry carries config, the arrays index and last_step: re-send
+            // it when config changes after the first rows or arrays land
+            if fresh || cm != prev.config_mtime || c.committed[1] != prev.committed[1] {
                 let entry = self.entry(run).await.unwrap_or(Value::Null);
                 out.push(msg(LiveKind::Run, run, json!({ "entry": entry })));
             }
@@ -183,7 +187,7 @@ impl Live {
                 let summary = std::fs::read(c.dir.join("summary.json")).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).unwrap_or(Value::Null);
                 out.push(msg(LiveKind::Summary, run, json!({ "finished": c.finished, "summary": summary })));
             }
-            seen.insert(run.clone(), Seen { committed: c.committed, finished: c.finished, summary_mtime: sm });
+            seen.insert(run.clone(), Seen { committed: c.committed, finished: c.finished, summary_mtime: sm, config_mtime: cm });
         }
         out
     }

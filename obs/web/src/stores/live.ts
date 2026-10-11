@@ -81,7 +81,14 @@ export function attachLive(): LiveClient {
     updated.set(d.run, d.unix);
     const known = S.byId.get(entry.id);
     if (wanted(entry.id) && !entry.config.synthetic) setSelection((s) => { s.add(entry.id); });
-    if (known) { Object.assign(known, entry); changed({ added: [], updated: [] }); }
+    if (known) {
+      // a re-sent entry (config changed, arrays landed): take its metadata; row counts and
+      // series stay with the `rows` events so nothing is counted twice
+      const { metrics: _m, n_rows: _n, last_step, last_t: _t, ...meta } = entry;
+      Object.assign(known, meta);
+      if (last_step != null && (known.last_step == null || last_step > known.last_step)) known.last_step = last_step;
+      changed({ added: [], updated: [] });
+    }
     else upsertRuns([entry], { select: wanted(entry.id) });
     c.watch(entry.id, entry.last_step ?? -1);
   });

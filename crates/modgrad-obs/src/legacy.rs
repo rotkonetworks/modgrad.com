@@ -66,6 +66,43 @@ fn labelled(s: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// One `ctmlm_pilot` progress line,
+/// `step N: train loss (ema) L; BRAIN in-dist A% nll X | held-out B% nll Y  [S s/step, M min, RSS K kB]`,
+/// as `(step, [(key, value)], elapsed minutes)`. The `NONE (fixed): …`
+/// baseline line comes back as step 0. Shared by [`convert`] and the MCP
+/// `ingest_log` tool so both produce the same metric keys.
+pub fn parse_step_line(l: &str) -> Option<(u64, Vec<(&'static str, f64)>, Option<f64>)> {
+    let l = l.trim();
+    if let Some(rest) = l.strip_prefix("NONE (fixed):") {
+        let (a, b) = rest.split_once(", held-out")?;
+        let (ia, inl) = acc_nll(a.trim().strip_prefix("in-dist")?)?;
+        let (ha, hn) = acc_nll(b)?;
+        return Some((0, vec![("none_indist_acc_pct", ia), ("none_indist_nll", inl), ("none_heldout_acc_pct", ha), ("none_heldout_nll", hn)], None));
+    }
+    let rest = l.strip_prefix("step ")?;
+    let (n, rest) = rest.split_once(':')?;
+    let step: u64 = n.trim().parse().ok()?;
+    let (loss, rest) = rest.trim().strip_prefix("train loss (ema)")?.split_once(';')?;
+    let (main, bracket) = rest.split_once('[').unwrap_or((rest, ""));
+    let (ind, held) = main.split_once('|')?;
+    let (ia, inl) = acc_nll(ind.trim().strip_prefix("BRAIN")?.trim().strip_prefix("in-dist")?)?;
+    let (ha, hn) = acc_nll(held.trim().strip_prefix("held-out")?)?;
+    let mut kv = vec![("train_loss_ema", f(loss)?), ("brain_indist_acc_pct", ia), ("brain_indist_nll", inl), ("brain_heldout_acc_pct", ha), ("brain_heldout_nll", hn)];
+    let b: Vec<&str> = bracket.trim_end_matches(']').split(',').map(|x| x.trim()).collect();
+    let mut minutes = None;
+    for x in &b {
+        if let Some(v) = x.strip_suffix("s/step") {
+            kv.push(("s_per_step", f(v)?));
+        } else if let Some(v) = x.strip_suffix("min") {
+            minutes = f(v);
+            kv.push(("elapsed_min", minutes?));
+        } else if let Some(v) = x.strip_prefix("RSS").and_then(|v| v.trim().strip_suffix("kB")) {
+            kv.push(("rss_kb", f(v)?));
+        }
+    }
+    Some((step, kv, minutes))
+}
+
 fn parse_header(h: &str, cfg: &mut Map<String, Value>) -> bool {
     let Some(body) = h.strip_prefix("CTM-LM PILOT:") else { return false };
     let (a, b) = body.split_once(';').unwrap_or((body, ""));
@@ -225,27 +262,8 @@ pub fn convert(text: &str, out_dir: &Path, name: &str, source: &str, log_path: &
                 run.log_with_time(0, 0.0, &[("none_indist_acc_pct", ia), ("none_indist_nll", inl), ("none_heldout_acc_pct", ha), ("none_heldout_nll", hn)]).ok()?;
                 return Some(());
             }
-            if let Some(rest) = l.strip_prefix("step ") {
-                let (n, rest) = rest.split_once(':')?;
-                let step: u64 = n.trim().parse().ok()?;
-                let (loss, rest) = rest.trim().strip_prefix("train loss (ema)")?.split_once(';')?;
-                let (main, bracket) = rest.split_once('[').unwrap_or((rest, ""));
-                let (ind, held) = main.split_once('|')?;
-                let (ia, inl) = acc_nll(ind.trim().strip_prefix("BRAIN")?.trim().strip_prefix("in-dist")?)?;
-                let (ha, hn) = acc_nll(held.trim().strip_prefix("held-out")?)?;
-                let mut kv = vec![("train_loss_ema", f(loss)?), ("brain_indist_acc_pct", ia), ("brain_indist_nll", inl), ("brain_heldout_acc_pct", ha), ("brain_heldout_nll", hn)];
-                let b: Vec<&str> = bracket.trim_end_matches(']').split(',').map(|x| x.trim()).collect();
-                let mut minutes = None;
-                for x in &b {
-                    if let Some(v) = x.strip_suffix("s/step") {
-                        kv.push(("s_per_step", f(v)?));
-                    } else if let Some(v) = x.strip_suffix("min") {
-                        minutes = f(v);
-                        kv.push(("elapsed_min", minutes?));
-                    } else if let Some(v) = x.strip_prefix("RSS").and_then(|v| v.trim().strip_suffix("kB")) {
-                        kv.push(("rss_kb", f(v)?));
-                    }
-                }
+            if let Some((step, kv, minutes)) = parse_step_line(l) {
+                let kv: Vec<(&str, f64)> = kv.iter().map(|(k, v)| (*k, *v)).collect();
                 st.step = step;
                 st.t = minutes.map(|m| m * 60.0).unwrap_or(st.t);
                 run.log_with_time(step, st.t, &kv).ok()?;

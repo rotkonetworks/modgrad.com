@@ -8,12 +8,17 @@
 //!     Write per-run plot files and <obs_dir>/index.json for the dashboard.
 //! obs show <run_dir>
 //!     Print keys, last step and skipped-line count of a run.
+//! obs mcp [--dir <obs_dir>] [--base-url <dashboard url>]
+//!     MCP server on stdio for coding agents (tools: log, ingest_log,
+//!     list_runs, read_metric, summarize, compare, make_board). --dir is
+//!     the obs root holding runs/ (default $OBS_DIR, else ./obs).
+//!     --url <server> [--token T] selects remote mode (not implemented yet).
 //! ```
 
 use std::path::{Path, PathBuf};
 
 fn usage() -> ! {
-    eprintln!("usage: obs legacy <log.txt> <out_run_dir> [--name N] [--source S] | obs export <obs_dir> | obs show <run_dir>");
+    eprintln!("usage: obs legacy <log.txt> <out_run_dir> [--name N] [--source S] | obs export <obs_dir> | obs show <run_dir> | obs mcp [--dir <obs_dir>] [--base-url URL]");
     std::process::exit(2)
 }
 
@@ -87,6 +92,20 @@ fn main() {
             println!("name {}  last step {:?}  rows {}  arrays {}  events {}  skipped {}", rd.name(), rd.last_step(), rd.metrics.len(), rd.arrays.len(), rd.events.len(), rd.skipped);
             println!("metrics: {}", rd.metric_keys().join(", "));
             println!("arrays:  {}", rd.array_keys().join(", "));
+        }
+        Some("mcp") => {
+            use modgrad_obs::mcp::{Server, serve_stdio, store};
+            let st: Box<dyn store::Store> = match flag(&args, "--url") {
+                Some(url) => Box::new(store::RemoteStore { url, token: flag(&args, "--token") }),
+                None => {
+                    let dir = flag(&args, "--dir").or_else(|| std::env::var("OBS_DIR").ok()).unwrap_or_else(|| "obs".into());
+                    Box::new(store::LocalStore::open(Path::new(&dir), flag(&args, "--base-url")))
+                }
+            };
+            if let Err(e) = serve_stdio(&Server::new(st)) {
+                eprintln!("obs mcp: {e}");
+                std::process::exit(1);
+            }
         }
         _ => usage(),
     }

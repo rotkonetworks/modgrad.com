@@ -341,7 +341,7 @@ async fn email(AxState(st): AxState<AppState>, peer: Option<ConnectInfo<SocketAd
             }
         });
     } else {
-        tracing::info!("sign-in mail to {address} from {ip}: rate limited");
+        tracing::debug!("sign-in mail to {address} from {ip}: rate limited");
     }
     Ok(json_status(StatusCode::ACCEPTED, json!({ "status": "if that address can receive mail, a sign-in link is on its way" })))
 }

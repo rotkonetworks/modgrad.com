@@ -68,7 +68,7 @@ export async function restoreDropped(): Promise<void> {
   const runs = await restoreLocal();
   if (!runs.length) return;
   for (const r of runs) localIds.add(r.id);
-  addRunsUnique(runs, { select: false });
+  addRunsUnique(runs); // selected, as on the drop: otherwise they leave the default board after a reload
   refresh();
 }
 export async function forgetLocal(): Promise<void> {

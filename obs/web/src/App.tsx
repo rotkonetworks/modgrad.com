@@ -1,4 +1,4 @@
-import { createSignal, For, Match, onMount, Show, Switch } from 'solid-js';
+import { createEffect, createSignal, For, Match, on, onMount, Show, Switch } from 'solid-js';
 import { A, initWasm } from '@/lib/wasm';
 import { initTheme } from '@/lib/theme';
 import { hash, onHashChange, targetKey } from '@/lib/hash';
@@ -28,6 +28,9 @@ import RunsView from '@/views/RunsView';
 import SamplesView from '@/views/SamplesView';
 import EvalsView from '@/views/EvalsView';
 import { anomaliesOpen, setAnomaliesOpen } from '@/components/Anomalies';
+import { initAccount, portalView } from '@/stores/account';
+import LoginView from '@/views/LoginView';
+import AccountView from '@/views/AccountView';
 
 /** palette actions: the same operations as the chips, menus and inspector */
 function runAction(a: Action): void {
@@ -71,24 +74,34 @@ function keys(): void {
 
 export default function App() {
   const [ready, setReady] = createSignal(false);
-  onMount(async () => {
-    initTheme();
+  // the data side (wasm, index, board, live) starts with the first non-portal view: the sign-in and
+  // account pages work without it, and without the wasm build
+  let started = false;
+  const startData = async () => {
+    started = true;
     try { await initWasm(); } catch (e) { err('could not load the analysis wasm (' + e + '). Build it with scripts/build_obs_wasm.sh, then rebuild obs/web.'); return; }
     await prepareLive();
     const t = hash();
     await loadIndex(indexURL(t.project, t.run));
     if (t.run) { const id = t.run; setSelection((s) => { s.clear(); if (S.byId.has(id)) s.add(id); }); }
     await initBoard();
-    wireDnd(); keys();
+    wireDnd();
     restoreDropped();
     if (S.api) attachLive();
-    // a different data target (run / project / board) is a different page: reload
-    onHashChange((prev, next) => { if (targetKey(prev) !== targetKey(next) || next.isNew) location.reload(); });
     // small API for other modules and tests
     const w = window as unknown as Record<string, unknown>;
     w.obsAddRuns = upsertRuns;
     w.OBS = { S, A, upsertRuns, builder: { board: () => M.board, setBoard, addPanel: (q: string) => addToNew(q), openFocus, closeFocus, runAction } };
     setReady(true);
+  };
+  onMount(() => {
+    initTheme();
+    keys();
+    void initAccount();
+    // a different data target (run / project / board) is a different page: reload (once data is up;
+    // before that, the first non-portal view starts it on the new target)
+    onHashChange((prev, next) => { if (started && (targetKey(prev) !== targetKey(next) || next.isNew)) location.reload(); });
+    createEffect(on(portalView, (v) => { if (!v && !started) void startData(); }));
   });
   const ctx = () => ({ metrics: [...metricCounts(S.runs).keys()].sort(), fields: fieldsOf(S.runs) });
   return (
@@ -103,18 +116,19 @@ export default function App() {
       <DropReport />
       <Waiting />
       <main>
-        <Show when={ready()} fallback={<div class="note">loading…</div>}>
-          <Switch>
-            <Match when={currentTab() === 'board'}><BoardView /></Match>
-            <Match when={currentTab() === 'samples'}><SamplesView /></Match>
-            <Match when={currentTab() === 'evals'}><EvalsView /></Match>
-            <Match when={currentTab() === 'cross'}><CrossView /></Match>
-            <Match when={currentTab() === 'arrays'}><ArraysView /></Match>
-            <Match when={currentTab() === 'runs'}><RunsView /></Match>
-          </Switch>
-        </Show>
+        <Switch>
+          <Match when={portalView() === 'login'}><LoginView /></Match>
+          <Match when={portalView() === 'account'}><AccountView /></Match>
+          <Match when={!ready()}><div class="note">loading…</div></Match>
+          <Match when={currentTab() === 'board'}><BoardView /></Match>
+          <Match when={currentTab() === 'samples'}><SamplesView /></Match>
+          <Match when={currentTab() === 'evals'}><EvalsView /></Match>
+          <Match when={currentTab() === 'cross'}><CrossView /></Match>
+          <Match when={currentTab() === 'arrays'}><ArraysView /></Match>
+          <Match when={currentTab() === 'runs'}><RunsView /></Match>
+        </Switch>
       </main>
-      <Show when={ready() && focusId()}><FocusView /></Show>
+      <Show when={ready() && !portalView() && focusId()}><FocusView /></Show>
       <Popover />
       <ToastView />
       <Palette ctx={ctx} run={runAction} />

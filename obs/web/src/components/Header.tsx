@@ -8,6 +8,7 @@ import { TABS, openMenu, openPopover, setPaletteOpen, type Tab, type MenuItem } 
 import { resetDefault, exportBoard, inspector, setInspector } from '@/stores/board';
 import { openImport, SettingsPop } from '@/views/BoardView';
 import { anomaliesOpen, setAnomaliesOpen } from '@/components/Anomalies';
+import { accountId, available, goAccount, goLogin, portalView, signOut } from '@/stores/account';
 
 export const currentTab = (): Tab => { const v = hash().view; return (TABS.some(([t]) => t === v) ? v : 'board') as Tab; };
 
@@ -37,7 +38,7 @@ export default function Header() {
   return (
     <header class="top">
       <h1>modgrad</h1>
-      <span class="meta wideonly">{genMeta()}</span>
+      <Show when={!portalView()}><span class="meta wideonly">{genMeta()}</span></Show>
       <Show when={liveStatus()}><span class="meta live-status">{liveStatus()}</span></Show>
       <span class="sp" />
       <button type="button" class="narrowonly" title="more actions: open files, reload, theme, board tools" aria-label="more actions" aria-haspopup="menu" onClick={(e) => more(e.currentTarget)}>more</button>
@@ -53,12 +54,33 @@ export default function Header() {
       </span>
       <button type="button" class="wideonly" title="re-fetch the index and data" aria-label="reload the index and data" onClick={() => reloadIndex(indexURL(hash().project, hash().run))}>reload</button>
       <button type="button" class="wideonly" title="cycle theme: auto / light / dark" aria-label={'theme: ' + themeMode() + ', click to cycle'} onClick={cycleTheme}>theme: {themeMode()}</button>
+      <AccountButton />
       <nav class="tabs" aria-label="views">
         <For each={TABS}>{([t, label]) => (
-          <a href={'#view=' + t} classList={{ on: currentTab() === t }} aria-current={currentTab() === t ? 'page' : undefined}
+          <a href={'#view=' + t} classList={{ on: !portalView() && currentTab() === t }} aria-current={!portalView() && currentTab() === t ? 'page' : undefined}
             onClick={(e) => { e.preventDefault(); setHash({ view: t === 'board' ? null : t }); }}>{label}</a>
         )}</For>
       </nav>
     </header>
+  );
+}
+
+/** "sign in", or the account menu; nothing when the server has no accounts (static mode) */
+function AccountButton() {
+  const short = (id: string) => (id.length > 12 ? id.slice(0, 10) + '…' : id);
+  const menu = (anchor: HTMLElement) => openMenu(anchor, [
+    { label: 'account and credentials', title: 'credentials, projects, API tokens, sessions', run: goAccount },
+    { label: 'sign out', title: 'end this session', run: () => void signOut() },
+  ], 'account');
+  return (
+    <Show when={available()}>
+      <Show when={accountId()} fallback={
+        <button type="button" classList={{ acctbtn: true, on: portalView() === 'login' }} title="sign in with email, passkey, zafu or an SSH key" aria-label="sign in" onClick={goLogin}>sign in</button>
+      }>{(id) => (
+        <button type="button" classList={{ acctbtn: true, on: portalView() === 'account' }} title={'signed in as ' + id() + ': account page, sign out'} aria-label="account menu" aria-haspopup="menu" onClick={(e) => menu(e.currentTarget)}>
+          account <span class="mono">{short(id())}</span>
+        </button>
+      )}</Show>
+    </Show>
   );
 }

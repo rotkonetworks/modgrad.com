@@ -354,3 +354,59 @@ table.evals tr:hover td { background: var(--hl); }
 .alist li button { margin-left: auto; }
 .samplesview input[type=range] { accent-color: var(--c1); }
 .bpanel .panel.lheat .ptitle { display: block; font-weight: 400; color: var(--muted); }
+
+/* ------------------------------------------------------------ portal: sign-in and account */
+button.acctbtn { font: 12px var(--mono); }
+button.acctbtn.on { border-color: var(--frame); background: var(--hl); }
+.portal { max-width: 920px; }
+.portal h2 { margin-top: 18px; }
+.portal h2:first-child { margin-top: 4px; }
+.portal h3.psub { font: 600 11px var(--mono); text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 12px 0 6px; }
+.portal .note { font-size: 12px; }
+.portal .note a { color: var(--ink); }
+.portal .acct { color: var(--ink); }
+.portal .dim { color: var(--muted); }
+.pgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 400px), 1fr)); gap: 10px; margin: 6px 0; }
+.pbox { border: 1px solid var(--rule); background: var(--panel); padding: 8px 10px 10px; min-width: 0; }
+.pbox h3 { font: 600 12px var(--mono); margin: 0 0 6px; }
+.prow { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; margin: 4px 0; }
+.prow > label { display: inline-flex; gap: 5px; align-items: center; }
+.portal input[type=email], .portal input[type=text] { flex: 1 1 14em; min-width: 0; font: 13px var(--mono); padding: 3px 6px; }
+.portal select { font: 12px var(--mono); padding: 2px 4px; }
+.portal textarea { width: 100%; font: 12px var(--mono); color: var(--ink); background: var(--bg); border: 1px solid var(--muted); padding: 4px 6px; resize: vertical; }
+.portal button { font: 12px var(--mono); padding: 3px 8px; }
+.portal button.pri { border-color: var(--frame); font-weight: 600; }
+.portal button.danger:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.portal .confirm { display: inline-flex; gap: 4px; }
+a.btnlink { font: 12px var(--mono); border: 1px solid var(--muted); padding: 3px 8px; text-decoration: none; display: inline-block; }
+a.btnlink:hover { background: var(--hl); }
+.portal .err { margin: 4px 0; }
+.pok { border: 1px solid var(--frame); padding: 6px 8px; margin: 4px 0; font-size: 12px; }
+.copyline { display: flex; align-items: stretch; border: 1px dashed var(--muted); margin: 4px 0; min-width: 0; }
+.copyline code { flex: 1; min-width: 0; font: 12px var(--mono); padding: 4px 8px; overflow-wrap: anywhere; user-select: all; }
+.copyline button { border: 0; border-left: 1px dashed var(--muted); flex: none; }
+.psecret { border: 1px solid var(--accent); padding: 8px 10px; margin: 6px 0 10px; font-size: 12px; }
+.pdanger { border: 1px solid var(--accent); padding: 4px 10px 8px; }
+.ptwrap { overflow-x: auto; border: 1px solid var(--rule); margin: 4px 0 6px; }
+table.ptable { border-collapse: collapse; width: 100%; font-size: 12px; }
+table.ptable th, table.ptable td { padding: 3px 8px; text-align: left; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+table.ptable tr:last-child td { border-bottom: 0; }
+table.ptable th { font: 600 11px var(--mono); color: var(--muted); background: var(--bg); }
+table.ptable td.num { text-align: right; font-family: var(--mono); }
+table.ptable td.lab { max-width: 340px; overflow: hidden; text-overflow: ellipsis; }
+table.ptable td.act { text-align: right; }
+table.ptable td.act > * + * { margin-left: 4px; }
+table.ptable td.act button, table.ptable td.act a.btnlink { font: 11px var(--mono); padding: 1px 6px; }
+.tag.cur { border-color: var(--accent); color: var(--accent); }
+@media (max-width: 600px) {
+  /* tables become stacked rows: name first, then labelled facts, actions on the right */
+  table.ptable thead { display: none; }
+  table.ptable tr { display: flex; flex-wrap: wrap; gap: 2px 12px; padding: 4px 6px; border-bottom: 1px solid var(--rule); }
+  table.ptable tr:last-child { border-bottom: 0; }
+  table.ptable td { border: 0; padding: 0; }
+  table.ptable td:first-child { flex-basis: 100%; white-space: normal; overflow-wrap: anywhere; }
+  table.ptable td.lab { max-width: none; flex-basis: 100%; white-space: normal; overflow-wrap: anywhere; }
+  table.ptable td[data-h]::before { content: attr(data-h) " "; color: var(--muted); font: 11px var(--mono); }
+  table.ptable td.act { margin-left: auto; }
+  .portal input[type=email], .portal input[type=text] { flex-basis: 100%; }
+}

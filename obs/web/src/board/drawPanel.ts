@@ -21,10 +21,19 @@ import { addToNew } from '@/stores/board';
 
 export const MAX_POINTS = 1500;
 export interface DrawOut { badge: { text: string; skill: boolean; title: string } | null }
-export interface DrawCtx { panel: Panel; host: HTMLElement; foot: HTMLElement; res: QueryResult; events: Map<string, RunEvent[]>; inFocus: boolean; focusOpen: boolean; dataKey: string; title: string }
+export interface DrawCtx { panel: Panel; host: HTMLElement; foot: HTMLElement; res: QueryResult; events: Map<string, RunEvent[]>; inFocus: boolean; focusOpen: boolean; dataKey: string; title: string; redraw?: () => void }
 
 /** stable across data updates (labels carry counts like n=3) */
 const traceKey = (t: Trace) => `${t.letter}|${t.metric}|${t.runs[0]}`;
+/** a cheap fingerprint of the points a forecast reads (length, ends, two weighted sums) */
+function dataSig(t: { xs: ArrayLike<number>; raw: ArrayLike<number> }): string {
+  let s1 = 0, s2 = 0; const n = t.raw.length;
+  for (let i = 0; i < n; i++) { const v = t.raw[i]; if (Number.isFinite(v)) { s1 += v; s2 += v * ((i % 97) + 1); } }
+  return `${n}:${t.xs[0]}:${t.xs[t.xs.length - 1]}:${s1}:${s2}`;
+}
+const FC_LIVE_MS = 2000;
+const fcLast = new Map<string, { f: Forecast; at: number; n: number }>();
+const fcTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const niceRound = (v: number) => { const e = Math.pow(10, Math.floor(Math.log10(v)) - 1); return Math.round(v / e) * e; };
 
 export function drawPanel(c: DrawCtx): DrawOut {
@@ -62,9 +71,27 @@ export function drawPanel(c: DrawCtx): DrawOut {
       const fr = p.view.fc.frozen && p.view.fc.frozen[traceKey(t)];
       if (!p.view.fc.live && fr) f = fr;
       else {
-        const ck = JSON.stringify([p.q, t.label, to, fc.method, p.view.fc.window, p.view.fc.band, p.view.fc.pool, c.dataKey]);
+        // keyed on what the fit reads (this trace's and the pooled traces' data), not on the query
+        // text: a display stage (log y, ema, colour, another series) must not refit (~0.3-0.8 s each)
+        // (the default horizon moves with the data, so only a horizon the viewer set is identity)
+        const id = JSON.stringify([p.id, traceKey(t), fc.to || null, fc.method, p.view.fc.window, p.view.fc.band, p.view.fc.pool]);
+        const ck = JSON.stringify([id, to, dataSig(t), pool.map(dataSig)]);
         f = fcCache.get(ck);
-        if (!f) { f = Dt.forecastTrace(t, to, { method: fc.method, window: p.view.fc.window, band: p.view.fc.band, pool }); if (fcCache.size > 400) fcCache.clear(); fcCache.set(ck, f); }
+        if (!f) {
+          // while rows are being appended (a live run, or a live run in the pool) a trace refits at
+          // most every FC_LIVE_MS; in between the last fit is drawn and one redraw is queued, so
+          // the final rows always get a fit
+          const prev = fcLast.get(id), now = Date.now();
+          const n = t.raw.length + pool.reduce((a, o) => a + o.raw.length, 0); // grows only when rows were appended
+          if (prev && c.redraw && n > prev.n && now - prev.at < FC_LIVE_MS) {
+            f = prev.f;
+            if (!fcTimers.has(p.id)) fcTimers.set(p.id, setTimeout(() => { fcTimers.delete(p.id); c.redraw!(); }, FC_LIVE_MS - (now - prev.at) + 20));
+          } else {
+            f = Dt.forecastTrace(t, to, { method: fc.method, window: p.view.fc.window, band: p.view.fc.band, pool });
+            if (fcCache.size > 400) fcCache.clear();
+            fcCache.set(ck, f); fcLast.set(id, { f, at: now, n });
+          }
+        }
       }
       fcs.set(t.label, f);
       const hk = p.id + '\u0001' + traceKey(t), hist = fcHist.get(hk);

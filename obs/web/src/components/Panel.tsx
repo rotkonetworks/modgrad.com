@@ -90,7 +90,7 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
     const cur = model(); if (!cur) return;
     // keep keyboard/wheel focus on the same chart across a redraw (click-then-wheel zoom)
     const fi = [...host.querySelectorAll('svg')].indexOf(document.activeElement as SVGSVGElement);
-    const out = drawPanel({ panel: cur, host, foot, res, events, inFocus: !!props.inFocus, focusOpen: !!focusId(), dataKey: dataKey(), title: title() });
+    const out = drawPanel({ panel: cur, host, foot, res, events, inFocus: !!props.inFocus, focusOpen: !!focusId(), dataKey: dataKey(), title: title(), redraw: () => { if (t === tok) draw(); } });
     if (fi >= 0) host.querySelectorAll('svg')[fi]?.focus({ preventScroll: true });
     setBadge(out.badge);
     setPending(false);

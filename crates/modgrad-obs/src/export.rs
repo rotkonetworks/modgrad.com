@@ -108,37 +108,91 @@ fn write_json(p: &Path, v: &Value) -> io::Result<()> {
     std::fs::rename(tmp, p)
 }
 
-/// Export one run; returns its index entry.
-pub fn export_run(obs: &Path, dir: &Path) -> io::Result<Value> {
-    let rd = read_run(dir)?;
-    let rel = dir.strip_prefix(obs).unwrap_or(dir).to_string_lossy().replace('\\', "/");
-    let runs_rel = dir.strip_prefix(obs.join("runs")).ok().map(|p| p.to_string_lossy().into_owned());
-    let source = rd.config["meta"]["extra"]["source"].as_str().map(String::from).unwrap_or_else(|| {
-        match runs_rel.as_deref().map(|r| r.split('/').collect::<Vec<_>>()) {
-            Some(parts) if parts.len() >= 2 => parts[0].to_string(),
-            // a run directly under runs/: label it by its project if any
-            _ => rd.config["meta"]["project"].as_str().unwrap_or("local").to_string(),
-        }
-    });
-    let name = rd.name();
+/// Source label of a run: explicit provenance, else the first path
+/// component under `runs/`, else its project.
+pub fn source_of(rd: &RunData, runs_rel: Option<&str>) -> String {
+    rd.config["meta"]["extra"]["source"].as_str().map(String::from).unwrap_or_else(|| match runs_rel.map(|r| r.split('/').collect::<Vec<_>>()) {
+        Some(parts) if parts.len() >= 2 => parts[0].to_string(),
+        // a run directly under runs/: label it by its project if any
+        _ => rd.config["meta"]["project"].as_str().unwrap_or("local").to_string(),
+    })
+}
 
-    for sub in ["metrics", "arrays"] {
-        let _ = std::fs::remove_dir_all(dir.join(sub));
+/// `{"key","step":[…],"value":[…]}` for one metric over merged rows
+/// (`range`/`stride` select rows; they never average).
+pub fn metric_json(rd: &RunData, key: &str, range: std::ops::Range<u64>, stride: usize) -> Value {
+    let (mut st, mut va) = (Vec::new(), Vec::new());
+    for (s, r) in merged(rd).range(range) {
+        if let Some(v) = r.get(key) {
+            st.push(*s);
+            va.push(jnum(*v));
+        }
     }
-    let rows = merged(&rd);
+    let stride = stride.max(1);
+    if stride > 1 {
+        let n = st.len();
+        let keep: Vec<usize> = (0..n).filter(|i| i % stride == 0 || *i + 1 == n).collect();
+        st = keep.iter().map(|&i| st[i]).collect();
+        va = keep.iter().map(|&i| va[i].clone()).collect();
+    }
+    json!({ "key": key, "step": st, "value": va })
+}
+
+/// The dashboard JSON for one array key: records at evenly strided steps
+/// (at most `max_steps`, last kept), each mean-pooled to its kind's cap.
+pub fn array_json(rd: &RunData, key: &str, max_steps: usize) -> Option<Value> {
+    let recs = rd.array_series(key);
+    let n = recs.len();
+    if n == 0 {
+        return None;
+    }
+    let max_steps = max_steps.max(2);
+    let pick: Vec<usize> = if n <= max_steps {
+        (0..n).collect()
+    } else {
+        let mut v: Vec<usize> = (0..max_steps - 1).map(|i| i * (n - 1) / (max_steps - 1)).collect();
+        v.push(n - 1);
+        v.dedup();
+        v
+    };
+    let kind = recs[0].kind.clone();
+    let (mut steps, mut shapes, mut b64s, mut edges, mut labels) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for &i in &pick {
+        let r = recs[i];
+        let (shape, data) = match r.kind.as_str() {
+            "histogram" => (r.shape.clone(), r.data.clone()),
+            // high-dim states go out raw (PCA runs in the browser, wasm)
+            "trajectory" | "points" | "volume" => downsample(&r.shape, &r.data, STATE_ELEMS),
+            _ => downsample(&r.shape, &r.data, ARRAY_ELEMS),
+        };
+        steps.push(r.step);
+        shapes.push(shape);
+        b64s.push(encode_f32(&data));
+        edges.push(r.edges.clone().map(|e| json!(e)).unwrap_or(Value::Null));
+        labels.push(r.labels.as_ref().map(|l| json!(encode_f32(l))).unwrap_or(Value::Null));
+    }
+    let mut v = json!({ "key": key, "kind": kind, "step": steps, "shape": shapes, "b64": b64s });
+    match kind.as_str() {
+        "histogram" => v["edges"] = json!(edges),
+        "trajectory" | "points" if labels.iter().any(|l| !l.is_null()) => v["labels_b64"] = json!(labels),
+        _ => {}
+    }
+    Some(v)
+}
+
+/// The index entry and every plot file of one run, without touching disk.
+/// `rel` is the run's path relative to the obs root (e.g. `runs/bkk07/mid`);
+/// file names in the entry are relative to that path.
+pub fn build_run(rd: &RunData, rel: &str, source: &str) -> (Value, Vec<(String, Value)>) {
+    let mut files: Vec<(String, Value)> = Vec::new();
+    let rows = merged(rd);
     let keys = rd.metric_keys();
     let mut metric_files = Map::new();
     for k in &keys {
-        let (mut st, mut va) = (Vec::new(), Vec::new());
-        for (s, r) in &rows {
-            if let Some(v) = r.get(k) {
-                st.push(*s);
-                va.push(jnum(*v));
-            }
-        }
+        let v = metric_json(rd, k, 0..u64::MAX, 1);
         let file = format!("metrics/{}.json", key_file(k));
-        write_json(&dir.join(&file), &json!({ "key": k, "step": st, "value": va }))?;
-        metric_files.insert(k.clone(), json!({ "file": file, "n": st.len() }));
+        metric_files.insert(k.clone(), json!({ "file": file, "n": v["step"].as_array().map_or(0, |a| a.len()) }));
+        files.push((file, v));
     }
     let has_small = rows.len() > SMALL_THRESHOLD;
     if has_small {
@@ -154,56 +208,17 @@ pub fn export_run(obs: &Path, dir: &Path) -> io::Result<Value> {
                 cols.get_mut(k.as_str()).unwrap().push(jnum(v));
             }
         }
-        write_json(&dir.join("metrics.small.json"), &json!({ "step": steps, "keys": cols, "block": block }))?;
-    } else {
-        let _ = std::fs::remove_file(dir.join("metrics.small.json"));
+        files.push(("metrics.small.json".into(), json!({ "step": steps, "keys": cols, "block": block })));
     }
-
     let mut array_index = Map::new();
     for k in rd.array_keys() {
         let recs = rd.array_series(&k);
-        let n = recs.len();
-        let pick: Vec<usize> = if n <= ARRAY_STEPS {
-            (0..n).collect()
-        } else {
-            let mut v: Vec<usize> = (0..ARRAY_STEPS - 1).map(|i| i * (n - 1) / (ARRAY_STEPS - 1)).collect();
-            v.push(n - 1);
-            v.dedup();
-            v
-        };
-        let kind = recs[0].kind.clone();
-        let (mut steps, mut shapes, mut b64s, mut edges, mut labels) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        for &i in &pick {
-            let r = recs[i];
-            let (shape, data) = match r.kind.as_str() {
-                "histogram" => (r.shape.clone(), r.data.clone()),
-                // high-dim states go out raw (PCA runs in the browser, wasm)
-                "trajectory" | "points" | "volume" => downsample(&r.shape, &r.data, STATE_ELEMS),
-                _ => downsample(&r.shape, &r.data, ARRAY_ELEMS),
-            };
-            steps.push(r.step);
-            shapes.push(shape);
-            b64s.push(encode_f32(&data));
-            edges.push(r.edges.clone().map(|e| json!(e)).unwrap_or(Value::Null));
-            labels.push(r.labels.as_ref().map(|l| json!(encode_f32(l))).unwrap_or(Value::Null));
-        }
         let file = format!("arrays/{}.json", key_file(&k));
-        let mut v = json!({ "key": k, "kind": kind, "step": steps, "shape": shapes, "b64": b64s });
-        match kind.as_str() {
-            "histogram" => v["edges"] = json!(edges),
-            "trajectory" | "points" => {
-                if labels.iter().any(|l| !l.is_null()) {
-                    v["labels_b64"] = json!(labels);
-                }
-            }
-            _ => {}
-        }
-        write_json(&dir.join(&file), &v)?;
-        array_index.insert(k.clone(), json!({ "file": file, "kind": kind, "shape": recs[n - 1].shape, "n_steps": n }));
+        array_index.insert(k.clone(), json!({ "file": file, "kind": recs[0].kind, "shape": recs[recs.len() - 1].shape, "n_steps": recs.len() }));
+        files.push((file, array_json(rd, &k, ARRAY_STEPS).unwrap()));
     }
-
     let ev: Vec<Value> = rd.events.iter().rev().take(200).rev().map(|e| json!({"step": e.step, "t": jnum(e.t), "text": e.text})).collect();
-    write_json(&dir.join("events.json"), &json!(ev))?;
+    files.push(("events.json".into(), json!(ev)));
 
     let mut cfg = Map::new();
     flatten("", &rd.config["config"], &mut cfg, 3);
@@ -212,9 +227,9 @@ pub fn export_run(obs: &Path, dir: &Path) -> io::Result<Value> {
     flatten("", &sum_obj, &mut summ, 2);
     let unparsed: Vec<Value> = sum_obj["legacy_unparsed"].as_array().cloned().unwrap_or_default();
     let last = rows.iter().next_back();
-    Ok(json!({
+    let index = json!({
         "id": rel.trim_start_matches("runs/"),
-        "name": name,
+        "name": rd.name(),
         "source": source,
         "path": rel,
         "project": rd.config["meta"]["project"],
@@ -235,7 +250,25 @@ pub fn export_run(obs: &Path, dir: &Path) -> io::Result<Value> {
         "n_events": rd.events.len(),
         "skipped_lines": rd.skipped,
         "unparsed": unparsed.into_iter().take(50).collect::<Vec<_>>(),
-    }))
+    });
+    (index, files)
+}
+
+/// Export one run (write its plot files next to it); returns its index entry.
+pub fn export_run(obs: &Path, dir: &Path) -> io::Result<Value> {
+    let rd = read_run(dir)?;
+    let rel = dir.strip_prefix(obs).unwrap_or(dir).to_string_lossy().replace('\\', "/");
+    let runs_rel = dir.strip_prefix(obs.join("runs")).ok().map(|p| p.to_string_lossy().into_owned());
+    let source = source_of(&rd, runs_rel.as_deref());
+    for sub in ["metrics", "arrays"] {
+        let _ = std::fs::remove_dir_all(dir.join(sub));
+    }
+    let _ = std::fs::remove_file(dir.join("metrics.small.json"));
+    let (index, files) = build_run(&rd, &rel, &source);
+    for (f, v) in files {
+        write_json(&dir.join(f), &v)?;
+    }
+    Ok(index)
 }
 
 /// Export every run under `<obs>/runs` and write `<obs>/index.json`.

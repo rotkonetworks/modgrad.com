@@ -227,6 +227,136 @@ fn write_line(f: &mut File, mut line: String) -> io::Result<()> {
     f.flush()
 }
 
+/// If `p` ends in a partial line (a crash mid-write), truncate it back to
+/// its last newline so the next append starts on a fresh line. Returns the
+/// number of bytes dropped.
+pub fn repair_tail(p: &Path) -> io::Result<u64> {
+    let bytes = match std::fs::read(p) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    if bytes.is_empty() || bytes.last() == Some(&b'\n') {
+        return Ok(0);
+    }
+    let keep = bytes.iter().rposition(|&b| b == b'\n').map(|i| i + 1).unwrap_or(0);
+    OpenOptions::new().write(true).open(p)?.set_len(keep as u64)?;
+    Ok((bytes.len() - keep) as u64)
+}
+
+/// The JSONL files of a run, in the order used by [`Run::committed`] and
+/// [`read_run_limited`].
+pub const JSONL_FILES: [&str; 3] = ["metrics.jsonl", "arrays.jsonl", "events.jsonl"];
+
+/// One history line. Errors on reserved keys.
+pub fn metric_line(step: u64, t: f64, kv: &[(&str, f64)]) -> Result<String, ObsError> {
+    let mut m = Map::new();
+    m.insert("step".into(), json!(step));
+    m.insert("t".into(), json!(round6(t)));
+    for (k, v) in kv {
+        if RESERVED_KEYS.contains(k) {
+            return Err(ObsError::ReservedKey((*k).to_string()));
+        }
+        m.insert((*k).to_string(), if v.is_finite() { json!(v) } else { Value::Null });
+    }
+    Ok(Value::Object(m).to_string())
+}
+
+/// One array line (`kind`: tensor, trajectory, points, volume, histogram).
+/// Validates shape, the size cap, labels and histogram edges.
+#[allow(clippy::too_many_arguments)]
+pub fn array_line(step: u64, t: f64, key: &str, kind: &str, shape: &[usize], data: &[f32], labels: Option<&[f32]>, edges: Option<&[f64]>) -> Result<String, ObsError> {
+    let mismatch = || ObsError::ShapeMismatch { key: key.into(), shape: shape.to_vec(), len: data.len() };
+    if shape.iter().product::<usize>() != data.len() {
+        return Err(mismatch());
+    }
+    let cap = if kind == "histogram" { MAX_HISTOGRAM_BINS } else { MAX_ARRAY_ELEMS };
+    if data.len() > cap {
+        return Err(ObsError::TooLarge { key: key.into(), elems: data.len(), cap });
+    }
+    match kind {
+        "trajectory" if shape.len() != 2 && shape.len() != 3 => return Err(mismatch()),
+        "points" if shape.len() != 2 || labels.is_some_and(|l| l.len() != shape[0]) => return Err(mismatch()),
+        "volume" if shape.len() != 3 => return Err(mismatch()),
+        "histogram" if edges.is_none_or(|e| e.len() != data.len() + 1) => return Err(mismatch()),
+        _ => {}
+    }
+    let mut line = json!({
+        "step": step, "t": round6(t), "key": key, "kind": kind, "shape": shape,
+        "dtype": "f32le", "b64": encode_f32(data),
+    });
+    if let Some(l) = labels {
+        line["labels_b64"] = json!(encode_f32(l));
+    }
+    if let Some(e) = edges {
+        line["edges"] = json!(e);
+    }
+    Ok(line.to_string())
+}
+
+pub fn event_line(step: u64, t: f64, text: &str) -> String {
+    json!({ "step": step, "t": round6(t), "text": text }).to_string()
+}
+
+/// Pre-serialised records for one run, written by [`Run::append_batch`]
+/// with a single `write_all` per file (the unit a server batches into).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Batch {
+    pub metrics: Vec<String>,
+    pub arrays: Vec<String>,
+    pub events: Vec<String>,
+    /// Last value per scalar key in this batch (feeds the auto-summary).
+    pub last: Vec<(String, f64)>,
+}
+
+impl Batch {
+    pub fn is_empty(&self) -> bool {
+        self.metrics.is_empty() && self.arrays.is_empty() && self.events.is_empty()
+    }
+    pub fn len(&self) -> usize {
+        self.metrics.len() + self.arrays.len() + self.events.len()
+    }
+    /// Add one W&B-style `log` call: scalars to one history line, the rest
+    /// to array lines.
+    pub fn push_log(&mut self, step: u64, t: f64, items: &[(String, Item)]) -> Result<(), ObsError> {
+        let scalars: Vec<(&str, f64)> = items.iter().filter_map(|(k, v)| if let Item::Scalar(x) = v { Some((k.as_str(), *x)) } else { None }).collect();
+        if !scalars.is_empty() {
+            self.metrics.push(metric_line(step, t, &scalars)?);
+            self.last.extend(scalars.iter().map(|(k, v)| (k.to_string(), *v)));
+        }
+        for (k, v) in items {
+            match v {
+                Item::Scalar(_) => {}
+                Item::Tensor(x) => self.arrays.push(array_line(step, t, k, "tensor", &x.shape, &x.data, None, None)?),
+                Item::Histogram(h) => self.arrays.push(array_line(step, t, k, "histogram", &[h.counts.len()], &h.counts, None, Some(&h.edges))?),
+            }
+        }
+        Ok(())
+    }
+    pub fn push_event(&mut self, step: u64, t: f64, text: &str) {
+        self.events.push(event_line(step, t, text));
+    }
+    pub fn extend(&mut self, other: Batch) {
+        self.metrics.extend(other.metrics);
+        self.arrays.extend(other.arrays);
+        self.events.extend(other.events);
+        self.last.extend(other.last);
+    }
+}
+
+fn write_lines(f: &mut File, lines: &[String]) -> io::Result<()> {
+    if lines.is_empty() {
+        return Ok(());
+    }
+    let mut buf = String::with_capacity(lines.iter().map(|l| l.len() + 1).sum());
+    for l in lines {
+        buf.push_str(l);
+        buf.push('\n');
+    }
+    f.write_all(buf.as_bytes())?;
+    f.flush()
+}
+
 impl Run {
     /// W&B-style entry point (`wandb.init(project=…, name=…, config=…)`):
     /// creates `<root>/runs/<name>/` and records `project` in `config.json`.
@@ -252,7 +382,12 @@ impl Run {
     pub fn create_in(dir: &Path, name: &str, config: &impl Serialize, meta: Meta) -> io::Result<Run> {
         std::fs::create_dir_all(dir)?;
         let cfg = json!({ "name": name, "config": config, "meta": meta });
-        std::fs::write(dir.join("config.json"), serde_json::to_vec_pretty(&cfg)?)?;
+        let tmp = dir.join("config.json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(&cfg)?)?;
+        std::fs::rename(tmp, dir.join("config.json"))?;
+        for f in JSONL_FILES {
+            repair_tail(&dir.join(f))?;
+        }
         Ok(Run {
             metrics: open_append(&dir.join("metrics.jsonl"))?,
             arrays: open_append(&dir.join("arrays.jsonl"))?,
@@ -264,12 +399,64 @@ impl Run {
         })
     }
 
+    /// Reopen an existing run directory for append without touching its
+    /// config: repairs torn tails, restores `start_unix` (so `t` continues
+    /// from wall-clock start) and the summary.
+    pub fn open_existing(dir: &Path) -> io::Result<Run> {
+        let cfg: Value = serde_json::from_slice(&std::fs::read(dir.join("config.json"))?)?;
+        let start_unix = cfg["meta"]["start_unix"].as_f64().unwrap_or_else(now_unix);
+        for f in JSONL_FILES {
+            repair_tail(&dir.join(f))?;
+        }
+        let summary = std::fs::read(dir.join("summary.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            .and_then(|v| v["summary"].as_object().cloned())
+            .unwrap_or_default();
+        let behind = (now_unix() - start_unix).max(0.0);
+        Ok(Run {
+            metrics: open_append(&dir.join("metrics.jsonl"))?,
+            arrays: open_append(&dir.join("arrays.jsonl"))?,
+            events: open_append(&dir.join("events.jsonl"))?,
+            dir: dir.to_path_buf(),
+            t0: Instant::now().checked_sub(std::time::Duration::from_secs_f64(behind)).unwrap_or_else(Instant::now),
+            start_unix,
+            summary,
+        })
+    }
+
     pub fn dir(&self) -> &Path {
         &self.dir
     }
 
-    fn elapsed(&self) -> f64 {
+    /// Seconds since the run started (the `t` written with each record).
+    pub fn elapsed(&self) -> f64 {
         self.t0.elapsed().as_secs_f64()
+    }
+
+    /// Write a [`Batch`]: one `write_all` + flush per non-empty file.
+    pub fn append_batch(&mut self, b: &Batch) -> io::Result<()> {
+        write_lines(&mut self.metrics, &b.metrics)?;
+        write_lines(&mut self.arrays, &b.arrays)?;
+        write_lines(&mut self.events, &b.events)?;
+        for (k, v) in &b.last {
+            self.summary.insert(k.clone(), if v.is_finite() { json!(v) } else { Value::Null });
+        }
+        Ok(())
+    }
+
+    /// Current byte length of each JSONL file ([`JSONL_FILES`] order). Every
+    /// byte below these lengths belongs to a complete, flushed line.
+    pub fn committed(&self) -> io::Result<[u64; 3]> {
+        Ok([self.metrics.metadata()?.len(), self.arrays.metadata()?.len(), self.events.metadata()?.len()])
+    }
+
+    /// Merge `extra` into the summary and write the final `summary.json`
+    /// without consuming the run (for long-lived owners such as a server).
+    pub fn finish_in_place(&mut self, extra: &impl Serialize) -> io::Result<()> {
+        self.merge_summary(extra)?;
+        let e = self.elapsed();
+        self.write_summary(Some(e))
     }
 
     /// W&B-style `run.log({...}, step=…)`: scalars become one history line
@@ -318,20 +505,11 @@ impl Run {
 
     /// As [`Run::log_scalars`] with an explicit `t` (seconds since run start).
     pub fn log_with_time(&mut self, step: u64, t: f64, kv: &[(&str, f64)]) -> Result<(), ObsError> {
-        let mut m = Map::new();
-        m.insert("step".into(), json!(step));
-        m.insert("t".into(), json!(round6(t)));
-        for (k, _) in kv {
-            if RESERVED_KEYS.contains(k) {
-                return Err(ObsError::ReservedKey((*k).to_string()));
-            }
-        }
+        let line = metric_line(step, t, kv)?;
         for (k, v) in kv {
-            let jv = if v.is_finite() { json!(v) } else { Value::Null };
-            self.summary.insert((*k).to_string(), jv.clone());
-            m.insert((*k).to_string(), jv);
+            self.summary.insert((*k).to_string(), if v.is_finite() { json!(v) } else { Value::Null });
         }
-        write_line(&mut self.metrics, Value::Object(m).to_string())?;
+        write_line(&mut self.metrics, line)?;
         Ok(())
     }
 
@@ -348,20 +526,8 @@ impl Run {
 
     #[allow(clippy::too_many_arguments)]
     fn log_kind(&mut self, step: u64, t: f64, key: &str, kind: &str, shape: &[usize], data: &[f32], labels: Option<&[f32]>) -> Result<(), ObsError> {
-        if shape.iter().product::<usize>() != data.len() {
-            return Err(ObsError::ShapeMismatch { key: key.into(), shape: shape.to_vec(), len: data.len() });
-        }
-        if data.len() > MAX_ARRAY_ELEMS {
-            return Err(ObsError::TooLarge { key: key.into(), elems: data.len(), cap: MAX_ARRAY_ELEMS });
-        }
-        let mut line = json!({
-            "step": step, "t": round6(t), "key": key, "kind": kind, "shape": shape,
-            "dtype": "f32le", "b64": encode_f32(data),
-        });
-        if let Some(l) = labels {
-            line["labels_b64"] = json!(encode_f32(l));
-        }
-        write_line(&mut self.arrays, line.to_string())?;
+        let line = array_line(step, t, key, kind, shape, data, labels, None)?;
+        write_line(&mut self.arrays, line)?;
         Ok(())
     }
 
@@ -371,9 +537,6 @@ impl Run {
     /// principal components ([`pca3`]); keep `neurons` small (e.g. 256
     /// top-variance neurons, see [`top_variance_columns`]).
     pub fn log_trajectory(&mut self, step: u64, key: &str, shape: &[usize], data: &[f32]) -> Result<(), ObsError> {
-        if shape.len() != 2 && shape.len() != 3 {
-            return Err(ObsError::ShapeMismatch { key: key.into(), shape: shape.to_vec(), len: data.len() });
-        }
         let t = self.elapsed();
         self.log_kind(step, t, key, "trajectory", shape, data, None)
     }
@@ -382,9 +545,6 @@ impl Run {
     /// numeric label per point (e.g. 0 = stored, 1 = lure). Projected to 3D
     /// by PCA at export.
     pub fn log_points(&mut self, step: u64, key: &str, shape: &[usize], data: &[f32], labels: Option<&[f32]>) -> Result<(), ObsError> {
-        if shape.len() != 2 || labels.is_some_and(|l| l.len() != shape[0]) {
-            return Err(ObsError::ShapeMismatch { key: key.into(), shape: shape.to_vec(), len: data.len() });
-        }
         let t = self.elapsed();
         self.log_kind(step, t, key, "points", shape, data, labels)
     }
@@ -392,9 +552,6 @@ impl Run {
     /// Volume `[ticks, h, w]` (e.g. maze path probability per tick), drawn
     /// as stacked slices.
     pub fn log_volume(&mut self, step: u64, key: &str, shape: &[usize], data: &[f32]) -> Result<(), ObsError> {
-        if shape.len() != 3 {
-            return Err(ObsError::ShapeMismatch { key: key.into(), shape: shape.to_vec(), len: data.len() });
-        }
         let t = self.elapsed();
         self.log_kind(step, t, key, "volume", shape, data, None)
     }
@@ -407,17 +564,8 @@ impl Run {
     }
 
     pub fn log_histogram_with_time(&mut self, step: u64, t: f64, key: &str, h: &Histogram) -> Result<(), ObsError> {
-        if h.edges.len() != h.counts.len() + 1 {
-            return Err(ObsError::ShapeMismatch { key: key.into(), shape: vec![h.edges.len()], len: h.counts.len() });
-        }
-        if h.counts.len() > MAX_HISTOGRAM_BINS {
-            return Err(ObsError::TooLarge { key: key.into(), elems: h.counts.len(), cap: MAX_HISTOGRAM_BINS });
-        }
-        let line = json!({
-            "step": step, "t": round6(t), "key": key, "kind": "histogram", "shape": [h.counts.len()],
-            "dtype": "f32le", "b64": encode_f32(&h.counts), "edges": h.edges,
-        });
-        write_line(&mut self.arrays, line.to_string())?;
+        let line = array_line(step, t, key, "histogram", &[h.counts.len()], &h.counts, None, Some(&h.edges))?;
+        write_line(&mut self.arrays, line)?;
         Ok(())
     }
 
@@ -453,7 +601,7 @@ impl Run {
     }
 
     pub fn event_with_time(&mut self, step: u64, t: f64, text: &str) -> Result<(), ObsError> {
-        write_line(&mut self.events, json!({ "step": step, "t": round6(t), "text": text }).to_string())?;
+        write_line(&mut self.events, event_line(step, t, text))?;
         Ok(())
     }
 
@@ -595,8 +743,19 @@ impl RunData {
 /// trailing newline (crash mid-write) and any unparsable line are skipped
 /// and counted. A missing file yields no lines.
 pub fn read_jsonl(path: &Path) -> io::Result<(Vec<Value>, usize)> {
+    read_jsonl_limited(path, None)
+}
+
+/// As [`read_jsonl`] but reads at most the first `limit` bytes (a
+/// committed length from [`Run::committed`]).
+pub fn read_jsonl_limited(path: &Path, limit: Option<u64>) -> io::Result<(Vec<Value>, usize)> {
     let text = match std::fs::read(path) {
-        Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+        Ok(mut b) => {
+            if let Some(l) = limit {
+                b.truncate(l as usize);
+            }
+            String::from_utf8_lossy(&b).into_owned()
+        }
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok((Vec::new(), 0)),
         Err(e) => return Err(e),
     };
@@ -634,6 +793,13 @@ fn num(v: &Value) -> f64 {
 
 /// Read a run directory written by [`Run`].
 pub fn read_run(dir: &Path) -> io::Result<RunData> {
+    read_run_limited(dir, None)
+}
+
+/// Read a run, each JSONL file only up to the given committed byte length
+/// ([`JSONL_FILES`] order) — a consistent snapshot while a writer appends.
+pub fn read_run_limited(dir: &Path, limits: Option<[u64; 3]>) -> io::Result<RunData> {
+    let lim = |i: usize| limits.map(|l| l[i]);
     let mut rd = RunData { dir: dir.to_path_buf(), ..Default::default() };
     rd.config = std::fs::read(dir.join("config.json"))
         .ok()
@@ -641,7 +807,7 @@ pub fn read_run(dir: &Path) -> io::Result<RunData> {
         .unwrap_or(Value::Null);
     rd.summary = std::fs::read(dir.join("summary.json")).ok().and_then(|b| serde_json::from_slice(&b).ok());
 
-    let (lines, s) = read_jsonl(&dir.join("metrics.jsonl"))?;
+    let (lines, s) = read_jsonl_limited(&dir.join("metrics.jsonl"), lim(0))?;
     rd.skipped += s;
     for v in lines {
         let Some(step) = v.get("step").and_then(|s| s.as_u64()) else {
@@ -660,7 +826,7 @@ pub fn read_run(dir: &Path) -> io::Result<RunData> {
         rd.metrics.push(MetricRow { step, t, values });
     }
 
-    let (lines, s) = read_jsonl(&dir.join("arrays.jsonl"))?;
+    let (lines, s) = read_jsonl_limited(&dir.join("arrays.jsonl"), lim(1))?;
     rd.skipped += s;
     for v in lines {
         let rec = (|| {
@@ -686,7 +852,7 @@ pub fn read_run(dir: &Path) -> io::Result<RunData> {
         }
     }
 
-    let (lines, s) = read_jsonl(&dir.join("events.jsonl"))?;
+    let (lines, s) = read_jsonl_limited(&dir.join("events.jsonl"), lim(2))?;
     rd.skipped += s;
     for v in lines {
         match (v.get("step").and_then(|x| x.as_u64()), v.get("text").and_then(|x| x.as_str())) {
@@ -779,6 +945,35 @@ mod tests {
         write_line(&mut f, "garbage".into()).unwrap();
         let rd = read_run(&dir).unwrap();
         assert_eq!(rd.series("x").len(), 2);
+    }
+
+    #[test]
+    fn torn_tail_repaired_on_reopen_and_batch_is_one_write() {
+        let root = tmpdir("repair");
+        let mut run = Run::create(&root, "r", &()).unwrap();
+        let mut b = Batch::default();
+        for s in 0..3u64 {
+            b.push_log(s, 0.0, &[("x".into(), Item::Scalar(s as f64))]).unwrap();
+        }
+        b.push_event(2, 0.0, "e");
+        run.append_batch(&b).unwrap();
+        let before = run.committed().unwrap();
+        drop(run);
+        let dir = root.join("runs/r");
+        // crash mid-batch: half a line at the end
+        let mut f = open_append(&dir.join("metrics.jsonl")).unwrap();
+        f.write_all(b"{\"step\":3,\"t\":0,\"x\"").unwrap();
+        assert_eq!(read_run(&dir).unwrap().series("x").len(), 3);
+        let mut run = Run::open_existing(&dir).unwrap();
+        assert_eq!(run.committed().unwrap(), before);
+        run.log_scalars(4, &[("x", 4.0)]).unwrap();
+        let rd = read_run(&dir).unwrap();
+        assert_eq!(rd.skipped, 0);
+        assert_eq!(rd.series("x").iter().map(|p| p.0).collect::<Vec<_>>(), vec![0, 1, 2, 4]);
+        assert_eq!(run.summary_map()["x"], 4.0);
+        // limited read sees only the committed prefix
+        let rd = read_run_limited(&dir, Some(before)).unwrap();
+        assert_eq!(rd.series("x").len(), 3);
     }
 
     #[test]

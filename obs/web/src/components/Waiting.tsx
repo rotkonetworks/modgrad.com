@@ -2,13 +2,14 @@ import { For, Show } from 'solid-js';
 import { S } from '@/stores/runs';
 import { waitingFor, recallToken } from '@/stores/live';
 import { hash } from '@/lib/hash';
+import { serverURL } from '@/lib/base';
 
 /** a run/project board with no data yet: how to send some (server mode) */
 export default function Waiting() {
   return (
     <Show when={waitingFor()}>{(what) => {
       const t = hash();
-      const origin = location.origin + location.pathname.replace(/\/(index|dashboard)\.html$/, '').replace(/\/$/, '');
+      const origin = serverURL();
       const token = t.project ? recallToken(t.project) : null;
       const dev = !!S.index?.dev && !token; // a dev server takes tokenless writes
       const tok = token || '<token>';

@@ -27,6 +27,10 @@ obs-server opens at `/`), the JS/CSS bundle, the drop worker and both wasm modul
   ```
   Saved boards go in `site/boards/<name>.json` for `#board=<name>`. The page needs HTTP
   (not `file://`): it fetches JSON and instantiates wasm.
+- **From the obs/ folder** (old setups: `python3 -m http.server --directory obs`, or obs-server
+  with its default `--static <root>`): `obs/dashboard.html` redirects to
+  `web/dist/index.html?data=../../`; `?data=` (only `../` sequences) makes the app fetch
+  `index.json`, `runs/`, `boards/` and `api/` from that level, keeping the URL hash.
 - **Dev**: `npm run dev` (port 5178) proxies `/api` to `OBS_SERVER` (default
   `http://127.0.0.1:8790`) and serves `../index.json`, `../runs/`, `../boards/` for static mode.
 

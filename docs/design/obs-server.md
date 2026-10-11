@@ -112,7 +112,8 @@ writer.
 | `GET  /api/runs/{run}/metrics/{key}`    | `ReadRequest::History` (same schema as the static `metrics/<key>.json`) |
 | `GET  /api/runs/{run}/arrays/{key}`     | `ReadRequest::Arrays` (same schema as the static `arrays/<key>.json`) |
 | `GET  /api/runs/{run}/history?keys=..`  | `ReadRequest::History`                    |
-| `GET  /` and other static paths         | `dashboard.html`, `pkg/`                  |
+| `GET  /` and other static paths         | the `--static` dir: `obs/web/dist` (the app, `dashboard.html` = `index.html`) |
+| `GET  /api/v1/boards/{name}`            | `<root>/boards/<name>.json` (MCP `make_board`), for `#board=<name>` |
 
 `history` and `arrays` return JSON by default and the binary frame format
 when the client sends `Accept: application/x-obs-frames`:

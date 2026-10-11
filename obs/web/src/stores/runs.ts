@@ -9,6 +9,7 @@ import { createSignal, type Accessor, type Setter } from 'solid-js';
 import { fmt, nums } from '@/lib/fmt';
 import type { ArrayFile, Index, Run, RunEvent } from '@/logic/types';
 import { catalogText } from '@/logic/data';
+import { dataURL } from '@/lib/base';
 
 export const S = { api: false, dev: false, index: null as Index | null, runs: [] as Run[], byId: new Map<string, Run>() };
 
@@ -51,7 +52,7 @@ const cache = new Map<string, Promise<unknown>>();
 export function getJSON<T>(path: string): Promise<T> {
   let p = cache.get(path);
   if (!p) {
-    p = fetch(path, { cache: 'no-store' }).then((r) => { if (!r.ok) throw new Error(path + ': HTTP ' + r.status); return r.json(); });
+    p = fetch(dataURL(path), { cache: 'no-store' }).then((r) => { if (!r.ok) throw new Error(path + ': HTTP ' + r.status); return r.json(); });
     p.catch(() => cache.delete(path));
     cache.set(path, p);
   }
@@ -204,7 +205,7 @@ export function indexURL(project: string | null, run: string | null): string {
 export async function reloadIndex(idxURL: string): Promise<void> {
   cache.clear(); series.clear(); events.clear();
   try {
-    S.index = S.api ? await (await fetch(idxURL, { cache: 'no-store' })).json() : await getJSON<Index>('index.json');
+    S.index = S.api ? await (await fetch(dataURL(idxURL), { cache: 'no-store' })).json() : await getJSON<Index>('index.json');
   } catch (e) { err(String(e)); return; }
   const local = S.runs.filter((r) => r.local);
   S.runs = S.index!.runs.concat(local); S.byId.clear(); for (const r of S.runs) S.byId.set(r.id, r);
@@ -213,7 +214,7 @@ export async function reloadIndex(idxURL: string): Promise<void> {
 }
 /** first load: server mode when the API answers, else static files next to the page */
 export async function loadIndex(idxURL: string): Promise<void> {
-  try { const r = await fetch(idxURL, { cache: 'no-store' }); if (r.ok) { const j = await r.json() as Index; if (j.server) { S.api = true; S.dev = !!j.dev; S.index = j; } } } catch { /* static mode */ }
+  try { const r = await fetch(dataURL(idxURL), { cache: 'no-store' }); if (r.ok) { const j = await r.json() as Index; if (j.server) { S.api = true; S.dev = !!j.dev; S.index = j; } } } catch { /* static mode */ }
   if (!S.api) {
     try { S.index = await getJSON<Index>('index.json'); }
     catch (e) { err('could not load index.json (' + e + '). Put index.json and runs/ next to this page (scripts/obs_collect.sh writes them), or run obs-server. Dropped log files still work.'); S.index = { runs: [], generated_unix: Date.now() / 1000 }; }

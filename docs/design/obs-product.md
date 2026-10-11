@@ -28,7 +28,7 @@ On a dev server (`/api/index` reports `"dev": true`) the token is left out.
 When the first `run` event for the target arrives, the panel goes away and
 the charts render in the same tab. Nothing needs a reload.
 
-URL targets (`obs/live.js`):
+URL targets (`obs/web/src/lib/hash.ts`, `obs/web/src/stores/live.ts`):
 
 - `#run=<id>` selects only that run and waits for it if it does not exist yet.
 - `#project=<p>` is a board: only that project's runs, and new ones appear live.
@@ -87,18 +87,17 @@ Server-Sent Events on `GET /api/v1/stream[?runs=|?project=]` and
 `events`, `summary` and `resync`. A client that falls behind is sent
 `resync` instead of being buffered without limit.
 
-`obs/live-client.js` is the browser side. It has no DOM access and extends
-`EventTarget`, so the planned SolidJS port can reuse it unchanged. It falls
+`obs/web/src/logic/liveClient.ts` is the browser side. It has no DOM access
+and extends `EventTarget`. It falls
 back to polling (`api/index` every 10 s, `history?from=` every 3 s for watched
 runs) when `EventSource` is missing, the stream does not open within 5 s, or
 three errors arrive in a row. Both paths emit the same events. A second
 `hello` means a reconnect, and the client turns it into `resync`.
 
-`obs/live.js` patches the cached metric JSON in place, so later re-renders
-see the new points. It replaces open charts' series through `chart.update()`,
-which redraws without rebuilding the panel and keeps the zoom. It does a full
-redraw, throttled to one every 3 s, only for the time axis and forecasts,
-which are derived per render. The run table is rebuilt at most every 2 s.
+`obs/web/src/stores/live.ts` batches rows per run (at most two flushes a
+second) and appends them to that run's cached series in place; only panels
+whose query reads the run re-evaluate and redraw, and zoom groups keep the
+zoom across redraws. The run table and badges are reactive.
 
 ## QUIC (planned, not built)
 

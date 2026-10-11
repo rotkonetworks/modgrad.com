@@ -6,6 +6,7 @@ import { LiveClient, type HelloEv, type RowsEv, type RunEv, type SummaryEv, type
 import { ssGet, ssSet } from '@/lib/storage';
 import { hash, setHash } from '@/lib/hash';
 import { ago } from '@/lib/fmt';
+import { DATA, dataURL } from '@/lib/base';
 import { S, appendRows, upsertRuns, reloadIndex, indexURL, touchRuns, runsVersion, invalidateEvents, bumpRun, setSelection, changed } from '@/stores/runs';
 
 const tokenKey = (p: string) => 'obs-anon-token:' + p;
@@ -15,7 +16,7 @@ export const recallToken = (project: string): string | null => ssGet(tokenKey(pr
 export async function prepareLive(): Promise<void> {
   if (!hash().isNew) return;
   try {
-    const r = await fetch('api/v1/projects', { method: 'POST' });
+    const r = await fetch(dataURL('api/v1/projects'), { method: 'POST' });
     if (!r.ok) return;
     const j = await r.json() as { project: string; token: string };
     ssSet(tokenKey(j.project), j.token);
@@ -53,7 +54,7 @@ let client: LiveClient | null = null;
 export function attachLive(): LiveClient {
   const t = hash();
   const opts = t.run && t.run.startsWith('anon-') ? { runs: [t.run] } : t.project ? { project: t.project } : {};
-  const c = client = new LiveClient(opts);
+  const c = client = new LiveClient({ ...opts, base: DATA });
   setStatus('live: connecting');
   setInterval(() => setTick(Date.now() / 1000), 1000);
   c.addEventListener('status', (e) => { const d = (e as CustomEvent).detail as { mode: string; reason?: string }; setStatus('live: ' + (d.mode === 'sse' ? 'streaming' : d.mode === 'poll' ? 'polling (' + (d.reason || 'fallback') + ')' : d.mode)); });

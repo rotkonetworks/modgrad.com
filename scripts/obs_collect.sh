@@ -61,4 +61,4 @@ fi
 
 echo "== exporting index"
 "$OBS_BIN" export "$OBS_DIR"
-echo "dashboard: $OBS_DIR/dashboard.html (serve: python3 -m http.server --directory $OBS_DIR 8781)"
+echo "dashboard: $OBS_DIR/dashboard.html (build obs/web once: cd obs/web && npm ci && npm run build; serve: python3 -m http.server --directory $OBS_DIR 8781)"

@@ -1,8 +1,7 @@
 # modgrad-obs graph builder: UX design
 
-Status: implemented in `obs/builder.js` + `obs/builder/*.js` (vanilla ES modules) and
-`crates/modgrad-obs-analysis/src/{query,expr,curve}.rs` (Rust, compiled to wasm). Planned port:
-Vite + SolidJS (see "Module boundaries").
+Status: implemented in `obs/web` (Vite + SolidJS + TypeScript; ported from the vanilla `obs/builder.js` in Oct 2026) and
+`crates/modgrad-obs-analysis/src/{query,expr,curve}.rs` (Rust, compiled to wasm). See "Module boundaries".
 
 ## 1. Three objects, no modes
 
@@ -152,7 +151,7 @@ Each is a chip, a `+` menu item on the panel, an inspector control, and a palett
   API; rejection shows a toast).
 - `< back to board` returns to the grid with the scroll position restored. Esc closes it only when
   focus is inside the focus view.
-- Deep link `#panel-<id>` (ids are letters/digits/dash); restored on reload; browser Back closes it.
+- Deep link `#panel=<id>` (ids are letters/digits/dash; the old `#panel-<id>` still works), combinable with `run=`/`project=`/`board=`; restored on reload; browser Back closes it.
 - The grid is the default view; the focus view is temporary.
 
 ## 8. Engine
@@ -162,31 +161,33 @@ Each is a chip, a `+` menu item on the panel, an inspector control, and a palett
   `forecast_eta`, `spikes`, `array_stats`, plus the existing kernels. Pure functions over flat
   arrays and strings (catalog as tab-separated lines, results as JSON metadata + one flat
   `Float64Array`), so they can move into a worker unchanged; today they run on the main thread.
-- Not done: a dedicated append-only per-stream store. Live and static data share one path through
-  the dashboard's fetch cache (`S.cache`) and `run.data` inline rows; a live update invalidates the
-  run's cached fetches and re-evaluates the queries.
+- Series store (`obs/web/src/stores/runs.ts`): one cached series per run and metric; live rows are
+  appended in place and bump that run's version, so only panels whose query plan reads the run
+  re-evaluate. New metric keys bump the catalog version (every query re-plans).
 
-## Module boundaries (for the Vite + Solid port)
+## Module boundaries (obs/web)
 
 | module | DOM? | contents |
 |---|---|---|
-| `obs/builder/board.js` | no | board/panel model, validation, (de)serialisation, undo stack, query text ops (`addEntries`, `setStage`, `mergeQueries`, `excludeRun`, `selectorFor`), presets, auto boards |
-| `obs/builder/data.js` | no | catalog text, stream list, loaders (injected fetchers), `evalQuery`, forecasts, badge/ETA text, spikes, live age, colour mapping |
-| `obs/builder/commands.js` | no | palette: input text → `[{label, action}]`, actions are plain data |
-| `obs/builder.js` | yes | rendering (browser, panels, chips, legend, inspector, overlays, focus view, palette) and input (pointer DnD, buttons); state changes go through `commit()` |
+| `src/logic/board.ts` | no | board/panel model, validation, (de)serialisation, undo stack, query text ops (`addEntries`, `setStage`, `mergeQueries`, `excludeRun`, `selectorFor`), presets, auto boards |
+| `src/logic/data.ts` | no | catalog text, stream list, `planOf`, `evalQuery` (injected loader), forecasts, badge/ETA text, spikes, live age, colour mapping |
+| `src/logic/commands.ts` | no | palette: input text → `[{label, action}]`, actions are plain data |
+| `src/logic/liveClient.ts`, `src/logic/drop.ts` (+ `dropWorker.ts`) | no | SSE/polling client; file grouping, worker protocol, IndexedDB |
+| `src/stores/*.ts` | no | Solid stores: runs (+ series store, per-run versions, selection), board (`commit()`, undo, presets, focus, shared boards), live, drop, ui |
+| `src/charts/*.ts`, `src/board/drawPanel.ts` | yes | the imperative RRD drawing (`chart2d`, `Scene`, heatmap, surfaces, array views) and one panel's chart, legend controls and forecast handles |
+| `src/components`, `src/views` | yes | Solid UI: header + tabs (Board / Across runs / Arrays / 3D / Runs), rail (series browser, run picker), panels, inspector (on demand), palette, focus view |
 | `crates/modgrad-obs-analysis` | no | parser, evaluator, numeric kernels |
 
-In the port, `chart2d`/`Scene` become components wrapping the existing SVG drawing, the board
-becomes a Solid store, and `builder.js` splits into components that call the three pure modules.
+The old History section is the `history` preset (selected runs × picked or headline metrics); its
+EMA, x axis and forecast toggles are chips, and "link x zoom" is a board setting.
 
 ## API for other modules
 
-- `window.obsAddRuns(runs, {select = true})`: upsert runs by `id` into `S.runs`/`S.byId` (defaults
-  filled), select them, drop cached fetches under an updated run's `path` (and its `api/runs/<id>/`
-  URLs), re-render the dashboard, and fire `document` event `obs:runs-changed` with
+- `window.obsAddRuns(runs, {select = true})` (= `upsertRuns` in `stores/runs.ts`): upsert runs by
+  `id` (defaults filled), select them, drop cached data of an updated run, re-evaluate, and fire
+  `document` event `obs:runs-changed` with
   `{added: [ids], updated: [ids]}`. Rows can be inline: `run.data = {metric: {step: [...],
   value: [...]}}` with `run.metrics = {metric: {n}}`; `metricSeries` reads them before fetching.
 - The reload button also fires `obs:runs-changed`.
-- `window.OBS`: the dashboard's shared state and helpers (`S`, `A`, `chart2d`, `metricSeries`,
-  `getJSON`, `src`, …); `window.OBS.builder`: `{board(), setBoard(b), addPanel(q), openFocus(id),
-  closeFocus(), render(), runAction(a)}`.
+- `window.OBS`: `{S, A, upsertRuns, builder}`; `window.OBS.builder`: `{board(), setBoard(b),
+  addPanel(q), openFocus(id), closeFocus(), runAction(a)}`.

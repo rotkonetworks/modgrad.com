@@ -1032,3 +1032,4 @@ mod tests {
 
 pub mod export;
 pub mod legacy;
+pub mod textlog;

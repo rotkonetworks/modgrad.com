@@ -11,9 +11,38 @@ Install from a checkout of https://github.com/rotkonetworks/modgrad:
 
     cargo install --path crates/modgrad-obs          # -> modgrad
     cargo install --path crates/modgrad-obs-server   # -> modgrad-server
+    pip install ./clients/python                     # optional: import modgrad as wandb
 
-Note: OBS Studio also installs a binary called `modgrad`. If `modgrad --help` does
-not print this tool's usage, use the full path (usually `~/.cargo/bin/obs`).
+## Start here: modgrad init
+
+Run this once in the user's project directory. It never prompts and is safe
+to re-run.
+
+    modgrad init                                     # local: runs go to ./obs, no server, no account
+    modgrad init --server https://obs.example.org    # a modgrad-server: gets an anonymous project token
+    modgrad init --mcp claude                        # also register the MCP server in .mcp.json (Claude Code)
+    modgrad init --json                              # the result as one JSON object on stdout
+
+It writes `.modgrad.json` (server, project and token, or the local data
+dir) and adds it to `.gitignore` (local mode also ignores `obs/`); the output
+says when `.gitignore` changed. `--mcp cursor` writes `.cursor/mcp.json`.
+It ends by printing the next steps:
+
+    modgrad run --name exp1 -- python train.py       # wrap a script that prints metrics
+    modgrad tail exp1                                # latest values and sparklines
+    modgrad-server --root obs                        # local mode: then open http://127.0.0.1:8790/
+
+With a server, Python logs to the same project with no further setup:
+
+    import modgrad as wandb
+    wandb.init(name="exp1", config={"lr": 3e-4})
+    wandb.log({"loss": 0.52})
+
+`modgrad run`, `tail`, `mcp` and the Python client find `.modgrad.json` in
+the current directory or a parent. Precedence: flag > environment variable >
+`.modgrad.json` > default. The token in it is only sent to the server it
+names. In local mode the Python client has no local writer; print metric
+lines and wrap the script with `modgrad run` instead.
 
 Data lives in an obs directory (default `./obs`): `obs/runs/<run>/` holds
 `config.json`, `metrics.jsonl`, `events.jsonl`, `summary.json`. Run names are
@@ -39,6 +68,10 @@ Every door ends in the same place: a run with metrics you can query and chart.
    dropped onto the page.
 
 ## 1. MCP
+
+After `modgrad init`, plain `modgrad mcp` uses the project file: its server
+(with its token) or its local data dir. `modgrad init --mcp claude` registers
+exactly that. Explicitly:
 
 Local data (recommended; nothing else to run):
 
@@ -92,7 +125,10 @@ Tools (arguments are flat and forgiving; run and metric names are fuzzy):
     log(run, metrics, step?)              record values; creates the run
     ingest_log(run, text)                 parse pasted stdout into a run
     make_board(query)                     save a dashboard board, return its URL;
-                                          query = metric{run=~"a|b"}; several panels with ';'
+                                          query = metric{run=~"a|b"}; several panels with ';'.
+                                          Local data: the URL is for `modgrad-server --root <dir>`
+                                          (it says so); --base-url or the project file's server
+                                          changes it
 
 Typical calls:
 
@@ -231,5 +267,9 @@ write the same directory format with no server.
 
 ## Viewing
 
-    modgrad-server --root obs --dev          # then open http://127.0.0.1:8790/
+    modgrad-server --root obs                # then open http://127.0.0.1:8790/
     # boards from make_board open at http://127.0.0.1:8790/#board=<id>
+
+The dashboard comes from obs/web/dist in the modgrad checkout (build it once,
+see "Build" in obs/web/README.md); `modgrad-server` says on startup where it
+serves it from. Add `--dev` to accept writes without a token.

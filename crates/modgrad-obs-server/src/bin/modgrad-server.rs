@@ -58,7 +58,7 @@ async fn main() {
             let dist = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../obs/web/dist"));
             if root.join("dashboard.html").is_file() || !dist.join("index.html").is_file() {
                 if !root.join("dashboard.html").is_file() {
-                    eprintln!("modgrad-server: no dashboard to serve at / (build it: cd obs/web && npm ci && npm run build, or pass --static <dist>); the API works without it");
+                    eprintln!("modgrad-server: no dashboard to serve at / (build obs/web/dist as obs/web/README.md says, or pass --static <dist>); the API works without it");
                 }
                 root.clone()
             } else {

@@ -96,7 +96,7 @@ function LengthHist(props: { xs: Sample[]; label: string }) {
             <text x={W - R} y={H - 8} text-anchor="end" style={{ font: '10px var(--mono)', fill: 'var(--ink)' }}>{fmt(Math.round(hh().hi))} words</text>
             <text x={L - 4} y={T + 8} text-anchor="end" style={{ font: '10px var(--mono)', fill: 'var(--muted)' }}>{max()}</text>
           </svg>
-          <figcaption class="note">completion length ({props.label}): n {props.xs.length}, mean {fmt(+hh().mean.toFixed(1))}, median {fmt(hh().median)} words</figcaption>
+          <figcaption class="note">completion length ({props.label}): n {props.xs.length}, mean {hh().mean.toFixed(1)}, median {fmt(hh().median)} words</figcaption>
         </figure>
       );
     }}</Show>
@@ -163,7 +163,7 @@ export default function SamplesView() {
           <label>sort <select aria-label="sort samples" value={sort()} onChange={(e) => setSort(e.currentTarget.value as SortKey)}>
             <For each={SORTS}>{([k, l]) => <option value={k} selected={k === sort()}>{l}</option>}</For>
           </select></label>
-          <span class="note">{list().length} of {atStep().length} shown{rewards().length ? `, mean reward here ${fmt(rewards().reduce((a, b) => a + b, 0) / rewards().length)}` : ''}{data()?.n ? `, ${data()!.n} in the run` : ''}</span>
+          <span class="note">{list().length} of {atStep().length} shown{rewards().length ? `, mean reward here ${(rewards().reduce((a, b) => a + b, 0) / rewards().length).toFixed(3)}` : ''}{data()?.n ? `, ${data()!.n} in the run` : ''}</span>
         </div>
         <Show when={data.loading}><div class="note">loading samples…</div></Show>
         <LengthHist xs={atStep()} label={allSteps() ? 'all steps' : `step ${curStep() === null ? '-' : fmt(curStep()!)}`} />

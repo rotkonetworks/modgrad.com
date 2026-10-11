@@ -87,8 +87,8 @@ export default function EvalsView() {
             <tbody>
               <For each={sorted()}>{(r, i) => (
                 <tr>
-                  <td class="rn" classList={{ rep: i() > 0 && sorted()[i() - 1].run === r.run }}>{r.run}</td>
-                  <td class="num">{fmtStep(r.step)}</td>
+                  <td class="rn" classList={{ rep: sortBy().by === 'run' && i() > 0 && sorted()[i() - 1].run === r.run }}>{r.run}</td>
+                  <td class="num">{r.step < 1e5 ? r.step : fmtStep(r.step)}</td>
                   <For each={cols()}>{(c, ci) => (
                     <td class="num">
                       <Show when={Number.isFinite(r.vals[ci()])} fallback={<span class="miss">-</span>}>

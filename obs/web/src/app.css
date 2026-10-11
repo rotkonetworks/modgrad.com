@@ -336,3 +336,5 @@ table.evals tr:hover td { background: var(--hl); }
 .alist .awhat { overflow-wrap: anywhere; }
 .alist .asize { color: var(--muted); }
 .alist li button { margin-left: auto; }
+.samplesview input[type=range] { accent-color: var(--c1); }
+.bpanel .panel.lheat .ptitle { display: block; font-weight: 400; color: var(--muted); }

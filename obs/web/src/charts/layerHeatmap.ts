@@ -5,6 +5,7 @@
 import { h, svgEl, showTip, hideTip } from '@/lib/dom';
 import { fmt, fmtTick, finiteRange } from '@/lib/fmt';
 import { colorScale, type Scale } from '@/lib/color';
+import { A } from '@/lib/wasm';
 
 export interface LayerHeatmapOpts {
   title: string; layers: number[]; cols: ArrayLike<number>; z: ArrayLike<number>;
@@ -73,11 +74,17 @@ export function layerHeatmap(parent: Element, o: LayerHeatmapOpts): HTMLDivEleme
   const lab = svgEl('g', { style: 'font:10px var(--mono);fill:var(--ink)' }, svg);
   const every = Math.max(1, Math.ceil(nr / Math.max(2, Math.floor(ph / 12))));
   for (let i = 0; i < nr; i += every) { const e = svgEl('text', { x: L - 4, y: T + (nr - 1 - i + 0.5) * ch + 3, 'text-anchor': 'end' }, lab); e.textContent = String(o.layers[i]); }
-  const nt = Math.min(nc, 6);
-  for (let k = 0; k < nt; k++) {
-    const j = nt === 1 ? 0 : Math.round((k * (nc - 1)) / (nt - 1));
-    const e = svgEl('text', { x: L + (j + 0.5) * cw, y: T + ph + 13, 'text-anchor': k === 0 ? 'start' : k === nt - 1 ? 'end' : 'middle' }, lab);
-    e.textContent = fmtTick(o.cols[j]);
+  // nice step values, each placed at the column holding it
+  if (nc) {
+    const c0 = o.cols[0], c1 = o.cols[nc - 1];
+    const ticks = c1 > c0 ? Array.from(A.nice_ticks(c0, c1, 5)).filter((v) => v >= c0 && v <= c1) : [c0];
+    for (const v of ticks) {
+      let j = 0; while (j < nc - 1 && o.cols[j] < v) j++;
+      const x = L + (j + 0.5) * cw;
+      svgEl('line', { x1: x, x2: x, y1: T + ph, y2: T + ph + 3, style: 'stroke:var(--frame)' }, svg);
+      const e = svgEl('text', { x, y: T + ph + 13, 'text-anchor': x < L + 20 ? 'start' : x > L + pw - 20 ? 'end' : 'middle' }, lab);
+      e.textContent = fmtTick(v);
+    }
   }
   { const e = svgEl('text', { x: L + pw, y: H - 3, 'text-anchor': 'end', style: 'fill:var(--muted)' }, lab); e.textContent = o.xlabel || 'step'; }
   { const e = svgEl('text', { x: 10, y: T + ph / 2, transform: `rotate(-90 10 ${T + ph / 2})`, 'text-anchor': 'middle', style: 'fill:var(--muted)' }, lab); e.textContent = 'layer'; }

@@ -1,6 +1,6 @@
 # modgrad-obs: LLM views (per-layer heatmaps, samples, evals, anomalies)
 
-Status: being built on branch `obs-llmviews`. This note fixes the **naming conventions and
+Status: implemented on branch `obs-llmviews` (verified in Chrome against `llm_synthetic` runs, desktop and 390 px). This note fixes the **naming conventions and
 record shapes** that clients (the Python client, `obs run`, agents) write, and describes the
 four views the dashboard derives from them. The server only stores and serves; every view is
 computed in the browser (Rust → wasm in `crates/modgrad-obs-analysis`, plus TS in `obs/web`).
@@ -91,6 +91,9 @@ evaluation step to get diffs.
   `{"samples": [...], "steps": [...], "keys": [...], "n": N}` (newest `limit`, default 5000).
 - Static export: `samples.json` next to `events.json`; the index entry carries `n_samples`.
 
+Limits: a run's `n_samples` comes with the index, so a run that starts logging samples after the
+page loaded shows them after a reload (runs that already had samples refresh live).
+
 Consistency: `samples.jsonl` sits outside the committed-length snapshot the other three files
 use, so a read may see samples a little newer than the metrics snapshot it was served with. A torn
 last line is never returned. Samples are not pushed over SSE: the Samples view refetches when the
@@ -127,5 +130,9 @@ A compact list over the selected runs: loss and grad-norm spikes (the wasm `spik
 > 6 robust sd above the trailing 10-point median) and non-finite values. The writer stores
 NaN and inf as `null`, so the browser cannot tell NaN from inf from a missing value; only
 gaps inside an otherwise dense series are reported, as "non-finite or missing". Per-layer grad
-norms are scanned too and summarised per step ("12 of 24 layers spiked"). Each entry has
-"jump": every step-axis panel on the board zooms to a window around that step.
+norms are scanned too and summarised per step ("6 of 24 layers (18-23)"). Spikes smaller than a
+chosen multiple of the trailing median (default x1.5) are hidden: on smooth curves the 6-sd test
+alone flags few-percent bumps. Each entry has "jump": every step-axis panel zooms to a window
+around that step, and panels on a metric x axis (`x tokens_seen`) zoom to the same window mapped
+through their own step -> x. Following panels pause. Series are scanned as loaded (server mode
+strides runs longer than 4000 points).

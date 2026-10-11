@@ -100,15 +100,20 @@ pub fn powerlaw_forecast(xs: &[f64], ys: &[f64], horizon: f64, n_out: usize) -> 
 /// the first finite value (falling when it starts above the target), with
 /// linear interpolation between points. `NaN` when it never does.
 pub fn first_crossing(xs: &[f64], ys: &[f64], target: f64) -> f64 {
+    let Some(first) = ys.iter().zip(xs).find(|(y, x)| y.is_finite() && x.is_finite()).map(|(y, _)| *y) else { return f64::NAN };
+    crossing(xs, ys, target, first > target)
+}
+
+/// First x at which `ys` is at or past `target` in the given direction
+/// (`falling`: at or below), interpolated from the previous point; the first
+/// point itself when it already is.
+pub fn crossing(xs: &[f64], ys: &[f64], target: f64, falling: bool) -> f64 {
     let mut prev: Option<(f64, f64)> = None;
-    let mut down = None;
     for (&x, &y) in xs.iter().zip(ys) {
         if !(x.is_finite() && y.is_finite()) {
             continue;
         }
-        let d = *down.get_or_insert(y > target);
-        let reached = if d { y <= target } else { y >= target };
-        if reached {
+        if if falling { y <= target } else { y >= target } {
             return match prev {
                 Some((px, py)) if py != y => px + (x - px) * (target - py) / (y - py),
                 _ => x,
@@ -120,13 +125,14 @@ pub fn first_crossing(xs: &[f64], ys: &[f64], target: f64) -> f64 {
 }
 
 /// ETA readout: `[mean, early, late]` crossing of `target` for a forecast
-/// with band `lo..hi`. For a falling curve the lower band reaches the target
-/// first (early) and the upper band last (late); reversed when rising.
+/// with band `lo..hi`, all in the direction the mean starts in. For a falling
+/// curve the lower band reaches the target first (early) and the upper band
+/// last (late); reversed when rising.
 pub fn eta(xs: &[f64], mean: &[f64], lo: &[f64], hi: &[f64], target: f64) -> [f64; 3] {
     let first = mean.iter().copied().find(|v| v.is_finite()).unwrap_or(f64::NAN);
     let falling = first > target;
-    let m = first_crossing(xs, mean, target);
-    let (e, l) = if falling { (first_crossing(xs, lo, target), first_crossing(xs, hi, target)) } else { (first_crossing(xs, hi, target), first_crossing(xs, lo, target)) };
+    let m = crossing(xs, mean, target, falling);
+    let (e, l) = if falling { (crossing(xs, lo, target, true), crossing(xs, hi, target, true)) } else { (crossing(xs, hi, target, false), crossing(xs, lo, target, false)) };
     [m, e, l]
 }
 
@@ -188,6 +194,9 @@ mod tests {
         assert!(eta(&xs, &mean, &lo, &hi, 0.5)[0].is_nan());
         // rising
         assert!((first_crossing(&xs, &[0.0, 1.0, 2.0, 3.0], 1.5) - 15.0).abs() < 1e-9);
+        // a band already past the target at the first point gives the first x, not NaN
+        let e = eta(&xs, &mean, &[3.0, 2.9, 2.5, 1.5], &hi, 3.2);
+        assert_eq!(e[1], 0.0);
     }
 
     #[test]

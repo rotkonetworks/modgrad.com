@@ -643,7 +643,8 @@ async function fillPanel(p, el, tok) {
   const split = cells.length > 1 || cells[0] !== '';
   el.classList.toggle('wide', split && !U.focus);
   let yrange = null;
-  if (split) { let lo = Infinity, hi = -Infinity; for (const t of traces) if (!hiddenTrace(p, t)) for (let i = 0; i < t.ys.length; i++) { const v = t.ys[i]; if (Number.isFinite(v) && (!meta.ylog || v > 0)) { lo = Math.min(lo, v); hi = Math.max(hi, v); } if (t.band) { if (Number.isFinite(t.lo[i]) && (!meta.ylog || t.lo[i] > 0)) lo = Math.min(lo, t.lo[i]); if (Number.isFinite(t.hi[i])) hi = Math.max(hi, t.hi[i]); } } if (Number.isFinite(lo)) yrange = [lo, hi]; }
+  const lockY = split && new Set(traces.map((t) => t.metric)).size === 1; // same quantity in every cell
+  if (lockY) { let lo = Infinity, hi = -Infinity; for (const t of traces) if (!hiddenTrace(p, t)) for (let i = 0; i < t.ys.length; i++) { const v = t.ys[i]; if (Number.isFinite(v) && (!meta.ylog || v > 0)) { lo = Math.min(lo, v); hi = Math.max(hi, v); } if (t.band) { if (Number.isFinite(t.lo[i]) && (!meta.ylog || t.lo[i] > 0)) lo = Math.min(lo, t.lo[i]); if (Number.isFinite(t.hi[i])) hi = Math.max(hi, t.hi[i]); } } if (Number.isFinite(lo)) yrange = [lo, hi]; }
   const wrap = split ? h('div', { class: 'bcells' }, host) : host;
   const group = split ? 'bsplit:' + p.id : 'b:' + meta.x_label;
   // follow: keep the zoom width, slide the window to the newest x
@@ -653,8 +654,8 @@ async function fillPanel(p, el, tok) {
     if (g.view && Number.isFinite(mx)) { const span = g.view.x1 - g.view.x0; g.view = { x0: mx - span, x1: mx }; }
   }
   const nTr = traces.filter((t) => !hiddenTrace(p, t)).length;
-  const oneMetric = new Set(traces.map((t) => t.metric)).size === 1;
-  const shortName = (t) => (oneMetric && !t.metric.includes(' = ') ? t.label.replace(':' + t.metric, '') : t.label);
+  const metricsIn = (ts) => new Set(ts.map((t) => t.metric)).size;
+  const shortName = (t, ts) => (metricsIn(ts) === 1 && !t.metric.includes(' = ') ? t.label.replace(':' + t.metric, '') : t.label);
   const anyBand = traces.some((t) => t.band);
   const now = Date.now();
   for (const cell of cells) {
@@ -664,7 +665,7 @@ async function fillPanel(p, el, tok) {
     const series = ct.map(({ t, i }, k) => {
       const f = fcs.get(t.label);
       return {
-        name: shortName(t) + (meta.by ? `  [${meta.by}=${t.color}]` : ''), trace: t, color: colour(i),
+        name: shortName(t, ct.map((x) => x.t)) + (meta.by ? `  [${meta.by}=${t.color}]` : ''), trace: t, color: colour(i),
         area: k === 0 && !meta.by && !anyBand && nTr <= 6 && !split, xs: Array.from(t.xs), ys: Array.from(t.ys), raw: t.raw,
         band: t.band ? { lo: t.lo, hi: t.hi } : null, hidden: hiddenTrace(p, t), y2: p.view.y2 === t.label,
         ghost: f && !f.none ? { xs: f.xs, ys: f.ys, lo: f.lo, hi: f.hi } : null,
@@ -673,7 +674,7 @@ async function fillPanel(p, el, tok) {
     });
     if (!series.length) continue;
     O.chart2d(cbox, {
-      title: titleOf(p) + (cell ? ' / ' + cell : ''), series, ylog: meta.ylog, yrange: split ? yrange : null,
+      title: titleOf(p) + (cell ? ' / ' + cell : ''), series, ylog: meta.ylog, yrange: lockY ? yrange : null,
       xlabel: meta.x_label, xfmt: meta.x_label === 'time' ? O.fmtTime : O.fmtTick, group,
       legendHead: series.length > 6 ? `${series.length} series` : '',
       decorateLegend: (tbl, ss) => decorateLegend(p, tbl, ss, cbox),
@@ -811,7 +812,7 @@ function drawOverlay(p, api, series, fcs, isStep, fc) {
   // horizon handle at the end of the forecast: drag right past the data to extend it
   const fx = [...fcs.values()].find((f) => f && !f.none);
   const lastX = fx ? fx.lastX : Math.max(...vis.flatMap((s) => Array.from(s.trace.xs).filter(Number.isFinite)));
-  const hz = fx ? fx.xs[fx.xs.length - 1] : (fc.to || lastX);
+  const hz = fc.to || Math.max(lastX, ...[...fcs.values()].filter((f) => f && !f.none).map((f) => f.xs[f.xs.length - 1]));
   const hg = el('g', { style: 'cursor:ew-resize' });
   const hx = clipX(X(hz));
   const hl = el('line', { x1: hx, x2: hx, y1: T, y2: T + ph, style: 'stroke:var(--c2);stroke-width:1;stroke-dasharray:4 2' }, hg);

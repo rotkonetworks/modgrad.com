@@ -51,7 +51,7 @@ export function metricCounts(runs: Run[]): Map<string, number> {
 export function hasReplicates(runs: Run[]): boolean {
   const key = (r: Run) => JSON.stringify(Object.entries(r.config || {}).filter(([k]) => k !== 'seed').sort());
   const seen = new Set<string>();
-  for (const r of runs) { const k = key(r); if (seen.has(k)) return true; seen.add(k); }
+  for (const r of runs) { const k = key(r); if (k === '[]') continue; if (seen.has(k)) return true; seen.add(k); } // no config: nothing says it repeats a run (as in the query engine)
   return false;
 }
 export function fieldsOf(runs: Run[]): string[] {

@@ -266,7 +266,7 @@ function kvTable(parent, pairs) {
 
 // ------------------------------------------------------------ 2D chart (RRD look)
 // Zoom: drag = x range (y refits to what is visible), alt-drag = box, shift-drag = pan,
-// ctrl/cmd + wheel = zoom at the cursor, double-click or Esc = reset. Charts that share
+// wheel = zoom at the cursor (once the chart has focus; ctrl/cmd + wheel always), double-click or Esc = reset. Charts that share
 // o.group share their x range. Legend Max/Avg/Min/Cur cover the visible window only.
 const ZOOM_GROUPS = new Map(); // name -> { view, charts: Set }
 let clipSeq = 0;
@@ -388,7 +388,7 @@ function chart2d(parent, o) {
     legend = nl;
     sub.textContent = view
       ? `showing ${xf(+x0.toPrecision(3))} to ${xf(+x1.toPrecision(3))}${view.y0 !== undefined ? `, y ${fmtTick(+y0.toPrecision(3))} to ${fmtTick(+y1.toPrecision(3))}` : ''}; double-click or Esc to reset`
-      : 'drag to zoom, alt-drag box, shift-drag pan, ctrl+wheel zoom';
+      : 'drag to zoom, alt-drag box, shift-drag pan, click then wheel to zoom';
   }
 
   const me = {
@@ -488,7 +488,7 @@ function chart2d(parent, o) {
   hit.addEventListener('dblclick', () => me.setView(null));
   svg.addEventListener('keydown', (ev) => { if (ev.key === 'Escape' && view) { me.setView(null); ev.preventDefault(); } });
   hit.addEventListener('wheel', (ev) => {
-    if (!(ev.ctrlKey || ev.metaKey)) return; // plain wheel scrolls the page
+    if (!(ev.ctrlKey || ev.metaKey || document.activeElement === svg)) return; // until the chart is clicked, the wheel scrolls the page
     ev.preventDefault();
     const c = dataX(local(ev).x), f = Math.pow(1.0015, ev.deltaY);
     let nx0 = c - (c - x0) * f, nx1 = c + (x1 - c) * f;

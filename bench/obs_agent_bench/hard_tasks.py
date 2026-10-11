@@ -350,7 +350,7 @@ def check_diverged(a, d):
 
 def check_continue_yes(a, d):
     yes = re.search(r"\byes\b|worth continuing|keep (?:it )?(?:going|training|running)|continue|still improving", a, re.I) is not None
-    no = re.search(r"^\s*no\b|not worth|\bstop\b(?! improving)|plateau", a, re.I) is not None
+    no = re.search(r"^\s*no\b|not worth|\bstop\b(?! improving)|(?<!no )(?<!not )(?<!without a )plateau", a, re.I) is not None
     return yes and not no, "want: yes, long/a is still clearly improving"
 
 

@@ -305,7 +305,7 @@ def run_agent(task, c, tools, a, ctx):
     msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": task["prompt"] + ("" if a.think else " /no_think")}]
     calls = []
     for turn in range(1, a.max_turns + 1):
-        body = {"model": a.model, "messages": msgs, "tools": tools, "temperature": a.temperature, "seed": a.seed + a.trial}
+        body = {"model": a.model, "messages": msgs, "tools": tools, "temperature": a.temperature, "seed": a.seed + a.trial, "max_tokens": a.max_tokens}
         r = requests.post(a.endpoint.rstrip("/") + "/chat/completions", json=body, timeout=a.timeout)
         r.raise_for_status()
         msg = r.json()["choices"][0]["message"]
@@ -339,6 +339,7 @@ def main():
     ap.add_argument("--temperature", type=float, default=0.2)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max-turns", type=int, default=10)
+    ap.add_argument("--max-tokens", type=int, default=3000, help="cap per model reply (a degenerate repeat loop otherwise runs into --timeout)")
     ap.add_argument("--timeout", type=float, default=900, help="seconds per model request")
     ap.add_argument("--only", help="comma-separated task ids")
     ap.add_argument("--suite", choices=["base", "hard", "all"], default="base", help="base = the 14 one-step tasks, hard = the multi-step tasks in hard_tasks.py")

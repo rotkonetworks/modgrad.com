@@ -32,6 +32,10 @@ pub enum IngestRequest {
     Summary { run: String, summary: Value },
     /// Config merge (barrier).
     Config { run: String, config: Value },
+    /// Remove every run of a project, files included (barrier). Only the
+    /// account portal sends this (account deletion); [`crate::Authed`]
+    /// refuses it.
+    DeleteProject { project: String },
 }
 
 impl IngestRequest {
@@ -45,6 +49,7 @@ impl IngestRequest {
             IngestRequest::Finish { .. } => "finish",
             IngestRequest::Summary { .. } => "summary",
             IngestRequest::Config { .. } => "config",
+            IngestRequest::DeleteProject { .. } => "delete_project",
         }
     }
     pub fn run(&self) -> &str {
@@ -57,9 +62,12 @@ impl IngestRequest {
             | IngestRequest::Finish { run, .. }
             | IngestRequest::Summary { run, .. }
             | IngestRequest::Config { run, .. } => run,
+            IngestRequest::DeleteProject { project } => project,
         }
     }
     /// Split into (run, records) for batchable requests.
+    // the Err is the request itself, handed back by value on purpose
+    #[allow(clippy::result_large_err)]
     fn into_records(self) -> Result<(String, Vec<Record>), IngestRequest> {
         match self {
             IngestRequest::Log { run, step, t, items } => Ok((run, vec![Record::Log { step, t, items }])),
@@ -214,6 +222,9 @@ where
                         }
                         IngestRequest::Config { run, config } => {
                             call_state(&mut state, StateRequest::Config { run: run.clone(), config }).await.map(|_| IngestResponse::Updated { run })
+                        }
+                        IngestRequest::DeleteProject { project } => {
+                            call_state(&mut state, StateRequest::DeleteProject { project: project.clone() }).await.map(|_| IngestResponse::Updated { run: project })
                         }
                         _ => unreachable!(),
                     };

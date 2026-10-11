@@ -21,7 +21,8 @@ Tokens
   obsr_…  run token: writes one run. Returned once, when a run is created.
   Anonymous project tokens expire (default 30 days, see expires_unix).
   Dev servers (modgrad-server --dev) also accept writes without a token.
-  Reads need no token. Anonymous projects are listed only by their board URL.
+  Reads need no token, except in private projects (see Accounts). Anonymous
+  projects are listed only by their board URL.
 
 Write
 -----
@@ -120,7 +121,49 @@ SSH (servers started with --ssh <addr>)
   ssh <host> token                               a project token (obsp_…) for this API,
                                                  `modgrad init` and Python; anonymous expiry
   ssh <host> runs | tail <run> | help            this key's runs, latest values, usage
+  ssh <host> login                               a one-time link (10 min) that signs a browser
+                                                 in with this key, or adds the key to the
+                                                 account the browser is signed in to
   Links use the server's --public-url.
+
+Accounts (sign in on the web)
+-----------------------------
+  One account holds any number of credentials: email addresses, SSH keys,
+  zafu keys, passkeys. Sign in with any; signed in, a new one is added to the
+  account; one that belongs to another account is refused (409 cred_taken).
+  The session is the HttpOnly cookie mg_session (30 days, sliding). Cookie
+  requests that change state need a same-origin browser (Sec-Fetch-Site /
+  Origin); bearer requests are unaffected. Errors here are {"error", "code"}.
+
+  GET  /api/v1/auth/methods        {email, zafu, passkey, ssh: {command} | null, account | null}
+  POST /api/v1/auth/email          {"email"} -> 202 always; mails <site>/login#email=<token> (15 min)
+  POST /api/v1/auth/email/consume  {"token"} -> {account: {id, created}, linked, created}; 410 token_expired
+  POST /api/v1/auth/ssh/consume    {"token"} (from `ssh <host> login`), same reply
+  POST /api/v1/auth/zafu/challenge -> {challenge_hex, statement, expires}; sign the bytes with ed25519
+  POST /api/v1/auth/zafu/verify    {challenge_hex, signature, public_key} (hex)
+  POST /api/v1/auth/passkey/register/options | register/verify | login/options | login/verify  (WebAuthn)
+  POST /api/v1/auth/logout         204
+
+  Signed in (else 401 {"code": "signed_out"}):
+  GET    /api/v1/me                {account, creds, projects, sessions, tokens}
+  DELETE /api/v1/me                {"confirm": "<account id>"}: account, sessions, tokens, project data
+  POST   /api/v1/me/projects       {"name", "visibility"?: "private"|"public"} -> 201; 409 name_taken; 400 bad_name
+                                   name: 3-40 of a-z 0-9 '-', not anon-…, not reserved
+  PATCH  /api/v1/me/projects/<name> {"visibility"}
+  POST   /api/v1/me/claim          {"project": "anon-…", "token": "obsp_… or obsc_…"}: becomes yours,
+                                   private, no longer expires
+  POST   /api/v1/me/tokens         {"project", "label", "expires_days"?} -> {id, token} (token shown once)
+  DELETE /api/v1/me/tokens/<id>
+  POST   /api/v1/me/creds/ssh      {"public_key": "ssh-ed25519 AAAA… comment"}: added unconfirmed;
+                                   `ssh <host> login` from that key confirms it
+  DELETE /api/v1/me/creds/<id>     409 last_cred for the only one
+  DELETE /api/v1/me/sessions/<id>
+
+  Private projects (the default for POST /api/v1/me/projects, and claimed ones)
+  are read only with the owner's session or a token for the project
+  (Authorization: Bearer obsp_…): index, history, config, summary, events,
+  samples, metrics, arrays, streams, boards. Otherwise 401 (no session or
+  token) or 403. Public and unowned projects read as before.
 
 MCP (for coding agents)
 -----------------------
@@ -128,8 +171,8 @@ MCP (for coding agents)
   your machine and the server only stores and selects:
       modgrad mcp --url $OBS --token $MODGRAD_TOKEN
   Servers started with --mcp also serve MCP over streamable HTTP at POST /mcp
-  (Authorization: Bearer <token> for writes), for agents that cannot run a
-  local binary. Its analysis runs on the server.
+  (Authorization: Bearer <token> for writes, and for reads of a private
+  project), for agents that cannot run a local binary. Its analysis runs on the server.
 
 Live (Server-Sent Events)
 -------------------------
@@ -172,3 +215,4 @@ Errors
   corrected request, and both as one plain-text paragraph.
   400 bad body, 401 missing/unknown/expired token, 403 token does not cover
   this run, 409 run exists with its own token, 503/504 overloaded (retry).
+  Reads of a private project: 401 / 403 with "code": "signed_out" / "forbidden".

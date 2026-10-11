@@ -39,6 +39,8 @@ be served without conversion.
   events for one run. The whole batch is serialised and written with one
   `write_all` per file, then flushed.
 - `Finish { run, summary }` merges the summary and writes `summary.json`.
+- `DeleteProject { project }` drops every `<project>/…` run's handles and
+  removes its directory (account deletion only; `Authed` refuses it).
 
 After every successful write the state publishes a new `Snapshot` through a
 `tokio::sync::watch` channel.
@@ -169,6 +171,49 @@ HTTP maps them to 400, 404, 503 and 504.
   interleavings and compares the store with sequential ingest.
 - A crash test writes a torn batch and checks that the store is still readable
   and that the next append is intact.
+
+## Accounts and sign-in (`portal.rs`, `account.rs`)
+
+The contract shared with the web UI is `PORTAL_SPEC.md` at the repository
+root; `GET /api/v1` (`v1_api.txt`) lists the routes. In short:
+
+- `.obs-auth.json` is schema v2 (`"version": 2`). A v1 file (no version)
+  opens and is migrated once: every SSH key becomes an *auto* account
+  holding that key and owning the key's project (kept public, so existing
+  links work). The v1 original is kept as `.obs-auth.json.v1`. A file from
+  a newer server is refused, not rewritten.
+- An account holds credentials of four kinds (`ssh`, `email`, `zafu`,
+  `passkey`). Linking rule: signed in + unknown credential -> added;
+  credential of another account -> 409 `cred_taken`; signed out + unknown ->
+  new account. Proof of possession decides two edge cases: an auto account
+  whose single key is proven again is folded into the signed-in account;
+  an SSH key pasted on the web (`POST /api/v1/me/creds/ssh`) stays
+  unconfirmed, and the SSH door serves it only `login`/`help` until
+  `ssh <host> login` confirms it (proven by someone else, the paste is
+  dropped). This stops a pasted public key from routing someone else's
+  training logs into the paster's project.
+- Every secret at rest is a SHA-256: session cookies, email and `ssh login`
+  tokens (on disk, pruned when expired), project and run tokens. zafu and
+  passkey challenges are held hashed in memory only (bounded, 5 min).
+- Sessions: `mg_session` cookie, 30 days sliding; `last_seen` is written at
+  most every 10 minutes. State-changing portal requests pass a CSRF check
+  (`Sec-Fetch-Site` same-origin/none, else `Origin` = the site; no header
+  and a cookie = refused).
+- Private projects: `AppState::guard` (401 signed out / 403) in front of
+  every run read, the index filter, the SSE filter (re-checked per message),
+  boards, and the store's `runs/` and `boards/` when the root is served as
+  static files. Hosted `/mcp` reads work with a bearer token (its loopback
+  store forwards only that).
+- Mail: `mail::Mailer`; `--mail log` (default, logs the link at info),
+  `cmd:<path>` (`<path> -t -i`), `jmap` (feature `jmap`, env
+  `MODGRAD_JMAP_URL/USER/PASS`). Email sends run off the request; the
+  endpoint answers 202 for any well-formed address, rate limited or not
+  (3 per address per 15 min, 10 per client IP per hour; the IP is the peer,
+  or what a loopback reverse proxy forwarded).
+- Passkeys go through `webauthn.rs` (`verify_registration`,
+  `verify_assertion`); the stub there answers 501 `passkey_unsupported`.
+- `/login` and `/account` serve the same page as `/` (the email and SSH
+  links point at `/login#…`).
 
 ## MCP server for coding agents (`obs mcp`)
 

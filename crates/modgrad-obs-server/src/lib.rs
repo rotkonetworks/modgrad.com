@@ -14,6 +14,7 @@
 //!
 //! The server stores and selects; all analysis runs in the browser (wasm).
 
+pub mod account;
 pub mod auth;
 pub mod error;
 #[cfg(feature = "h3")]
@@ -21,12 +22,15 @@ pub mod h3;
 pub mod http;
 pub mod ingest;
 pub mod live;
+pub mod mail;
 pub mod mcp_http;
+pub mod portal;
 pub mod read;
 #[cfg(feature = "ssh")]
 pub mod ssh;
 pub mod state;
 pub mod v1;
+pub mod webauthn;
 pub mod wire;
 
 pub use auth::{Auth, AuthError, Authed, AuthedRequest, AuthedResponse};

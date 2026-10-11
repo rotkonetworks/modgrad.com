@@ -43,6 +43,8 @@ pub enum StateRequest {
     Summary { run: String, summary: Value },
     /// Merge keys into `config.json`'s `config`.
     Config { run: String, config: Value },
+    /// Close and delete every run `<project>/…` (files included).
+    DeleteProject { project: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -209,6 +211,22 @@ impl State {
                 self.publish();
                 Ok(StateResponse::Updated { run })
             }
+            StateRequest::DeleteProject { project } => {
+                if project.contains('/') || !valid_run_name(&project) {
+                    return Err(StateError::InvalidRunName(project));
+                }
+                let prefix = format!("{project}/");
+                // drop the handles before the files go
+                self.runs.retain(|k, _| !k.starts_with(&prefix));
+                self.last_step.retain(|k, _| !k.starts_with(&prefix));
+                self.snap.runs.retain(|k, _| !k.starts_with(&prefix));
+                match std::fs::remove_dir_all(self.root.join("runs").join(&project)) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                    _ => {}
+                }
+                self.publish();
+                Ok(StateResponse::Updated { run: project })
+            }
         }
     }
 }
@@ -263,5 +281,6 @@ fn req_kind(r: &StateRequest) -> &'static str {
         StateRequest::Finish { .. } => "finish",
         StateRequest::Summary { .. } => "summary",
         StateRequest::Config { .. } => "config",
+        StateRequest::DeleteProject { .. } => "delete_project",
     }
 }

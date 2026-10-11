@@ -5428,6 +5428,7 @@ dependencies = [
  "proptest",
  "quinn",
  "rcgen",
+ "ring",
  "russh",
  "rustls",
  "serde",
@@ -5439,6 +5440,7 @@ dependencies = [
  "tower-test",
  "tracing",
  "tracing-subscriber 0.3.23",
+ "ureq",
 ]
 
 [[package]]

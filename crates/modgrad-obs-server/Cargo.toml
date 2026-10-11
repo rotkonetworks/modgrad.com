@@ -11,6 +11,8 @@ default = ["h3", "ssh"]
 h3 = ["dep:quinn", "dep:h3", "dep:h3-quinn", "dep:rustls", "dep:rcgen", "dep:bytes", "dep:http-body-util"]
 # The SSH door: `modgrad-server --ssh <tcp addr>`; `python train.py | ssh <host>`.
 ssh = ["dep:russh", "dep:bytes"]
+# `--mail jmap`: sign-in emails through a JMAP server (Stalwart). Off by default.
+jmap = ["dep:ureq"]
 
 [dependencies]
 modgrad-obs = { path = "../modgrad-obs", default-features = false }
@@ -24,6 +26,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 axum = { version = "0.7", default-features = false, features = ["http1", "json", "query", "tokio"] }
 base64 = "0.22"
 sha2 = "0.10"
+# ed25519 for zafu sign-in (already in the tree via rustls/quinn/russh)
+ring = "0.17"
+ureq = { version = "3", optional = true, default-features = false, features = ["native-tls"] }
 async-stream = "0.3"
 futures-util = { version = "0.3", default-features = false }
 quinn = { version = "0.11.9", optional = true, default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }

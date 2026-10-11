@@ -94,7 +94,10 @@ fn samples_extent(dir: &Path) -> (u64, u64) {
 /// New complete sample lines after byte `from`: `(lines, bytes consumed,
 /// newline count)`, or `None` when there is nothing new. Over
 /// [`MAX_DELTA_BYTES`] it returns `Err` with the file's current extent.
-fn new_samples(dir: &Path, from: u64) -> std::io::Result<Option<Result<(Vec<Value>, u64, u64), (u64, u64)>>> {
+/// `Ok((lines, bytes, newlines))`, or `Err(extent)` when too much is new.
+type SamplesDelta = Result<(Vec<Value>, u64, u64), (u64, u64)>;
+
+fn new_samples(dir: &Path, from: u64) -> std::io::Result<Option<SamplesDelta>> {
     let path = dir.join(modgrad_obs::SAMPLES_FILE);
     let len = match std::fs::metadata(&path) {
         Ok(m) => m.len(),

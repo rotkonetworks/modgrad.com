@@ -1,6 +1,6 @@
 # modgrad-obs container
 
-One image: `obs-server` (ingest + reads), the `obs` and `obs-wandb` CLIs, and
+One image: `modgrad-server` (ingest + reads), the `modgrad` and `modgrad-wandb` CLIs, and
 the dashboard (`obs/web`, built in a node stage, with its analysis and ingest
 wasm bundled). The server stores and serves data only;
 graphs, fits and forecasts are computed in the viewer's browser.

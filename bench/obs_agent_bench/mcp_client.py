@@ -1,4 +1,4 @@
-"""Minimal MCP stdio client: spawn `obs mcp`, initialize, list and call tools.
+"""Minimal MCP stdio client: spawn `modgrad mcp`, initialize, list and call tools.
 
 Usage as a CLI (handy for eyeballing tool output):
     python3 mcp_client.py --obs OBS_BIN --dir DATA TOOL '{"run": "bkk07/small"}'

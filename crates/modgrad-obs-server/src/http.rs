@@ -45,7 +45,7 @@ impl AppState {
         AppState { ingest, read, static_dir, auth, live, boards: None, mcp_self: None }
     }
     /// Store boards under `dir` (`<obs root>/boards`, the same place
-    /// `obs mcp --dir` writes them).
+    /// `modgrad mcp --dir` writes them).
     pub fn with_boards(mut self, dir: PathBuf) -> AppState {
         self.boards = Some(dir);
         self
@@ -97,7 +97,7 @@ impl IntoResponse for ApiError {
             ApiError::Ingest(e @ IngestError::Timeout) => (StatusCode::GATEWAY_TIMEOUT, format!("{e}; retry after a short backoff"), EX_LOG),
             ApiError::Ingest(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string(), EX_LOG),
         };
-        let help = "GET /api/v1 for the API reference ($OBS is the server URL, $OBS_TOKEN your token)";
+        let help = "GET /api/v1 for the API reference ($OBS is the server URL, $MODGRAD_TOKEN your token)";
         let body = json!({ "error": msg, "example": example, "help": help, "message": format!("{msg}\nExample: {example}\nHelp: {help}") });
         let mut r = (code, axum::Json(body)).into_response();
         if code == StatusCode::UNAUTHORIZED {

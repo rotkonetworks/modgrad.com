@@ -7,7 +7,7 @@ usage: python3 -P -E check_with_wandb.py <run-<id>.wandb>
          prints one JSON line per record and a final {"ok": ...} verdict.
        python3 -P -E check_with_wandb.py --write-sample <out.wandb>
          writes a small run with W&B's own writer (DataStore.write), to test
-         `obs-wandb import` against files W&B produces.
+         `modgrad-wandb import` against files W&B produces.
 """
 import importlib.util, json, os, shutil, sys, tempfile
 

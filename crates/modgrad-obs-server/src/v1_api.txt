@@ -1,7 +1,7 @@
 modgrad-obs ingest API v1
 =========================
 
-$OBS is the server URL (e.g. http://127.0.0.1:8794). $OBS_TOKEN is a bearer token.
+$OBS is the server URL (e.g. http://127.0.0.1:8794). $MODGRAD_TOKEN is a bearer token.
 Bodies are JSON whatever the Content-Type, so plain `curl -d` works. NDJSON
 (one JSON object per line) is accepted wherever an array of rows is.
 
@@ -9,7 +9,7 @@ Quick start (no account)
 ------------------------
   curl -X POST $OBS/api/v1/projects
       -> {"project": "anon-…", "token": "obsp_…", "board": "<url>", "claim": "<url>", "expires_unix": …}
-  curl -X POST $OBS/api/v1/runs/my-run/log -H "Authorization: Bearer $OBS_TOKEN" -d '{"loss": 0.52}'
+  curl -X POST $OBS/api/v1/runs/my-run/log -H "Authorization: Bearer $MODGRAD_TOKEN" -d '{"loss": 0.52}'
       -> {"run": "anon-…/my-run", "created": true, "dashboard": "<url>", "rows": 1, …}
   Open the board URL; the graph updates live.
 
@@ -20,7 +20,7 @@ Tokens
           without "/" is put in the project: "my-run" -> "<project>/my-run".
   obsr_…  run token: writes one run. Returned once, when a run is created.
   Anonymous project tokens expire (default 30 days, see expires_unix).
-  Dev servers (obs-server --dev) also accept writes without a token.
+  Dev servers (modgrad-server --dev) also accept writes without a token.
   Reads need no token. Anonymous projects are listed only by their board URL.
 
 Write
@@ -110,7 +110,7 @@ MCP (for coding agents)
 -----------------------
   Preferred: run the tools locally against this server; analysis then runs on
   your machine and the server only stores and selects:
-      obs mcp --url $OBS --token $OBS_TOKEN
+      modgrad mcp --url $OBS --token $MODGRAD_TOKEN
   Servers started with --mcp also serve MCP over streamable HTTP at POST /mcp
   (Authorization: Bearer <token> for writes), for agents that cannot run a
   local binary. Its analysis runs on the server.

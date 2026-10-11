@@ -31,7 +31,7 @@ def test_init_log_finish(server):
     assert modgrad.run is None
 
     e = server.runs("core")[run_id]
-    assert e["finished"] and e["last_step"] == 9  # last_step counts scalar rows only
+    assert e["finished"] and e["last_step"] == 10  # the histogram-only row at step 10 counts
     assert server.config(run_id) == {"lr": 3e-4, "layers": 2, "batch": 32, "warmup": 10}
     assert e["summary"]["best_loss"] == 0.1 and e["summary"]["exit_code"] == 0
     assert e["arrays"]["hist"]["kind"] == "histogram"

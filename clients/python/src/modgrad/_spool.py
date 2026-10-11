@@ -1,4 +1,4 @@
-"""Crash-safe on-disk spool, in the same format as `obs run --spool`.
+"""Crash-safe on-disk spool, in the same format as `modgrad run --spool`.
 
 A spool directory holds
 
@@ -7,7 +7,7 @@ A spool directory holds
     acked         byte offset of spool.jsonl that the server acknowledged
     meta.json     {server, token, name, project, meta, run, dashboard, finish}
 
-`obs push <dir>` (the Rust CLI) understands the row and event lines and
+`modgrad push <dir>` (the Rust CLI) understands the row and event lines and
 skips the others; `python -m modgrad sync <dir>` sends all of them. Every
 line is appended with one write() before it is sent, so a crash leaves at
 most one torn final line, which is cut on reopen.
@@ -35,7 +35,7 @@ def default_root() -> Path:
 
 
 def dir_for(root: Path, name: str, project: Optional[str]) -> Path:
-    """The directory `obs push` recomputes from meta.json: key = project/name
+    """The directory `modgrad push` recomputes from meta.json: key = project/name
     when project is set and name has no '/', else name; '/' -> '__'."""
     key = f"{project}/{name}" if project and "/" not in name else name
     return root / key.replace("/", "__")

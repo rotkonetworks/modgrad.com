@@ -1,4 +1,4 @@
-//! Minimal HTTP client for the obs CLI and `obs mcp --url`, std only: plain `http://` over a
+//! Minimal HTTP client for the obs CLI and `modgrad mcp --url`, std only: plain `http://` over a
 //! `TcpStream` (HTTP/1.1, `Connection: close`), and `https://` through the
 //! `curl` binary so no TLS stack is linked. (A QUIC/HTTP3 transport with
 //! a long-lived stream per run is the planned replacement; see

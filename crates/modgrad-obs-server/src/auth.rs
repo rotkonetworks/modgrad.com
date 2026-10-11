@@ -6,7 +6,7 @@
 //! * a **run token** (`obsr_…`), minted when a run is created, writes to
 //!   that run only;
 //! * a **project token** (`obsp_…`) creates and writes any run in its
-//!   project. Operators provision them (`obs-server token add <project>`);
+//!   project. Operators provision them (`modgrad-server token add <project>`);
 //!   anyone can get an **anonymous** one (`POST /api/v1/projects`) for a
 //!   fresh `anon-<random>` project, which expires after
 //!   [`AuthConfig::anon_expiry_days`] unless claimed.
@@ -15,7 +15,7 @@
 //! project (`exp1` -> `anon-3f9a…/exp1`). Writing to a run that does not
 //! exist creates it (no mandatory create call).
 //!
-//! Dev mode (`obs-server --dev`): requests without a token may create and
+//! Dev mode (`modgrad-server --dev`): requests without a token may create and
 //! write runs that have no run token. A run created with a token stays
 //! protected. Reads are open; anonymous projects are hidden from the
 //! unfiltered index and reachable by their unguessable board URL.

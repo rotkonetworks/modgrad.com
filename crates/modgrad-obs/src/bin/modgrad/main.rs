@@ -1,25 +1,25 @@
-//! `obs` — modgrad-obs command line.
+//! `modgrad` — modgrad-obs command line.
 //!
 //! ```text
-//! obs legacy <log.txt> <out_run_dir> [--name N] [--source S]
+//! modgrad legacy <log.txt> <out_run_dir> [--name N] [--source S]
 //!     Convert a ctmlm_pilot stdout log into the modgrad-obs format.
 //!     Refuses to overwrite a native (non-legacy) run.
-//! obs export <obs_dir>
+//! modgrad export <obs_dir>
 //!     Write per-run plot files and <obs_dir>/index.json for the dashboard.
-//! obs show <run_dir>
+//! modgrad show <run_dir>
 //!     Print keys, last step and skipped-line count of a run.
-//! obs run [--server URL] [--token T] [--name N] [--project P] [--offline [--out DIR]]
+//! modgrad run [--server URL] [--token T] [--name N] [--project P] [--offline [--out DIR]]
 //!         [--sys-interval S] [--no-gpu] [--spool DIR] [--json] -- <command...>
 //!     Run a command, pass its output through unchanged, parse metric lines,
 //!     sample RSS/CPU/GPU, and stream it all to the server (or a local run).
-//! obs tail <run id | run dir> [--server URL] [--keys a,b] [--follow] [--interval S] [--json]
+//! modgrad tail <run id | run dir> [--server URL] [--keys a,b] [--follow] [--interval S] [--json]
 //!     Latest values and a sparkline per metric.
-//! obs push <spool dir> [--json]
-//!     Resend rows an earlier `obs run` could not deliver.
+//! modgrad push <spool dir> [--json]
+//!     Resend rows an earlier `modgrad run` could not deliver.
 //! ```
 //!
-//! Environment: OBS_URL (server, default http://127.0.0.1:8790), OBS_TOKEN,
-//! OBS_PROJECT. No command prompts; `--json` makes the CLI's own messages
+//! Environment: MODGRAD_URL (server, default http://127.0.0.1:8790), MODGRAD_TOKEN,
+//! MODGRAD_PROJECT. No command prompts; `--json` makes the CLI's own messages
 //! one JSON object per line on stderr.
 
 use std::path::{Path, PathBuf};
@@ -30,20 +30,27 @@ mod sys;
 mod tail;
 
 const USAGE: &str = "usage:
-  obs run [--server URL] [--token T] [--name N] [--project P] [--offline [--out DIR]]
+  modgrad run [--server URL] [--token T] [--name N] [--project P] [--offline [--out DIR]]
           [--sys-interval S] [--no-gpu] [--spool DIR] [--json] -- <command...>
-  obs tail <run id | run dir> [--server URL] [--keys a,b] [--follow] [--interval S] [--json]
-  obs push <spool dir> [--json]
-  obs legacy <log.txt> <out_run_dir> [--name N] [--source S]
-  obs export <obs_dir>
-  obs show <run_dir>
-  obs mcp [--dir <obs_dir>] [--base-url URL]   MCP server on stdio for coding agents (local data)
-  obs mcp --url <server> [--token T]           same tools against an obs-server (analysis stays local)
-env: OBS_URL (default http://127.0.0.1:8790), OBS_TOKEN, OBS_PROJECT,
-     OBS_DIR (obs mcp data dir), OBS_MCP_URL (obs mcp server, same as --url)";
+  modgrad tail <run id | run dir> [--server URL] [--keys a,b] [--follow] [--interval S] [--json]
+  modgrad push <spool dir> [--json]
+  modgrad legacy <log.txt> <out_run_dir> [--name N] [--source S]
+  modgrad export <obs_dir>
+  modgrad show <run_dir>
+  modgrad mcp [--dir <obs_dir>] [--base-url URL]   MCP server on stdio for coding agents (local data)
+  modgrad mcp --url <server> [--token T]           same tools against a modgrad-server (analysis stays local)
+env: MODGRAD_URL (default http://127.0.0.1:8790), MODGRAD_TOKEN, MODGRAD_PROJECT,
+     MODGRAD_DATA (modgrad mcp data dir), MODGRAD_MCP_URL (modgrad mcp server, same as --url);
+     the pre-rename OBS_* names still work";
 
+/// `MODGRAD_*` variables also answer to their pre-rename `OBS_*` names.
 fn env(k: &str) -> Option<String> {
-    std::env::var(k).ok().filter(|v| !v.is_empty())
+    let get = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let old = match k {
+        "MODGRAD_DATA" => "OBS_DIR".to_string(),
+        _ => k.replacen("MODGRAD_", "OBS_", 1),
+    };
+    get(k).or_else(|| get(&old))
 }
 
 fn spool_root() -> PathBuf {
@@ -73,10 +80,10 @@ fn main() {
             let flags = flags.to_vec();
             let has = |k: &str| flags.iter().any(|a| a == k);
             let o = run::Opts {
-                server: flag(&flags, "--server").or_else(|| env("OBS_URL")).unwrap_or_else(|| "http://127.0.0.1:8790".into()),
-                token: flag(&flags, "--token").or_else(|| env("OBS_TOKEN")),
+                server: flag(&flags, "--server").or_else(|| env("MODGRAD_URL")).unwrap_or_else(|| "http://127.0.0.1:8790".into()),
+                token: flag(&flags, "--token").or_else(|| env("MODGRAD_TOKEN")),
                 name: flag(&flags, "--name"),
-                project: flag(&flags, "--project").or_else(|| env("OBS_PROJECT")),
+                project: flag(&flags, "--project").or_else(|| env("MODGRAD_PROJECT")),
                 offline: has("--offline"),
                 out: PathBuf::from(flag(&flags, "--out").unwrap_or_else(|| "obs".into())),
                 sys_interval: flag(&flags, "--sys-interval").and_then(|s| s.parse().ok()).unwrap_or(5.0),
@@ -91,7 +98,7 @@ fn main() {
             let Some(target) = args.get(2).filter(|a| !a.starts_with("--")) else { usage() };
             let o = tail::Opts {
                 target: target.clone(),
-                server: flag(&args, "--server").or_else(|| env("OBS_URL")).unwrap_or_else(|| "http://127.0.0.1:8790".into()),
+                server: flag(&args, "--server").or_else(|| env("MODGRAD_URL")).unwrap_or_else(|| "http://127.0.0.1:8790".into()),
                 keys: flag(&args, "--keys").map(|k| k.split(',').filter(|s| !s.is_empty()).map(String::from).collect()).unwrap_or_default(),
                 follow: args.iter().any(|a| a == "--follow" || a == "-f"),
                 interval: flag(&args, "--interval").and_then(|s| s.parse().ok()).unwrap_or(2.0),
@@ -113,12 +120,12 @@ fn main() {
             if let Ok(b) = std::fs::read(out.join("config.json")) {
                 let v: serde_json::Value = serde_json::from_slice(&b).unwrap_or_default();
                 if v["meta"]["extra"]["legacy_log"].is_null() {
-                    eprintln!("obs legacy: {} holds a native run; not overwriting", out.display());
+                    eprintln!("modgrad legacy: {} holds a native run; not overwriting", out.display());
                     std::process::exit(1);
                 }
             }
             let text = std::fs::read_to_string(log).unwrap_or_else(|e| {
-                eprintln!("obs legacy: {log}: {e}");
+                eprintln!("modgrad legacy: {log}: {e}");
                 std::process::exit(1)
             });
             let mtime = std::fs::metadata(log)
@@ -140,7 +147,7 @@ fn main() {
                     }
                 }
                 Err(e) => {
-                    eprintln!("obs legacy: {e}");
+                    eprintln!("modgrad legacy: {e}");
                     std::process::exit(1);
                 }
             }
@@ -156,7 +163,7 @@ fn main() {
                     }
                 }
                 Err(e) => {
-                    eprintln!("obs export: {e}");
+                    eprintln!("modgrad export: {e}");
                     std::process::exit(1);
                 }
             }
@@ -164,7 +171,7 @@ fn main() {
         Some("show") => {
             let Some(d) = args.get(2) else { usage() };
             let rd = modgrad_obs::read_run(Path::new(d)).unwrap_or_else(|e| {
-                eprintln!("obs show: {e}");
+                eprintln!("modgrad show: {e}");
                 std::process::exit(1)
             });
             println!("name {}  last step {:?}  rows {}  arrays {}  events {}  skipped {}", rd.name(), rd.last_step(), rd.metrics.len(), rd.arrays.len(), rd.events.len(), rd.skipped);
@@ -173,19 +180,19 @@ fn main() {
         }
         Some("mcp") => {
             // tools: log, ingest_log, list_runs, read_metric, summarize, compare, make_board.
-            // --dir is the obs root holding runs/ (default $OBS_DIR, else ./obs); --url
-            // (or $OBS_MCP_URL) selects remote mode against an obs-server, with --token /
-            // $OBS_TOKEN. Analysis always runs here, on fetched rows.
+            // --dir is the obs root holding runs/ (default $MODGRAD_DATA, else ./obs); --url
+            // (or $MODGRAD_MCP_URL) selects remote mode against a modgrad-server, with --token /
+            // $MODGRAD_TOKEN. Analysis always runs here, on fetched rows.
             use modgrad_obs::mcp::{Server, serve_stdio, store};
-            let st: Box<dyn store::Store> = match flag(&args, "--url").or_else(|| env("OBS_MCP_URL")) {
-                Some(url) => Box::new(store::RemoteStore::new(&url, flag(&args, "--token").or_else(|| env("OBS_TOKEN")))),
+            let st: Box<dyn store::Store> = match flag(&args, "--url").or_else(|| env("MODGRAD_MCP_URL")) {
+                Some(url) => Box::new(store::RemoteStore::new(&url, flag(&args, "--token").or_else(|| env("MODGRAD_TOKEN")))),
                 None => {
-                    let dir = flag(&args, "--dir").or_else(|| env("OBS_DIR")).unwrap_or_else(|| "obs".into());
+                    let dir = flag(&args, "--dir").or_else(|| env("MODGRAD_DATA")).unwrap_or_else(|| "obs".into());
                     Box::new(store::LocalStore::open(Path::new(&dir), flag(&args, "--base-url")))
                 }
             };
             if let Err(e) = serve_stdio(&Server::new(st)) {
-                eprintln!("obs mcp: {e}");
+                eprintln!("modgrad mcp: {e}");
                 std::process::exit(1);
             }
         }

@@ -78,7 +78,7 @@ def save(*a: Any, **k: Any) -> List[str]:
 
 
 def login(*a: Any, **k: Any) -> bool:
-    """No-op (returns True). Authentication is MODGRAD_TOKEN / OBS_TOKEN, or an
+    """No-op (returns True). Authentication is MODGRAD_TOKEN / MODGRAD_TOKEN, or an
     anonymous project created on first use."""
     return True
 

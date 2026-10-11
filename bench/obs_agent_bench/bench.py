@@ -1,4 +1,4 @@
-"""obs-agent-bench: can a local model answer training-run questions through `obs mcp`?
+"""obs-agent-bench: can a local model answer training-run questions through `modgrad mcp`?
 
 Each task gets a fresh data directory populated *through the MCP tools*
 (log / ingest_log) from the fixed tables below, so the ground truth lives
@@ -260,7 +260,7 @@ SYSTEM = (
 
 
 def start_server(binary, root):
-    """`obs-server --dev` on a free loopback port, storing under `root`."""
+    """`modgrad-server --dev` on a free loopback port, storing under `root`."""
     import socket
     import subprocess
     with socket.socket() as so:
@@ -275,7 +275,7 @@ def start_server(binary, root):
         except requests.RequestException:
             time.sleep(0.05)
     p.kill()
-    raise RuntimeError(f"obs-server did not start on {url}")
+    raise RuntimeError(f"modgrad-server did not start on {url}")
 
 
 def mcp_to_openai(tools):
@@ -333,7 +333,7 @@ def main():
     here = os.path.dirname(os.path.abspath(__file__))
     root = os.path.abspath(os.path.join(here, "..", ".."))
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--obs", default=os.path.join(root, "target", "debug", "obs"), help="obs binary")
+    ap.add_argument("--obs", default=os.path.join(root, "target", "debug", "modgrad"), help="modgrad binary")
     ap.add_argument("--data", default=os.environ.get("OBS_BENCH_DIR", os.path.join(os.environ.get("TMPDIR", "/tmp"), "obs-agent-bench")), help="scratch dir for per-task data")
     ap.add_argument("--scripted", action="store_true", help="run the canonical tool sequences instead of a model")
     ap.add_argument("--endpoint", default="http://127.0.0.1:11434/v1", help="OpenAI-compatible base URL")
@@ -347,8 +347,8 @@ def main():
     ap.add_argument("--only", help="comma-separated task ids")
     ap.add_argument("--suite", choices=["base", "hard", "all"], default="base", help="base = the 14 one-step tasks, hard = the multi-step tasks in hard_tasks.py")
     ap.add_argument("--trial", type=int, default=0, help="trial number; also offsets --seed, so trials differ")
-    ap.add_argument("--remote", action="store_true", help="run each task against its own `obs-server --dev` (root = the task dir) through `obs mcp --url`")
-    ap.add_argument("--obs-server", default=os.path.join(root, "target", "debug", "obs-server"), help="obs-server binary for --remote")
+    ap.add_argument("--remote", action="store_true", help="run each task against its own `modgrad-server --dev` (root = the task dir) through `modgrad mcp --url`")
+    ap.add_argument("--obs-server", default=os.path.join(root, "target", "debug", "modgrad-server"), help="modgrad-server binary for --remote")
     ap.add_argument("--out", help="JSONL transcript path (default <data>/<label>.jsonl)")
     a = ap.parse_args()
 
@@ -372,7 +372,7 @@ def main():
         srv = None
         if a.remote:
             srv, url = start_server(a.obs_server, d)
-            env["OBS_URL"] = url
+            env["MODGRAD_URL"] = url
             c = McpClient([a.obs, "mcp", "--url", url])
         else:
             c = McpClient([a.obs, "mcp", "--dir", d])

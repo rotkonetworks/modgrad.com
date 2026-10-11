@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Synthetic training loop for dogfooding `obs run`: prints a decreasing
+"""Synthetic training loop for dogfooding `modgrad run`: prints a decreasing
 loss in a few common log formats, plus prose the parser must ignore.
 
-    obs run -- python3 scripts/obs_fake_train.py --steps 300 --delay 0.1
+    modgrad run -- python3 scripts/obs_fake_train.py --steps 300 --delay 0.1
 """
 import argparse, math, random, sys, time
 

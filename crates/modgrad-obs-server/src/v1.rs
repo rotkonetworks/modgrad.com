@@ -28,12 +28,12 @@ type ApiResult = Result<Response, ApiError>;
 pub const API_TEXT: &str = include_str!("v1_api.txt");
 
 /// A corrected example for log-shaped errors.
-pub const EX_LOG: &str = r#"curl -X POST "$OBS/api/v1/runs/my-run/log" -H "Authorization: Bearer $OBS_TOKEN" -d '{"step": 1, "loss": 0.52, "acc": "71.5%"}'"#;
+pub const EX_LOG: &str = r#"curl -X POST "$OBS/api/v1/runs/my-run/log" -H "Authorization: Bearer $MODGRAD_TOKEN" -d '{"step": 1, "loss": 0.52, "acc": "71.5%"}'"#;
 pub const EX_TOKEN: &str = r#"curl -X POST "$OBS/api/v1/projects"   # -> {"token": "obsp_..."}; then send -H "Authorization: Bearer obsp_...""#;
-pub const EX_TEXT: &str = r#"python train.py 2>&1 | curl -X POST "$OBS/api/v1/runs/my-run/text" -H "Authorization: Bearer $OBS_TOKEN" --data-binary @-"#;
-pub const EX_SAMPLES: &str = r#"curl -X POST "$OBS/api/v1/runs/my-run/samples" -H "Authorization: Bearer $OBS_TOKEN" -d '{"step": 100, "key": "eval/gsm8k", "prompt": "2+2=", "completion": "4", "reward": 1.0}'"#;
-pub const EX_BOARD: &str = r#"curl -X PUT "$OBS/api/v1/boards/my-board" -H "Authorization: Bearer $OBS_TOKEN" -d '{"title": "loss", "panels": [{"query": "loss{run=~\"my-run\"}", "metric": "loss", "runs": ["my-run"]}]}'"#;
-pub const EX_CREATE: &str = r#"curl -X POST "$OBS/api/v1/runs" -H "Authorization: Bearer $OBS_TOKEN" -d '{"name": "my-run", "config": {"lr": 0.0003}}'"#;
+pub const EX_TEXT: &str = r#"python train.py 2>&1 | curl -X POST "$OBS/api/v1/runs/my-run/text" -H "Authorization: Bearer $MODGRAD_TOKEN" --data-binary @-"#;
+pub const EX_SAMPLES: &str = r#"curl -X POST "$OBS/api/v1/runs/my-run/samples" -H "Authorization: Bearer $MODGRAD_TOKEN" -d '{"step": 100, "key": "eval/gsm8k", "prompt": "2+2=", "completion": "4", "reward": 1.0}'"#;
+pub const EX_BOARD: &str = r#"curl -X PUT "$OBS/api/v1/boards/my-board" -H "Authorization: Bearer $MODGRAD_TOKEN" -d '{"title": "loss", "panels": [{"query": "loss{run=~\"my-run\"}", "metric": "loss", "runs": ["my-run"]}]}'"#;
+pub const EX_CREATE: &str = r#"curl -X POST "$OBS/api/v1/runs" -H "Authorization: Bearer $MODGRAD_TOKEN" -d '{"name": "my-run", "config": {"lr": 0.0003}}'"#;
 
 fn bad(m: impl Into<String>) -> ApiError {
     ApiError::Teach { status: StatusCode::BAD_REQUEST, error: m.into(), example: EX_LOG }

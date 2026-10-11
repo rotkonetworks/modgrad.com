@@ -545,12 +545,12 @@ HARD_TASKS = [
       [("ingest_log", {"run": "paste/a", "text": PASTE_A}), ("ingest_log", {"run": "paste/b", "text": PASTE_B})],
       lambda outs: "paste/a is lower at step 300 by 0.11 (2.20 vs 2.31)", check_paste_compare),
     T("instrument_wrap", "My training script is train.py in the project directory. Run it so that its metrics are recorded in obs as run toy/wrap, then tell me the final loss. "
-      "The obs CLI is installed: `obs run --offline --name NAME -- <command>` runs a command and records the metric lines it prints into ./obs.",
-      [("read_file", {"path": "train.py"}), ("run_command", {"command": "obs run --offline --name toy/wrap -- python3 train.py"}), ("read_metric", {"run": "toy/wrap", "metric": "loss"})],
+      "The obs CLI is installed: `modgrad run --offline --name NAME -- <command>` runs a command and records the metric lines it prints into ./obs.",
+      [("read_file", {"path": "train.py"}), ("run_command", {"command": "modgrad run --offline --name toy/wrap -- python3 train.py"}), ("read_metric", {"run": "toy/wrap", "metric": "loss"})],
       _wrap_extract, check_instrument_wrap, shell=True),
     T("instrument_edit", "My training script train_silent.py prints nothing while it trains. Change it so the loss is printed every 10 iterations, run it so those metrics are recorded in obs as run toy/edit, then tell me the loss at the last logged iteration. "
-      "The obs CLI is installed: `obs run --offline --name NAME -- <command>` runs a command and records the metric lines it prints (like `step 10 loss=0.5`) into ./obs.",
+      "The obs CLI is installed: `modgrad run --offline --name NAME -- <command>` runs a command and records the metric lines it prints (like `step 10 loss=0.5`) into ./obs.",
       [("read_file", {"path": "train_silent.py"}), ("write_file", {"path": "train_silent.py", "content": EDIT_SCRIPT}),
-       ("run_command", {"command": "obs run --offline --name toy/edit -- python3 train_silent.py"}), ("read_metric", {"run": "toy/edit", "metric": "loss"})],
+       ("run_command", {"command": "modgrad run --offline --name toy/edit -- python3 train_silent.py"}), ("read_metric", {"run": "toy/edit", "metric": "loss"})],
       _edit_extract, check_instrument_edit, shell=True),
 ]

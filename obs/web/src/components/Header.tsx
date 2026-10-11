@@ -13,7 +13,7 @@ export default function Header() {
   const pick = (inp: HTMLInputElement) => { const list = [...(inp.files || [])].map((f) => ({ rel: f.webkitRelativePath || f.name, file: f })); inp.value = ''; ingest(list); };
   return (
     <header class="top">
-      <h1>modgrad obs</h1>
+      <h1>modgrad</h1>
       <span class="meta">{genMeta()}</span>
       <Show when={liveStatus()}><span class="meta live-status">{liveStatus()}</span></Show>
       <span class="sp" />

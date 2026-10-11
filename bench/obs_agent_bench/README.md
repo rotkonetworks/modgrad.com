@@ -1,6 +1,6 @@
 # obs-agent-bench
 
-Can a local model answer questions about training runs through `obs mcp`?
+Can a local model answer questions about training runs through `modgrad mcp`?
 
 The bench has two suites. `base` has 14 one-step tasks; `hard`
 (`hard_tasks.py`) has 13 multi-step tasks that separate tool designs. Each
@@ -37,7 +37,7 @@ pass `--think`. Other flags: `--only a,b`, `--max-turns`, `--temperature`,
 `--seed`, `--timeout`, `--max-tokens` (default 3000; a reply that hits it
 without a tool call is recorded as "no answer"), `--suite base|hard|all`,
 `--trial N` (offsets the sampling seed so trials differ), `--remote` (each
-task against its own `obs-server --dev` through `obs mcp --url`).
+task against its own `modgrad-server --dev` through `modgrad mcp --url`).
 
 ### The hard suite
 
@@ -61,7 +61,7 @@ generators, not from the tools.
 | instrument_edit | edit `train_silent.py` (prints nothing) to print the loss every 10 iterations, run it as `toy/edit` |
 
 The two instrument tasks also expose `read_file`, `write_file` and
-`run_command` (sandboxed to the task's project directory, `obs` first on
+`run_command` (sandboxed to the task's project directory, `modgrad` first on
 PATH), as a coding agent would have.
 
 `tabulate.py label=a.jsonl,b.jsonl ...` prints per-task pass counts over
@@ -122,11 +122,11 @@ of retrying. The base suite cannot separate tool designs at 30B scale.
 Setup: Ollama 0.35.1 on :11435 (RX 7600M XT 8 GB; qwen3:8b runs 93% on the
 GPU, qwen3:30b-a3b is partly offloaded), `/no_think`, T=0.2, seed 0 + trial,
 `--max-tokens 3000`. qwen3:8b: 3 trials per task. qwen3:30b-a3b: 1 trial (the
-regression check). Each column is the `obs` binary built at that commit.
+regression check). Each column is the `modgrad` binary built at that commit.
 Scores are rescored with the final checkers (`tabulate.py`). `--scripted
 --suite all` passes 27/27 at every commit listed. With `--remote` it also
 passes 27/27, but the two instrument tasks are not meaningful there: their
-`obs run --offline` writes files the server does not watch, so the
+`modgrad run --offline` writes files the server does not watch, so the
 follow-up read_metric fails and only the file-level checks pass. Run the
 hard suite locally.
 

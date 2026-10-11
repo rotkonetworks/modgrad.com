@@ -19,8 +19,8 @@ from ._sender import Sender, say
 from ._spool import Spool, SpoolBusy, default_root, dir_for
 from ._types import convert, warn_once
 
-# The server used when neither MODGRAD_URL nor OBS_URL is set. It matches the
-# `obs` CLI default; change it here once a hosted modgrad server exists.
+# The server used when neither MODGRAD_URL nor MODGRAD_URL is set. It matches the
+# `modgrad` CLI default; change it here once a hosted modgrad server exists.
 DEFAULT_URL = "http://127.0.0.1:8790"
 
 

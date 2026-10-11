@@ -26,9 +26,9 @@ before publishing.
 
 ## What happens by default
 
-- **Server.** The client uses `MODGRAD_URL` or `OBS_URL`, else `modgrad.DEFAULT_URL`
-  (`http://127.0.0.1:8790`, the same default as the `obs` CLI). Run a local server with
-  `obs-server --dev`.
+- **Server.** The client uses `MODGRAD_URL` or `MODGRAD_URL`, else `modgrad.DEFAULT_URL`
+  (`http://127.0.0.1:8790`, the same default as the `modgrad` CLI). Run a local server with
+  `modgrad-server --dev`.
 - **No token and no project.** On first use the client creates an anonymous project
   (`POST /api/v1/projects`) and prints its board link. It caches the token in
   `~/.config/modgrad/anon.json`, so later runs on the same machine go to the same project.
@@ -45,7 +45,7 @@ before publishing.
 - **Crash safety.** A row is written to the spool before it is sent, and the server's
   acknowledgements are recorded as a byte offset. Anything not acknowledged is sent again,
   including after a restart that uses the same run id. A crash loses at most a torn final
-  line. The spool format is the one `obs run` uses, so `obs push <dir>` can send it.
+  line. The spool format is the one `modgrad run` uses, so `modgrad push <dir>` can send it.
 - **Errors never stop training.** If the server is unreachable, the client reports it once
   and keeps spooling, retrying with backoff. If the server rejects one item with a 400, the
   client drops that item with a warning and the rest of the queue keeps moving. If the
@@ -64,11 +64,11 @@ before publishing.
 MODGRAD_MODE=offline python train.py      # or init(mode="offline"), or WANDB_MODE=offline
 python -m modgrad sync                    # send every spool under the spool root
 python -m modgrad sync <dir>              # send one run (rows, events, config, summary, finish)
-obs push <dir>                            # the Rust CLI: sends rows and events only
+modgrad push <dir>                            # the Rust CLI: sends rows and events only
 ```
 
 The spool root is `$XDG_CACHE_HOME/modgrad-obs/spool` (by default
-`~/.cache/modgrad-obs/spool`), which is also where `obs run` spools. You can override it
+`~/.cache/modgrad-obs/spool`), which is also where `modgrad run` spools. You can override it
 with `MODGRAD_DIR` or `init(dir=...)`. A run with a project name and no token spools to
 `<root>/<project>__<id>/`. A run with a token, or in an anonymous project, spools to
 `<root>/<id>/`. The directory holds these files:
@@ -80,7 +80,7 @@ with `MODGRAD_DIR` or `init(dir=...)`. A run with a project name and no token sp
 | `meta.json`   | `{server, token, name, project, meta, run, dashboard, finish, config}` (mode 0600)    |
 | `lock`        | an flock held while a process is writing; `sync` skips locked spools                 |
 
-`obs push` ignores the `config` and `summary` lines. Use `python -m modgrad sync` when you
+`modgrad push` ignores the `config` and `summary` lines. Use `python -m modgrad sync` when you
 want those sent as well.
 
 ## Environment variables
@@ -89,9 +89,9 @@ Where a row lists several variables, the first one that is set wins.
 
 | variable | meaning |
 |---|---|
-| `MODGRAD_URL`, `OBS_URL` | server URL |
-| `MODGRAD_TOKEN`, `OBS_TOKEN` | bearer token (`obsp_…` for a project, `obsr_…` for a run) |
-| `MODGRAD_PROJECT`, `WANDB_PROJECT`, `OBS_PROJECT` | project (used when `init(project=)` is not given) |
+| `MODGRAD_URL`, `MODGRAD_URL` | server URL |
+| `MODGRAD_TOKEN`, `MODGRAD_TOKEN` | bearer token (`obsp_…` for a project, `obsr_…` for a run) |
+| `MODGRAD_PROJECT`, `WANDB_PROJECT`, `MODGRAD_PROJECT` | project (used when `init(project=)` is not given) |
 | `MODGRAD_MODE`, `WANDB_MODE` | `online` (default), `offline` or `disabled`; W&B's `dryrun` means offline and `run` means online |
 | `WANDB_DISABLED=true` | same as `disabled` |
 | `MODGRAD_NAME`, `WANDB_NAME` | run name |
@@ -242,11 +242,11 @@ Both integration modules can be imported without their framework installed.
 ## Tests
 
 ```sh
-cargo build --release -p modgrad-obs-server -p modgrad-obs    # builds target/release/obs-server and obs
+cargo build --release -p modgrad-obs-server -p modgrad-obs    # builds target/release/modgrad-server and modgrad
 cd clients/python && python -m venv .venv && .venv/bin/pip install -e '.[test]'
 .venv/bin/python -m pytest -q
 ```
 
-The fixture starts the built `obs-server --dev` on a free port. Tests that need `torch`,
+The fixture starts the built `modgrad-server --dev` on a free port. Tests that need `torch`,
 `transformers` or `lightning` are skipped when those packages are missing. You can point
 the tests at other binaries with `OBS_SERVER_BIN` and `OBS_BIN`.

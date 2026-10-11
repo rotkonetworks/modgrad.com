@@ -2,7 +2,7 @@
 //!
 //! [`Store`] is the seam between the tools and storage. [`LocalStore`]
 //! works directly on a modgrad-obs data directory with the crate's own
-//! writer and reader. [`RemoteStore`] talks to an obs-server over the v1
+//! writer and reader. [`RemoteStore`] talks to a modgrad-server over the v1
 //! HTTP API (see `modgrad-obs-server/src/v1_api.txt`).
 //! Analysis never goes through the store: the tools pull rows and compute
 //! locally, also in remote mode. The server only stores and selects.
@@ -170,7 +170,7 @@ impl Store for LocalStore {
             Run::open_existing(&dir).map_err(|e| format!("cannot open run {name}: {e}"))?
         } else {
             let project = name.split('/').next().filter(|_| name.contains('/')).map(String::from);
-            let meta = Meta { project, git: None, hostname: None, start_unix: now_unix(), extra: Some(json!({"created_by": "obs mcp"})) };
+            let meta = Meta { project, git: None, hostname: None, start_unix: now_unix(), extra: Some(json!({"created_by": "modgrad mcp"})) };
             Run::create_in(&dir, name, &json!({}), meta).map_err(|e| format!("cannot create run {name}: {e}"))?
         };
         for (step, kv) in rows {
@@ -200,8 +200,8 @@ impl Store for LocalStore {
 
 // ----------------------------------------------------------------- remote
 
-/// `obs mcp --url <server> [--token <token>]`: the same tools against an
-/// obs-server.
+/// `modgrad mcp --url <server> [--token <token>]`: the same tools against an
+/// modgrad-server.
 ///
 /// | store call          | HTTP                                              |
 /// |---------------------|---------------------------------------------------|
@@ -242,7 +242,7 @@ impl RemoteStore {
         let url = format!("{}{path}", self.url);
         let bytes = body.map(|b| serde_json::to_vec(b).unwrap_or_default());
         let r = net::request(method, &url, self.token.as_deref(), bytes.as_deref(), "application/json", TIMEOUT).map_err(|e| {
-            format!("Cannot reach the obs server at {} ({e}). Check that it is running (obs-server --root obs --dev), or restart this tool in local mode: obs mcp --dir ./obs", self.url)
+            format!("Cannot reach the obs server at {} ({e}). Check that it is running (modgrad-server --root obs --dev), or restart this tool in local mode: modgrad mcp --dir ./obs", self.url)
         })?;
         if r.ok() {
             return Ok(r.json());
@@ -250,7 +250,7 @@ impl RemoteStore {
         let msg = r.error_text();
         Err(match r.status {
             401 => format!(
-                "The obs server at {} refused the request: {msg}. Writes need a project token: start this tool as obs mcp --url {} --token obsp_… (or set OBS_TOKEN); for the hosted /mcp endpoint, send the header Authorization: Bearer obsp_…. Get a token with curl -X POST {}/api/v1/projects",
+                "The obs server at {} refused the request: {msg}. Writes need a project token: start this tool as modgrad mcp --url {} --token obsp_… (or set MODGRAD_TOKEN); for the hosted /mcp endpoint, send the header Authorization: Bearer obsp_…. Get a token with curl -X POST {}/api/v1/projects",
                 self.url, self.url, self.url
             ),
             403 => format!("The token does not cover this: {msg}"),

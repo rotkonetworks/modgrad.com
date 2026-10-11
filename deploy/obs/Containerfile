@@ -26,7 +26,7 @@ RUN printf '[workspace]\nresolver = "2"\nmembers = ["crates/modgrad-obs", "crate
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release -p modgrad-obs-server -p modgrad-obs -p modgrad-obs-wandb \
- && mkdir -p /out/bin && cp target/release/obs-server target/release/obs target/release/obs-wandb /out/bin/ \
+ && mkdir -p /out/bin && cp target/release/modgrad-server target/release/modgrad target/release/modgrad-wandb /out/bin/ \
  && for c in modgrad_obs_analysis modgrad_obs_ingest; do \
       RUSTFLAGS='' cargo rustc --release -p "$(echo $c | tr _ -)" --target wasm32-unknown-unknown --features wasm --crate-type cdylib \
       && wasm-bindgen --target web --out-dir /out/pkg --out-name $c target/wasm32-unknown-unknown/release/$c.wasm || exit 1; \
@@ -51,4 +51,4 @@ USER obs
 VOLUME /data
 EXPOSE 8790
 ENV RUST_LOG=info
-ENTRYPOINT ["/usr/bin/tini", "--", "obs-server", "--root", "/data", "--static", "/srv/obs", "--listen", "0.0.0.0:8790"]
+ENTRYPOINT ["/usr/bin/tini", "--", "modgrad-server", "--root", "/data", "--static", "/srv/obs", "--listen", "0.0.0.0:8790"]

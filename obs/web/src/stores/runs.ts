@@ -231,7 +231,7 @@ export async function loadIndex(idxURL: string): Promise<void> {
   try { const r = await fetch(dataURL(idxURL), { cache: 'no-store' }); if (r.ok) { const j = await r.json() as Index; if (j.server) { S.api = true; S.dev = !!j.dev; S.index = j; } } } catch { /* static mode */ }
   if (!S.api) {
     try { S.index = await getJSON<Index>('index.json'); }
-    catch (e) { err('could not load index.json (' + e + '). Put index.json and runs/ next to this page (scripts/obs_collect.sh writes them), or run obs-server. Dropped log files still work.'); S.index = { runs: [], generated_unix: Date.now() / 1000 }; }
+    catch (e) { err('could not load index.json (' + e + '). Put index.json and runs/ next to this page (scripts/obs_collect.sh writes them), or run modgrad-server. Dropped log files still work.'); S.index = { runs: [], generated_unix: Date.now() / 1000 }; }
   }
   S.runs = S.index!.runs; S.byId.clear(); for (const r of S.runs) S.byId.set(r.id, r);
   for (const e of S.index!.errors || []) err('export error: ' + JSON.stringify(e));

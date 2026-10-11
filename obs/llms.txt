@@ -6,13 +6,13 @@
 > runs in the client, never on the server. This file is the quickstart for
 > coding agents. It is complete: you should not need anything else.
 
-Binaries: `obs` (CLI and MCP server) and `obs-server` (HTTP API, dashboard).
+Binaries: `modgrad` (CLI and MCP server) and `modgrad-server` (HTTP API, dashboard).
 Install from a checkout of https://github.com/rotkonetworks/modgrad:
 
-    cargo install --path crates/modgrad-obs          # -> obs
-    cargo install --path crates/modgrad-obs-server   # -> obs-server
+    cargo install --path crates/modgrad-obs          # -> modgrad
+    cargo install --path crates/modgrad-obs-server   # -> modgrad-server
 
-Note: OBS Studio also installs a binary called `obs`. If `obs --help` does
+Note: OBS Studio also installs a binary called `modgrad`. If `modgrad --help` does
 not print this tool's usage, use the full path (usually `~/.cargo/bin/obs`).
 
 Data lives in an obs directory (default `./obs`): `obs/runs/<run>/` holds
@@ -25,14 +25,14 @@ differences against seed noise.
 
 Every door ends in the same place: a run with metrics you can query and chart.
 
-1. MCP: `obs mcp`. An agent reads and writes runs through 7 tools. Use this
+1. MCP: `modgrad mcp`. An agent reads and writes runs through 7 tools. Use this
    to answer questions about runs ("did it diverge?", "worth continuing?").
-2. `obs run -- <command>`: wraps a training command, passes its output through
+2. `modgrad run -- <command>`: wraps a training command, passes its output through
    unchanged, parses metric lines from stdout/stderr, and samples CPU/RSS/GPU.
    No code change. Use this to instrument a script that already prints metrics.
 3. HTTP API: `POST $OBS/api/v1/runs/<run>/log` with JSON. Any language, no
    client library. Use this inside a training loop or framework callback.
-4. The dashboard: `obs-server` serves it at `/`. `$OBS/#new` creates an
+4. The dashboard: `modgrad-server` serves it at `/`. `$OBS/#new` creates an
    anonymous project and shows ready-to-paste commands; `#run=<id>`,
    `#project=<p>` and `#board=<id>` open a run, a project or a saved board.
    Log files (CSV, JSONL, text logs, TensorBoard, W&B offline) can also be
@@ -42,41 +42,41 @@ Every door ends in the same place: a run with metrics you can query and chart.
 
 Local data (recommended; nothing else to run):
 
-    obs mcp --dir ./obs                                        # or OBS_DIR=./obs
+    modgrad mcp --dir ./obs                                        # or MODGRAD_DATA=./obs
 
-Against an obs-server (the tools fetch rows and analyse locally; the server
+Against a modgrad-server (the tools fetch rows and analyse locally; the server
 only stores and selects):
 
-    obs mcp --url https://obs.example.org --token obsp_...    # or OBS_MCP_URL=... OBS_TOKEN=...
+    modgrad mcp --url https://obs.example.org --token obsp_...    # or MODGRAD_MCP_URL=... MODGRAD_TOKEN=...
 
-A server started with `obs-server --mcp` also serves MCP over streamable HTTP
+A server started with `modgrad-server --mcp` also serves MCP over streamable HTTP
 at `$OBS/mcp`. That is for agents that cannot run a local binary: the
-analysis then runs on the server. Prefer `obs mcp --url` when you can.
+analysis then runs on the server. Prefer `modgrad mcp --url` when you can.
 
 Claude Code:
 
-    claude mcp add obs -- obs mcp --dir ./obs
-    claude mcp add --scope project obs -- obs mcp --dir obs          # writes .mcp.json
-    claude mcp add obs --env OBS_TOKEN=obsp_... -- obs mcp --url https://obs.example.org
-    claude mcp add --transport http obs https://obs.example.org/mcp --header "Authorization: Bearer obsp_..."
+    claude mcp add modgrad -- modgrad mcp --dir ./obs
+    claude mcp add --scope project modgrad -- modgrad mcp --dir obs          # writes .mcp.json
+    claude mcp add modgrad --env MODGRAD_TOKEN=obsp_... -- modgrad mcp --url https://obs.example.org
+    claude mcp add --transport http modgrad https://obs.example.org/mcp --header "Authorization: Bearer obsp_..."
 
 Cursor (`.cursor/mcp.json`) and any client that takes the common JSON shape
 (`.mcp.json`, Claude Desktop, Windsurf, Cline, ...):
 
     {
       "mcpServers": {
-        "obs": { "command": "obs", "args": ["mcp", "--dir", "obs"] }
+        "modgrad": { "command": "modgrad", "args": ["mcp", "--dir", "obs"] }
       }
     }
 
 Remote store, local analysis:
 
-    { "mcpServers": { "obs": { "command": "obs", "args": ["mcp", "--url", "https://obs.example.org"],
-                               "env": { "OBS_TOKEN": "obsp_..." } } } }
+    { "mcpServers": { "modgrad": { "command": "modgrad", "args": ["mcp", "--url", "https://obs.example.org"],
+                               "env": { "MODGRAD_TOKEN": "obsp_..." } } } }
 
-Hosted endpoint (only if the agent cannot run `obs`):
+Hosted endpoint (only if the agent cannot run `modgrad`):
 
-    { "mcpServers": { "obs": { "url": "https://obs.example.org/mcp",
+    { "mcpServers": { "modgrad": { "url": "https://obs.example.org/mcp",
                                "headers": { "Authorization": "Bearer obsp_..." } } } }
 
 Tools (arguments are flat and forgiving; run and metric names are fuzzy):
@@ -105,11 +105,11 @@ Typical calls:
 Report what the tools say. If summarize says the forecast has "no skill",
 do not give a confident number.
 
-## 2. obs run
+## 2. modgrad run
 
-    obs run --offline --name exp1 -- python train.py      # writes ./obs/runs/exp1
-    obs run --name exp1 -- python train.py                # streams to $OBS_URL (default http://127.0.0.1:8790)
-    obs run --server https://obs.example.org --token obsp_... --project team --name exp1 -- torchrun ...
+    modgrad run --offline --name exp1 -- python train.py      # writes ./obs/runs/exp1
+    modgrad run --name exp1 -- python train.py                # streams to $MODGRAD_URL (default http://127.0.0.1:8790)
+    modgrad run --server https://obs.example.org --token obsp_... --project team --name exp1 -- torchrun ...
 
 Lines it understands (one metric line per print is enough):
 
@@ -121,26 +121,26 @@ Lines it understands (one metric line per print is enough):
 
 A line without a step uses the last step seen. The child's exit code is
 returned. If the server is unreachable, rows are spooled to disk and
-`obs push <spool dir>` resends them. `obs tail <run>` prints the latest
+`modgrad push <spool dir>` resends them. `modgrad tail <run>` prints the latest
 values with sparklines.
 
 To instrument a silent script: add one print per logging step, e.g.
 `print(f"step {step} loss={loss:.6f} lr={lr:.3e}", flush=True)`, then wrap it
-with `obs run`.
+with `modgrad run`.
 
 ## 3. HTTP API
 
 Full reference, plain text: `curl $OBS/api/v1`. Bodies are JSON whatever the
 Content-Type; errors are JSON with a corrected example.
 
-    obs-server --root obs --dev                     # local server; --dev = writes need no token
+    modgrad-server --root obs --dev                     # local server; --dev = writes need no token
     curl -X POST $OBS/api/v1/projects               # -> {"project", "token": "obsp_...", "board"}
-    curl -X POST $OBS/api/v1/runs/exp1/log -H "Authorization: Bearer $OBS_TOKEN" \
+    curl -X POST $OBS/api/v1/runs/exp1/log -H "Authorization: Bearer $MODGRAD_TOKEN" \
          -d '{"step": 10, "loss": 0.52, "acc": "71.5%"}'
-    curl -X POST $OBS/api/v1/runs/exp1/log -H "Authorization: Bearer $OBS_TOKEN" \
+    curl -X POST $OBS/api/v1/runs/exp1/log -H "Authorization: Bearer $MODGRAD_TOKEN" \
          -d '{"rows": [{"step": 11, "loss": 0.5}], "events": ["lr drop"], "config": {"lr": 3e-4}}'
-    python train.py 2>&1 | curl -X POST $OBS/api/v1/runs/exp1/text -H "Authorization: Bearer $OBS_TOKEN" --data-binary @-
-    curl -X POST $OBS/api/v1/runs/exp1/finish -H "Authorization: Bearer $OBS_TOKEN" -d '{"exit_code": 0}'
+    python train.py 2>&1 | curl -X POST $OBS/api/v1/runs/exp1/text -H "Authorization: Bearer $MODGRAD_TOKEN" --data-binary @-
+    curl -X POST $OBS/api/v1/runs/exp1/finish -H "Authorization: Bearer $MODGRAD_TOKEN" -d '{"exit_code": 0}'
     curl "$OBS/api/index"                                       # runs (a project token scopes it)
     curl "$OBS/api/v1/runs/exp1/history?keys=loss,acc&stride=10" # {"steps", "t", "columns"}
 
@@ -151,12 +151,12 @@ project token, a run id without `/` lands in the token's project.
 ## Framework snippets
 
 All of these post to the HTTP API with `requests`; each logging call is one
-small POST. Set `OBS_URL` (and `OBS_TOKEN` unless the server runs `--dev`).
+small POST. Set `MODGRAD_URL` (and `MODGRAD_TOKEN` unless the server runs `--dev`).
 Never let logging crash training: catch and drop errors.
 
     import os, requests
-    OBS = os.environ.get("OBS_URL", "http://127.0.0.1:8790")
-    HDR = {"Authorization": f"Bearer {os.environ['OBS_TOKEN']}"} if os.environ.get("OBS_TOKEN") else {}
+    OBS = os.environ.get("MODGRAD_URL", "http://127.0.0.1:8790")
+    HDR = {"Authorization": f"Bearer {os.environ['MODGRAD_TOKEN']}"} if os.environ.get("MODGRAD_TOKEN") else {}
 
     def obs_log(run, step, metrics, **envelope):
         """envelope: config={...}, events=[...], summary={...}, finish=True"""
@@ -197,7 +197,7 @@ Hugging Face Trainer:
 
     trainer = Trainer(..., callbacks=[ObsCallback("sft/run1")])
 
-(Or no code at all: `obs run --name sft/run1 -- python train.py` parses the
+(Or no code at all: `modgrad run --name sft/run1 -- python train.py` parses the
 dicts the Trainer prints.)
 
 PyTorch Lightning:
@@ -210,7 +210,7 @@ PyTorch Lightning:
             super().__init__()
             self._run = run
         @property
-        def name(self): return "obs"
+        def name(self): return "modgrad"
         @property
         def version(self): return self._run
         @rank_zero_only
@@ -231,5 +231,5 @@ write the same directory format with no server.
 
 ## Viewing
 
-    obs-server --root obs --dev          # then open http://127.0.0.1:8790/
+    modgrad-server --root obs --dev          # then open http://127.0.0.1:8790/
     # boards from make_board open at http://127.0.0.1:8790/#board=<id>

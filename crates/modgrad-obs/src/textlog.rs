@@ -1,7 +1,7 @@
 //! Generic metric extraction from free-form training log lines.
 //!
 //! [`parse_line`] is a pure function: one line in, the metrics it holds
-//! out. It is what `obs run` applies to a wrapped command's stdout and
+//! out. It is what `modgrad run` applies to a wrapped command's stdout and
 //! stderr, so it must accept the common shapes training scripts print and
 //! reject prose:
 //!

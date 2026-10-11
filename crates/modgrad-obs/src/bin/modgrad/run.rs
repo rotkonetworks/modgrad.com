@@ -1,4 +1,4 @@
-//! `obs run [opts] -- <command...>`: wrap a training command.
+//! `modgrad run [opts] -- <command...>`: wrap a training command.
 //!
 //! Threads: one reader per child pipe (read -> write through unchanged ->
 //! hand complete lines to a channel; nothing else, so a slow network can
@@ -9,7 +9,7 @@
 //! sending, and records the acknowledged byte offset after each successful
 //! POST. Unacknowledged rows are resent with backoff while the server is
 //! away, and if the run ends before they get through the spool stays on
-//! disk for `obs push <dir>`. Steps are resolved here (not by the server),
+//! disk for `modgrad push <dir>`. Steps are resolved here (not by the server),
 //! so a resend is idempotent.
 
 use crate::net;
@@ -191,7 +191,7 @@ impl Remote {
         Ok(r)
     }
 
-    /// Reopen a spool directory left behind (for `obs push`).
+    /// Reopen a spool directory left behind (for `modgrad push`).
     pub fn reopen(dir: &Path, json_mode: bool) -> std::io::Result<(Remote, Option<Value>)> {
         let m: Value = serde_json::from_slice(&std::fs::read(dir.join("meta.json"))?)?;
         let root = dir.parent().unwrap_or(Path::new("."));
@@ -470,14 +470,14 @@ fn exit_code(st: &std::process::ExitStatus) -> (i32, Option<i32>) {
 
 pub fn run(o: Opts) -> i32 {
     if o.cmd.is_empty() {
-        eprintln!("usage: obs run [--server URL] [--token T] [--name N] [--project P] [--offline] -- <command...>");
+        eprintln!("usage: modgrad run [--server URL] [--token T] [--name N] [--project P] [--offline] -- <command...>");
         return 2;
     }
     let name = o.name.clone().unwrap_or_else(auto_name);
     let detected = modgrad_obs::Meta::detect();
     let command = o.cmd.join(" ");
     let cwd = std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default();
-    let meta = json!({ "git": detected.git, "hostname": detected.hostname, "command": command, "cwd": cwd, "client": "obs run" });
+    let meta = json!({ "git": detected.git, "hostname": detected.hostname, "command": command, "cwd": cwd, "client": "modgrad run" });
 
     // the sink: a local run directory, or the server through the spool
     let mut local = None;
@@ -489,11 +489,11 @@ pub fn run(o: Opts) -> i32 {
         };
         let mut m = detected.clone();
         m.project = o.project.clone();
-        m.extra = Some(json!({ "command": command, "cwd": cwd, "client": "obs run" }));
+        m.extra = Some(json!({ "command": command, "cwd": cwd, "client": "modgrad run" }));
         match modgrad_obs::Run::create_with_meta(&o.out, &full, &json!({}), m) {
             Ok(run) => {
                 let dir = run.dir().to_path_buf();
-                say(o.json, json!({"event": "start", "mode": "offline", "run": full, "dir": dir}), format!("offline run {full} -> {} (view: obs-server --root {})", dir.display(), o.out.display()));
+                say(o.json, json!({"event": "start", "mode": "offline", "run": full, "dir": dir}), format!("offline run {full} -> {} (view: modgrad-server --root {})", dir.display(), o.out.display()));
                 local = Some(Local { run, dir });
             }
             Err(e) => {
@@ -608,7 +608,7 @@ pub fn run(o: Opts) -> i32 {
         })
     });
 
-    let _ = stx.send(Msg::Item(Item::Event(json!({ "step": 0, "t": 0.0, "text": format!("obs run: {command}") }))));
+    let _ = stx.send(Msg::Item(Item::Event(json!({ "step": 0, "t": 0.0, "text": format!("modgrad run: {command}") }))));
 
     // sender: spool + post (or local writes), every 250 ms
     let json_mode = o.json;
@@ -647,7 +647,7 @@ pub fn run(o: Opts) -> i32 {
                 let mut r = remote.take().unwrap();
                 let ok = r.close(&summary, Instant::now() + Duration::from_secs(10));
                 if !ok {
-                    say(json_mode, json!({"event": "unsent", "rows": r.pending(), "spool": r.dir, "resend": format!("obs push {}", r.dir.display())}), format!("{} rows not yet on the server; kept in {} (resend: obs push {})", r.pending(), r.dir.display(), r.dir.display()));
+                    say(json_mode, json!({"event": "unsent", "rows": r.pending(), "spool": r.dir, "resend": format!("modgrad push {}", r.dir.display())}), format!("{} rows not yet on the server; kept in {} (resend: modgrad push {})", r.pending(), r.dir.display(), r.dir.display()));
                 }
                 return (ok, r.dashboard.clone());
             }
@@ -675,7 +675,7 @@ pub fn run(o: Opts) -> i32 {
         Some(s) => format!("killed by signal {s}"),
         None => format!("exit {code}"),
     };
-    let _ = stx.send(Msg::Item(Item::Event(json!({ "step": last_step.load(Ordering::Relaxed), "t": wall, "text": format!("obs run: {text} after {wall:.1}s") }))));
+    let _ = stx.send(Msg::Item(Item::Event(json!({ "step": last_step.load(Ordering::Relaxed), "t": wall, "text": format!("modgrad run: {text} after {wall:.1}s") }))));
     let _ = stx.send(Msg::Done(summary));
     drop(stx);
     let (ok, where_) = sender.join().unwrap_or((false, None));
@@ -683,12 +683,12 @@ pub fn run(o: Opts) -> i32 {
     code
 }
 
-/// `obs push <spool dir>`: resend what a previous `obs run` left behind.
+/// `modgrad push <spool dir>`: resend what a previous `modgrad run` left behind.
 pub fn push(dir: &Path, json_mode: bool) -> i32 {
     let (mut r, finish) = match Remote::reopen(dir, json_mode) {
         Ok(x) => x,
         Err(e) => {
-            eprintln!("obs push: {}: {e}", dir.display());
+            eprintln!("modgrad push: {}: {e}", dir.display());
             return 1;
         }
     };

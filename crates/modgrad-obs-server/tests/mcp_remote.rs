@@ -1,5 +1,5 @@
-//! `obs mcp --url`: the MCP tools with a `RemoteStore` against a real
-//! obs-server on a loopback port. The store is blocking (std TcpStream), so
+//! `modgrad mcp --url`: the MCP tools with a `RemoteStore` against a real
+//! modgrad-server on a loopback port. The store is blocking (std TcpStream), so
 //! every tool call runs in `spawn_blocking` on a multi-thread runtime.
 
 use modgrad_obs::mcp::Server;
@@ -112,10 +112,10 @@ async fn project_token_scopes_writes_reads_and_boards() {
     // without a token a non-dev server refuses writes and says how to fix it
     let anon = Arc::new(Server::new(Box::new(RemoteStore::new(&url, None))));
     let (t, e) = call(&anon, "log", json!({"run": "x/y", "metrics": {"loss": 1.0}})).await;
-    assert!(e && t.contains("--token") && t.contains("OBS_TOKEN"), "{t}");
+    assert!(e && t.contains("--token") && t.contains("MODGRAD_TOKEN"), "{t}");
 }
 
-/// `obs-server --mcp`: POST /mcp runs the same tools server-side. The
+/// `modgrad-server --mcp`: POST /mcp runs the same tools server-side. The
 /// request goes in through the router with a public Host header; the
 /// tools reach the store over the server's real loopback socket.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -149,7 +149,7 @@ async fn hosted_mcp_endpoint() {
     };
     let (c, v) = rpc(json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}), None).await;
     assert_eq!(c, 200);
-    assert_eq!(v["result"]["serverInfo"]["name"], "modgrad-obs");
+    assert_eq!(v["result"]["serverInfo"]["name"], "modgrad");
     let (c, _) = rpc(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}), None).await;
     assert_eq!(c, 202);
     let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}), None).await;

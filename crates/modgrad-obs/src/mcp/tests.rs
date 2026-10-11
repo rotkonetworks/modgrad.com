@@ -270,5 +270,5 @@ fn remote_mode_unreachable_server_teaches() {
     // port 1 refuses connections; the full remote tests live in modgrad-obs-server
     let s = Server::new(Box::new(store::RemoteStore::new("http://127.0.0.1:1", None)));
     let (t, e) = s.call_tool("list_runs", &json!({}));
-    assert!(e && t.contains("Cannot reach") && t.contains("obs mcp --dir"), "{t}");
+    assert!(e && t.contains("Cannot reach") && t.contains("modgrad mcp --dir"), "{t}");
 }

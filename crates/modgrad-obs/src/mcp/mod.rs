@@ -1,4 +1,4 @@
-//! `obs mcp`: a Model Context Protocol server over stdio.
+//! `modgrad mcp`: a Model Context Protocol server over stdio.
 //!
 //! Hand-rolled JSON-RPC 2.0 (one JSON message per line on stdin/stdout,
 //! logs on stderr) implementing what MCP tool servers need: `initialize`,
@@ -23,7 +23,7 @@ use std::io::{BufRead, Write};
 use store::Store;
 use tools::Args;
 
-pub const SERVER_NAME: &str = "modgrad-obs";
+pub const SERVER_NAME: &str = "modgrad";
 const PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 const INSTRUCTIONS: &str = "modgrad-obs: training-run metrics (loss curves, eval scores) stored locally. \
@@ -206,7 +206,7 @@ impl Server {
 
 /// Serve on stdin/stdout until EOF.
 pub fn serve_stdio(server: &Server) -> std::io::Result<()> {
-    eprintln!("obs mcp: serving {} on stdio", server.store.describe());
+    eprintln!("modgrad mcp: serving {} on stdio", server.store.describe());
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
     for line in stdin.lock().lines() {

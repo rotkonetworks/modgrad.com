@@ -16,7 +16,7 @@ export default function Waiting() {
       const run = t.run || 'my-run';
       const blocks: [string, string][] = [
         ['Ask your coding agent', `Add modgrad-obs logging to this repo. Server: ${origin}${dev ? '' : '  Token: ' + tok}  API reference: ${origin}/api/v1`],
-        ['Or wrap your training command', `obs run --server ${origin}${dev ? '' : ' --token ' + tok} --name ${run} -- python train.py`],
+        ['Or wrap your training command', `modgrad run --server ${origin}${dev ? '' : ' --token ' + tok} --name ${run} -- python train.py`],
         ['Or send one row with curl', `curl -X POST ${origin}/api/v1/runs/${run}/log${dev ? '' : ` -H "Authorization: Bearer ${tok}"`} -d '{"loss": 0.5}'`],
       ];
       return (

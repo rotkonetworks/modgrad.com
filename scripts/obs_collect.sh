@@ -23,7 +23,7 @@ mkdir -p "$RUNS"
 
 echo "== building obs CLI"
 (cd "$REPO" && cargo build -q --release -p modgrad-obs --bin obs -j 4) || { echo "build failed"; exit 1; }
-OBS_BIN="$REPO/target/release/obs"
+OBS_BIN="$REPO/target/release/modgrad"
 
 # only run artefacts, never checkpoints (brain.json/read.json can be large)
 FILTER=(--include='*/' --include='log.txt' --include='*.jsonl' --include='config.json' --include='summary.json' --exclude='*')

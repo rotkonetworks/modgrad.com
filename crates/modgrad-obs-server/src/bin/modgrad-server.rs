@@ -1,7 +1,7 @@
 //! ```text
-//! obs-server [--root <obs dir>] [--listen 127.0.0.1:8790] [--static <dir> | --no-static]
+//! modgrad-server [--root <obs dir>] [--listen 127.0.0.1:8790] [--static <dir> | --no-static]
 //!            [--dev] [--no-anon] [--anon-expiry-days 30] [--mcp]
-//! obs-server token add <project> [--root <obs dir>] [--json]
+//! modgrad-server token add <project> [--root <obs dir>] [--json]
 //! ```
 //!
 //! Serves the modgrad-obs store under `<root>/runs` over HTTP (the v1
@@ -11,7 +11,7 @@
 //! at `/api/v1/boards/<name>` for the dashboard's `#board=<name>`.
 //! `--dev` accepts writes without a token (local use only). `token add`
 //! provisions a project token and prints it once. `--mcp` adds a hosted MCP
-//! endpoint at `/mcp` for agents that cannot run `obs mcp` locally; its
+//! endpoint at `/mcp` for agents that cannot run `modgrad mcp` locally; its
 //! tools analyse on this server's CPU (see `mcp_http.rs`). Logging:
 //! `RUST_LOG=info`.
 
@@ -33,12 +33,12 @@ async fn main() {
     };
     if args.get(1).map(String::as_str) == Some("token") {
         let (Some("add"), Some(project)) = (args.get(2).map(String::as_str), args.get(3)) else {
-            eprintln!("usage: obs-server token add <project> [--root <obs dir>] [--json]");
+            eprintln!("usage: modgrad-server token add <project> [--root <obs dir>] [--json]");
             std::process::exit(2)
         };
         std::fs::create_dir_all(&root).ok();
         let t = Auth::open(&root, cfg).and_then(|a| a.add_project_token(project)).unwrap_or_else(|e| {
-            eprintln!("obs-server: token store under {}: {e}", root.display());
+            eprintln!("modgrad-server: token store under {}: {e}", root.display());
             std::process::exit(1)
         });
         if has("--json") {
@@ -53,16 +53,16 @@ async fn main() {
     let (ingest, read) = match modgrad_obs_server::open(&root, IngestConfig::default()) {
         Ok(x) => x,
         Err(e) => {
-            eprintln!("obs-server: cannot open {}: {e}", root.display());
+            eprintln!("modgrad-server: cannot open {}: {e}", root.display());
             std::process::exit(1);
         }
     };
     let auth = Auth::open(&root, cfg).unwrap_or_else(|e| {
-        eprintln!("obs-server: token store under {}: {e}", root.display());
+        eprintln!("modgrad-server: token store under {}: {e}", root.display());
         std::process::exit(1)
     });
     let lis = tokio::net::TcpListener::bind(&listen).await.unwrap_or_else(|e| {
-        eprintln!("obs-server: bind {listen}: {e}");
+        eprintln!("modgrad-server: bind {listen}: {e}");
         std::process::exit(1)
     });
     let mut state = http::AppState::new(ingest, read, static_dir, auth).with_boards(root.join("boards"));
@@ -72,9 +72,9 @@ async fn main() {
             a.set_ip(if a.is_ipv4() { std::net::Ipv4Addr::LOCALHOST.into() } else { std::net::Ipv6Addr::LOCALHOST.into() });
         }
         state = state.with_mcp(format!("http://{a}"));
-        eprintln!("obs-server: hosted MCP endpoint at /mcp (tool analysis runs on this server)");
+        eprintln!("modgrad-server: hosted MCP endpoint at /mcp (tool analysis runs on this server)");
     }
     let app = http::router(state);
-    eprintln!("obs-server: {} on http://{listen}/{}", root.display(), if cfg.dev { "  (dev mode: tokenless writes allowed)" } else { "" });
+    eprintln!("modgrad-server: {} on http://{listen}/{}", root.display(), if cfg.dev { "  (dev mode: tokenless writes allowed)" } else { "" });
     axum::serve(lis, app).with_graceful_shutdown(async { let _ = tokio::signal::ctrl_c().await; }).await.unwrap();
 }

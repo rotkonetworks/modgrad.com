@@ -1,4 +1,4 @@
-//! `obs tail <run | run dir>`: latest value, range and a braille sparkline
+//! `modgrad tail <run | run dir>`: latest value, range and a braille sparkline
 //! per metric, from a server (`/api/v1/runs/<id>/history`) or a local run
 //! directory. `--follow` redraws every `--interval` seconds; `--json`
 //! prints one JSON object per refresh instead.
@@ -178,7 +178,7 @@ pub fn tail(o: Opts) -> i32 {
                 }
             }
             Err(e) => {
-                eprintln!("obs tail: {e}");
+                eprintln!("modgrad tail: {e}");
                 if !o.follow {
                     return 1;
                 }

@@ -1,4 +1,4 @@
-"""Fixtures: a live obs-server (built binary, --dev, free port) and a clean
+"""Fixtures: a live modgrad-server (built binary, --dev, free port) and a clean
 modgrad environment per test."""
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[3]
-SERVER_BIN = Path(os.environ.get("OBS_SERVER_BIN", REPO / "target" / "release" / "obs-server"))
+SERVER_BIN = Path(os.environ.get("OBS_SERVER_BIN", REPO / "target" / "release" / "modgrad-server"))
 OBS_BIN = Path(os.environ.get("OBS_BIN", REPO / "target" / "release" / "obs"))
 
 
@@ -46,9 +46,9 @@ class Server:
                 return self
             except OSError:
                 if self.proc.poll() is not None:
-                    raise RuntimeError(f"obs-server exited: {(self.root / 'server.log').read_text()[-2000:]}")
+                    raise RuntimeError(f"modgrad-server exited: {(self.root / 'server.log').read_text()[-2000:]}")
                 time.sleep(0.05)
-        raise RuntimeError("obs-server did not come up")
+        raise RuntimeError("modgrad-server did not come up")
 
     def stop(self) -> None:
         if self.proc and self.proc.poll() is None:

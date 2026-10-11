@@ -1,11 +1,11 @@
-//! `obs-wandb` — W&B offline-run interop.
+//! `modgrad-wandb` — W&B offline-run interop.
 //!
 //! ```text
-//! obs-wandb export <run_dir> <out_dir> [--id <wandb run id>]
+//! modgrad-wandb export <run_dir> <out_dir> [--id <wandb run id>]
 //!     -> <out_dir>/offline-run-<stamp>-<id>/run-<id>.wandb  (then: wandb sync <that dir>)
-//! obs-wandb import <file.wandb> <obs_root> [--name <run name>]
+//! modgrad-wandb import <file.wandb> <obs_root> [--name <run name>]
 //!     -> <obs_root>/runs/<name>/ (default name wandb/<display name>)
-//! obs-wandb dump <file.wandb>
+//! modgrad-wandb dump <file.wandb>
 //!     print each record as one line (type, num, a short description)
 //! ```
 
@@ -17,7 +17,7 @@ fn flag(args: &[String], k: &str) -> Option<String> {
 }
 
 fn die(msg: String) -> ! {
-    eprintln!("obs-wandb: {msg}");
+    eprintln!("modgrad-wandb: {msg}");
     std::process::exit(1)
 }
 
@@ -51,7 +51,7 @@ fn main() {
             }
         }
         _ => {
-            eprintln!("usage: obs-wandb export <run_dir> <out_dir> [--id ID] | import <file.wandb> <obs_root> [--name N] | dump <file.wandb>");
+            eprintln!("usage: modgrad-wandb export <run_dir> <out_dir> [--id ID] | import <file.wandb> <obs_root> [--name N] | dump <file.wandb>");
             std::process::exit(2);
         }
     }

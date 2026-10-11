@@ -1,12 +1,12 @@
-//! Hosted MCP endpoint, opt-in with `obs-server --mcp`: `POST /mcp`
+//! Hosted MCP endpoint, opt-in with `modgrad-server --mcp`: `POST /mcp`
 //! speaks MCP's streamable-HTTP transport (one JSON-RPC message or batch
 //! per request, a JSON response; no server-initiated stream) with the same
-//! seven tools as `obs mcp`.
+//! seven tools as `modgrad mcp`.
 //!
 //! This is for agents that cannot run a local binary. It bends the rule
 //! that the server only stores and selects: the tools' analysis (trends,
 //! forecasts, spike and seed-noise checks) runs here, on the server's CPU.
-//! Prefer `obs mcp --url <server>` wherever a local process is possible.
+//! Prefer `modgrad mcp --url <server>` wherever a local process is possible.
 //!
 //! The tools reach the store through [`RemoteStore`] pointed at this
 //! server's own loopback address with the caller's bearer token, so writes

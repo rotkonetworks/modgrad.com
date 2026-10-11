@@ -6,7 +6,7 @@ import { copyFileSync, createReadStream, existsSync, statSync } from 'fs';
 import { join, normalize, resolve } from 'path';
 
 // The dashboard's data lives next to the page: `index.json` plus per-run files under `runs/`
-// (static mode), or the obs-server API under `api/` (server mode).
+// (static mode), or the modgrad-server API under `api/` (server mode).
 //   npm run dev                       proxies /api to OBS_SERVER (default http://127.0.0.1:8790)
 //                                     and serves ../index.json and ../runs for static mode
 //   npm run build                     -> dist/ (index.html, dashboard.html, assets incl. wasm + worker)
@@ -31,7 +31,7 @@ function staticData(): Plugin {
   };
 }
 
-/** obs-server serves dashboard.html at `/`; ship the app under both names */
+/** modgrad-server serves dashboard.html at `/`; ship the app under both names */
 function dashboardAlias(): Plugin {
   let outDir = 'dist';
   return {

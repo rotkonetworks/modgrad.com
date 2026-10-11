@@ -1,4 +1,4 @@
-//! System samples for `obs run`: RSS and CPU of the wrapped process tree
+//! System samples for `modgrad run`: RSS and CPU of the wrapped process tree
 //! (from /proc), and GPU utilisation and VRAM from rocm-smi or nvidia-smi
 //! when present. Keys: `sys/rss_mb`, `sys/cpu_pct`, `sys/gpu<i>/util_pct`,
 //! `sys/gpu<i>/vram_mb`. GPU numbers are whole-device, not per-process.

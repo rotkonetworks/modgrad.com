@@ -128,6 +128,7 @@ def test_wandb_watch_maps_to_grad_norms(server):
 def test_hf_trainer_real(server, tmp_path):
     pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
+    pytest.importorskip("accelerate")  # transformers.Trainer needs it with PyTorch
     import torch
     from modgrad.integrations.huggingface import ModgradCallback
 

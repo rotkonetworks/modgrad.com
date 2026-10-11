@@ -5,7 +5,7 @@
 //!
 //! ```sh
 //! cargo run -p modgrad-obs --example llm_synthetic -- /tmp/obs-llm-data
-//! obs-server --root /tmp/obs-llm-data --static obs/web/dist --dev
+//! modgrad-server --root /tmp/obs-llm-data --static obs/web/dist --dev
 //! ```
 
 use modgrad_obs::{Run, Sample};

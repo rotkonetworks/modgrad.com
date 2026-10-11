@@ -1,5 +1,5 @@
 //! modgrad-obs-server: Zebra-style tower services over the modgrad-obs
-//! store. See `docs/design/obs-server.md`.
+//! store. See `docs/design/modgrad-server.md`.
 //!
 //! * [`State`] — single writer (put it behind `tower::buffer::Buffer`).
 //! * [`ReadState`] — clonable reads over immutable snapshots.

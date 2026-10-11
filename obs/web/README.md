@@ -12,12 +12,12 @@ cd obs/web && npm ci && npm run build # tsc --noEmit, then vite build -> obs/web
 ```
 
 `dist/` is self-contained: `index.html` (also copied to `dashboard.html`, which is what
-obs-server opens at `/`), the JS/CSS bundle, the drop worker and both wasm modules.
+modgrad-server opens at `/`), the JS/CSS bundle, the drop worker and both wasm modules.
 
 ## Serve
 
 - **Server mode** (live SSE, `#run=`, `#project=`, `#new`, `#board=`):
-  `obs-server --root <obs dir> --static obs/web/dist --listen 127.0.0.1:8790 [--dev]`
+  `modgrad-server --root <obs dir> --static obs/web/dist --listen 127.0.0.1:8790 [--dev]`
 - **Static mode** (no server): put `index.json` and the run folders it points to
   (`runs/<source>/<run>/…`, written by `scripts/obs_collect.sh`) next to the files of
   `dist/`, and serve that directory with any static server:
@@ -27,7 +27,7 @@ obs-server opens at `/`), the JS/CSS bundle, the drop worker and both wasm modul
   ```
   Saved boards go in `site/boards/<name>.json` for `#board=<name>`. The page needs HTTP
   (not `file://`): it fetches JSON and instantiates wasm.
-- **From the obs/ folder** (old setups: `python3 -m http.server --directory obs`, or obs-server
+- **From the obs/ folder** (old setups: `python3 -m http.server --directory obs`, or modgrad-server
   with its default `--static <root>`): `obs/dashboard.html` redirects to
   `web/dist/index.html?data=../../`; `?data=` (only `../` sequences) makes the app fetch
   `index.json`, `runs/`, `boards/` and `api/` from that level, keeping the URL hash.

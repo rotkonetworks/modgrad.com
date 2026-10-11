@@ -23,9 +23,6 @@ test = ["pytest>=7", "numpy"]
 [project.urls]
 Homepage = "https://modgrad.com"
 
-[project.scripts]
-modgrad = "modgrad.__main__:main"
-
 [tool.hatch.build.targets.wheel]
 packages = ["src/modgrad"]
 

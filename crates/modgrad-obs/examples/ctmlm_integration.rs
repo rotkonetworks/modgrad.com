@@ -23,7 +23,7 @@
 //!     &serde_json::json!({ "c": spec.c, "n": spec.n, "facts": spec.facts, "gap_lo": spec.gap.0, "gap_hi": spec.gap.1,
 //!         "window": window, "ticks_lo": tc.ticks.0, "ticks_hi": tc.ticks.1, "batch": BATCH,
 //!         "natural_replay_pct": natural_frac * 100.0, "persistent": cfg_persist,
-//!         "brain_params": store.len(), "read_params": read.wq.len() * 4 + read.b.len() })).expect("obs init"));
+//!         "brain_params": store.len(), "read_params": read.wq.len() * 4 + read.b.len() })).expect("modgrad init"));
 //!
 //! // next to the NONE (fixed) println:
 //! if let Some(o) = obs.as_mut() { o.log_scalars(0, &[("none_indist_acc_pct", none_i.pct()), ("none_indist_nll", none_i.mean_nll()), …]).ok(); }
@@ -34,7 +34,7 @@
 //!     ("brain_heldout_acc_pct", eh.pct()), ("brain_heldout_nll", eh.mean_nll()),
 //!     ("s_per_step", step_time / step as f64)]).ok(); }
 //!
-//! // in report_natural (pass `obs` and `step` through): nat_brain, nat_none,
+//! // in report_natural (pass `modgrad` and `step` through): nat_brain, nat_none,
 //! // nat_full, nat_brain_minus_none (+ _std, _sem), and per chunk:
 //! o.log_array(step, "nat_chunk_brain_minus_none", &[chunks], &per_chunk_delta).ok();
 //!

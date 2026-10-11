@@ -1083,7 +1083,7 @@ pub fn eval(q: &Query, cat: &Catalog, plan: &Plan, data: &[(&[f64], &[f64])], ma
             let what = t0.metric.clone();
             traces.push(Trace {
                 letter: t0.letter.clone(),
-                label: if n > 1 { format!("{} {} over {over} (n={n}): {}", what, stat.text(), run_label(cat, &runs)) } else { t0.label.clone() },
+                label: if n > 1 { format!("{}:{what} · {} over {over} (n={n})", run_label(cat, &runs), stat.text()) } else { t0.label.clone() },
                 metric: t0.metric.clone(),
                 runs,
                 steps: grid,

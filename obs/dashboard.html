@@ -286,6 +286,7 @@ function fitY(visible, all) { // y range of the visible values, else of everythi
   return [a, b];
 }
 function logTicks(a, b) { // ticks in log10 space: whole decades when the range spans one, else nice linear values
+  if (b - a >= 1 && b - a < 3) { const t = []; for (let k = Math.floor(a); k <= Math.ceil(b); k++) for (const m of [1, 2, 5]) { const v = k + Math.log10(m); if (v >= a - 1e-9 && v <= b + 1e-9) t.push(v); } return t; } // 1-2-5 per decade
   if (b - a >= 1) { const st = Math.max(1, Math.ceil((Math.floor(b) - Math.ceil(a) + 1) / 6)); const t = []; for (let k = Math.ceil(a); k <= Math.floor(b); k += st) t.push(k); return t; }
   return Array.from(A.nice_ticks(Math.pow(10, a), Math.pow(10, b), 5)).filter((v) => v > 0).map(Math.log10);
 }

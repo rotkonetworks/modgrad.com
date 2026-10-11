@@ -15,7 +15,7 @@ export default function Header() {
     <header class="top">
       <h1>modgrad obs</h1>
       <span class="meta">{genMeta()}</span>
-      <Show when={S.api && liveStatus()}><span class="meta live-status">{liveStatus()}</span></Show>
+      <Show when={liveStatus()}><span class="meta live-status">{liveStatus()}</span></Show>
       <span class="sp" />
       <span class="droptools">
         <span class="hint" title="CSV/TSV, JSONL, text logs, TensorBoard event files, W&B .wandb, modgrad-obs run folders. Parsed in your browser; nothing is uploaded.">drop logs anywhere, or</span>

@@ -6,7 +6,7 @@ import { LiveClient, type HelloEv, type RowsEv, type RunEv, type SummaryEv, type
 import { ssGet, ssSet } from '@/lib/storage';
 import { hash, setHash } from '@/lib/hash';
 import { ago } from '@/lib/fmt';
-import { S, appendRows, upsertRuns, reloadIndex, indexURL, touchRuns, runsVersion, invalidateEvents, bumpRun, setSelection } from '@/stores/runs';
+import { S, appendRows, upsertRuns, reloadIndex, indexURL, touchRuns, runsVersion, invalidateEvents, bumpRun, setSelection, changed } from '@/stores/runs';
 
 const tokenKey = (p: string) => 'obs-anon-token:' + p;
 export const recallToken = (project: string): string | null => ssGet(tokenKey(project));
@@ -71,7 +71,7 @@ export function attachLive(): LiveClient {
     const d = (e as CustomEvent).detail as HelloEv;
     skew = d.unix - Date.now() / 1000;
     for (const x of d.runs) if (x.updated_unix) updated.set(x.run, x.updated_unix);
-    for (const r of S.runs) if (!r.finished) c.watch(r.id, r.last_step ?? -1);
+    for (const r of S.runs) if (!r.finished && !r.local) c.watch(r.id, r.last_step ?? -1); // dropped runs live only in this browser
     touchRuns();
   });
   c.addEventListener('run', (e) => {
@@ -79,9 +79,9 @@ export function attachLive(): LiveClient {
     if (!entry || !entry.id) { reloadIndex(indexURL(hash().project, hash().run)); return; }
     updated.set(d.run, d.unix);
     const known = S.byId.get(entry.id);
-    if (known) { Object.assign(known, entry); touchRuns(); bumpRun(entry.id); }
-    else upsertRuns([entry], { select: wanted(entry.id) });
     if (wanted(entry.id) && !entry.config.synthetic) setSelection((s) => { s.add(entry.id); });
+    if (known) { Object.assign(known, entry); changed({ added: [], updated: [] }); }
+    else upsertRuns([entry], { select: wanted(entry.id) });
     c.watch(entry.id, entry.last_step ?? -1);
   });
   c.addEventListener('rows', (e) => {

@@ -61,7 +61,11 @@ function sync(): void {
   setBoardStore(reconcile(clone(M.board), { key: 'id' }));
   const t = M.undo.peek(); setUndoTop(t ? t.what : null);
 }
-function save(): void { if (!shared()) lsSet(M.key, Bd.serialize(M.board)); }
+/** an untouched default board is saved with auto: true, so it keeps following the data after a reload */
+function save(): void {
+  if (shared()) return;
+  lsSet(M.key, M.autoBoard ? JSON.stringify({ version: Bd.BOARD_VERSION, auto: true, panels: M.board.panels }, null, 1) : Bd.serialize(M.board));
+}
 export const findPanel = (id: string | null | undefined): Panel | undefined => (id ? M.board.panels.find((p) => p.id === id) : undefined);
 export const parseQ = Bd.parse;
 export function titleOf(p: { title: string; q: string }): string {
@@ -92,7 +96,8 @@ let pickedMetrics: () => string[] = () => [];
 /** the series browser registers its picked streams so the history preset can use them */
 export function registerPicked(fn: () => Stream[] | string[]): void { pickedMetrics = () => [...new Set((fn() as (Stream | string)[]).map((s) => (typeof s === 'string' ? s.slice(s.lastIndexOf(':') + 1) : s.metric)))]; }
 export function historyPreset(): Board {
-  const runs = selectedRuns();
+  const t = hash();
+  const runs = t.run ? S.runs.filter((r) => r.id === t.run) : t.project ? S.runs.filter((r) => r.id.startsWith(t.project + '/')) : selectedRuns();
   const names = [...metricCounts(runs).keys()];
   let metrics = pickedMetrics().filter((m) => names.includes(m));
   if (!metrics.length) metrics = PREFERRED.filter((k) => names.includes(k)).slice(0, 4);
@@ -100,13 +105,16 @@ export function historyPreset(): Board {
   return Bd.presetHistory({ runIds: runs.map((r) => r.id), metrics });
 }
 export function autoPreset(): Board | null {
-  const sel = selectedRuns();
-  const runs = sel.length ? sel : S.runs;
-  const counts = metricCounts(runs);
   const t = hash();
+  const sel = selectedRuns();
+  // a single-run page builds from that run only (empty until it arrives, then it follows)
+  const inProject = (r: Run) => !!t.project && r.id.startsWith(t.project + '/');
+  const runs = t.run ? S.runs.filter((r) => r.id === t.run) : t.project ? S.runs.filter(inProject) : sel.length ? sel : S.runs;
+  const counts = metricCounts(runs);
   // demo runs stay out of the default board without pinning it to today's run list
   let filter = S.runs.some(synthetic) && !runs.some(synthetic) ? '{synthetic!=true}' : '';
   if (t.run) filter = `{run=${Bd.quote(t.run)}}`;
+  else if (t.project) filter = `{run=~${Bd.quote(t.project + '/*')}}`;
   const tok = [...counts.keys()].find((m) => /tokens?_seen|^tokens$|num_tokens|consumed_tokens/.test(m));
   return Bd.autoBoard(counts, { replicates: hasReplicates(runs), hasTokens: tok || null, filter });
 }
@@ -183,10 +191,15 @@ export async function initBoard(): Promise<void> {
     if (sb) { b = sb.board; setShared({ name: t.board, title: sb.title, source: sb.source }); }
     else err(`could not load board "${t.board}" (tried ${S.api ? 'api/v1/boards/' + t.board + ' and ' : ''}boards/${t.board}.json)`);
   }
-  if (!b) { try { const s = lsGet(M.key); if (s) b = Bd.validBoard(JSON.parse(s)); } catch { b = null; } }
+  let savedAuto = false;
+  if (!b) { try { const s = lsGet(M.key); if (s) { const j = JSON.parse(s); b = Bd.validBoard(j); savedAuto = !!j.auto; } } catch { b = null; } }
   if (!b && M.key === LS_BOARD) { try { const s = lsGet('obs-builder-layout-v1'); if (s) b = Bd.validBoard(JSON.parse(s)); } catch { b = null; } }
-  M.autoBoard = !b; // no saved board: the default tracks incoming runs until the first edit
-  M.board = b || defaultBoard();
+  M.autoBoard = !b || savedAuto; // the default tracks incoming runs until the first edit
+  if (!b || savedAuto) {
+    // rebuild the default from today's data; keep the saved auto board if nothing matches yet
+    const d = defaultBoard();
+    M.board = d.panels.length || !b ? d : b;
+  } else M.board = b;
   sync();
   onRunsChanged(() => {
     // until the viewer edits it, the default board follows the data (e.g. a live run's first metrics)

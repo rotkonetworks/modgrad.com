@@ -127,8 +127,9 @@ export async function appendRows(runId: string, rows: { step: number; [k: string
   }
   r.n_rows = (r.n_rows || 0) + rows.length;
   await Promise.all(waits);
-  if (newKeys) bumpCatalog(); else touchRuns();
   bumpRun(runId);
+  // new metric keys change the catalog: queries re-plan and the default board may follow
+  if (newKeys) changed({ added: [], updated: [] }); else touchRuns();
   return { newKeys };
 }
 
@@ -153,7 +154,7 @@ const DEFAULTS = (): Omit<Run, 'id'> => ({ source: 'added', project: '', config:
 export interface RunsChanged { added: string[]; updated: string[] }
 const listeners = new Set<(c: RunsChanged) => void>();
 export function onRunsChanged(fn: (c: RunsChanged) => void): () => void { listeners.add(fn); return () => listeners.delete(fn); }
-function changed(c: RunsChanged): void {
+export function changed(c: RunsChanged): void {
   bumpCatalog();
   for (const id of c.updated) bumpRun(id);
   for (const fn of listeners) fn(c);

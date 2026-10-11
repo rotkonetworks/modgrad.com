@@ -4889,6 +4889,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "modgrad-obs-wandb"
+version = "0.1.0"
+dependencies = [
+ "modgrad-obs",
+ "prost",
+ "serde_json",
+]
+
+[[package]]
 name = "modgrad-pc"
 version = "0.1.0"
 dependencies = [

@@ -1,6 +1,10 @@
 //! `modgrad` — modgrad-obs command line.
 //!
 //! ```text
+//! modgrad init [--server URL] [--token T] [--project P] [--local] [--data DIR] [--mcp claude|cursor] [--json]
+//!     Set up this directory: write .modgrad.json (server, project, token; or
+//!     the local data dir), add it to .gitignore, optionally register the MCP
+//!     server, and print what to run next. Never prompts; safe to re-run.
 //! modgrad legacy <log.txt> <out_run_dir> [--name N] [--source S]
 //!     Convert a ctmlm_pilot stdout log into the modgrad-obs format.
 //!     Refuses to overwrite a native (non-legacy) run.
@@ -19,17 +23,22 @@
 //! ```
 //!
 //! Environment: MODGRAD_URL (server, default http://127.0.0.1:8790), MODGRAD_TOKEN,
-//! MODGRAD_PROJECT. No command prompts; `--json` makes the CLI's own messages
-//! one JSON object per line on stderr.
+//! MODGRAD_PROJECT. Settings resolve as flag > environment > project file
+//! (`.modgrad.json` here or in a parent directory) > default. No command
+//! prompts; `--json` makes the CLI's own messages one JSON object per line
+//! on stderr (`init --json` prints its one result object on stdout).
 
 use std::path::{Path, PathBuf};
 
 use modgrad_obs::net;
+mod project;
 mod run;
 mod sys;
 mod tail;
 
 const USAGE: &str = "usage:
+  modgrad init [--server URL] [--token T] [--project P] [--local] [--data DIR]
+          [--mcp claude|cursor] [--json]                set up this directory (.modgrad.json)
   modgrad run [--server URL] [--token T] [--name N] [--project P] [--offline [--out DIR]]
           [--sys-interval S] [--no-gpu] [--spool DIR] [--json] -- <command...>
   modgrad tail <run id | run dir> [--server URL] [--keys a,b] [--follow] [--interval S] [--json]
@@ -41,7 +50,9 @@ const USAGE: &str = "usage:
   modgrad mcp --url <server> [--token T]           same tools against a modgrad-server (analysis stays local)
 env: MODGRAD_URL (default http://127.0.0.1:8790), MODGRAD_TOKEN, MODGRAD_PROJECT,
      MODGRAD_DATA (modgrad mcp data dir), MODGRAD_MCP_URL (modgrad mcp server, same as --url);
-     the pre-rename OBS_* names still work";
+     the pre-rename OBS_* names still work
+project file: .modgrad.json (from modgrad init) in this or a parent directory;
+     flag > env > project file > default";
 
 /// `MODGRAD_*` variables also answer to their pre-rename `OBS_*` names.
 fn env(k: &str) -> Option<String> {
@@ -67,9 +78,51 @@ fn flag(args: &[String], k: &str) -> Option<String> {
     args.iter().position(|a| a == k).and_then(|i| args.get(i + 1).cloned())
 }
 
+/// The `command` for an MCP config: plain `modgrad` when that is this
+/// binary on PATH, else this binary's absolute path.
+fn mcp_command() -> String {
+    let me = std::env::current_exe().ok().and_then(|p| std::fs::canonicalize(p).ok());
+    let on_path = std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join("modgrad")).find(|c| c.is_file())).and_then(|c| std::fs::canonicalize(c).ok());
+    match (me, on_path) {
+        (Some(a), Some(b)) if a == b => "modgrad".into(),
+        (Some(a), _) => a.display().to_string(),
+        _ => "modgrad".into(),
+    }
+}
+
+/// The local data directory: MODGRAD_DATA > the project file's `data` > `obs`.
+fn data_dir(pf: Option<&project::Found>) -> PathBuf {
+    env("MODGRAD_DATA").map(PathBuf::from).or_else(|| pf.map(|f| f.data_dir())).unwrap_or_else(|| "obs".into())
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(|s| s.as_str()) {
+        Some("init") => {
+            let json = args.iter().any(|a| a == "--json");
+            let o = project::InitOpts {
+                server: flag(&args, "--server").or_else(|| env("MODGRAD_URL")),
+                token: flag(&args, "--token"),
+                project: flag(&args, "--project"),
+                data: flag(&args, "--data").or_else(|| env("MODGRAD_DATA")),
+                local: args.iter().any(|a| a == "--local"),
+                mcp: flag(&args, "--mcp"),
+                exe: mcp_command(),
+            };
+            let dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
+            match project::init(&dir, &o) {
+                Ok(r) if json => println!("{}", project::report_json(&r)),
+                Ok(r) => print!("{}", project::render(&r)),
+                Err(e) => {
+                    if json {
+                        println!("{}", serde_json::json!({ "ok": false, "error": e }));
+                    } else {
+                        eprintln!("modgrad init: {e}");
+                    }
+                    std::process::exit(1);
+                }
+            }
+        }
         Some("run") => {
             // flags before `--`, the command after it
             let split = args.iter().position(|a| a == "--");
@@ -79,13 +132,20 @@ fn main() {
             };
             let flags = flags.to_vec();
             let has = |k: &str| flags.iter().any(|a| a == k);
+            let pf = project::find_cwd();
+            let named = flag(&flags, "--server").or_else(|| env("MODGRAD_URL"));
+            // a local-mode project file (no server) makes `modgrad run` write files
+            let local = named.is_none() && pf.as_ref().is_some_and(|f| f.p.local());
+            let server = named.or_else(|| pf.as_ref().and_then(|f| f.p.server.clone())).unwrap_or_else(|| project::DEFAULT_SERVER.into());
+            let file_token = pf.as_ref().and_then(|f| f.p.token_for(&server));
+            let file_project = pf.as_ref().filter(|_| file_token.is_some()).and_then(|f| f.p.project.clone());
             let o = run::Opts {
-                server: flag(&flags, "--server").or_else(|| env("MODGRAD_URL")).unwrap_or_else(|| "http://127.0.0.1:8790".into()),
-                token: flag(&flags, "--token").or_else(|| env("MODGRAD_TOKEN")),
+                server,
+                token: flag(&flags, "--token").or_else(|| env("MODGRAD_TOKEN")).or(file_token),
                 name: flag(&flags, "--name"),
-                project: flag(&flags, "--project").or_else(|| env("MODGRAD_PROJECT")),
-                offline: has("--offline"),
-                out: PathBuf::from(flag(&flags, "--out").unwrap_or_else(|| "obs".into())),
+                project: flag(&flags, "--project").or_else(|| env("MODGRAD_PROJECT")).or(file_project),
+                offline: has("--offline") || local,
+                out: flag(&flags, "--out").map(PathBuf::from).unwrap_or_else(|| data_dir(pf.as_ref())),
                 sys_interval: flag(&flags, "--sys-interval").and_then(|s| s.parse().ok()).unwrap_or(5.0),
                 gpu: !has("--no-gpu"),
                 json: has("--json"),
@@ -96,9 +156,33 @@ fn main() {
         }
         Some("tail") => {
             let Some(target) = args.get(2).filter(|a| !a.starts_with("--")) else { usage() };
+            let pf = project::find_cwd();
+            let named = flag(&args, "--server").or_else(|| env("MODGRAD_URL"));
+            let server = named.clone().or_else(|| pf.as_ref().and_then(|f| f.p.server.clone())).unwrap_or_else(|| project::DEFAULT_SERVER.into());
+            let mut target = target.clone();
+            if !Path::new(&target).join("config.json").is_file() {
+                match pf.as_ref() {
+                    // local mode: a run id names <data>/runs/<id>
+                    Some(f) if named.is_none() && f.p.local() => {
+                        let d = data_dir(pf.as_ref()).join("runs").join(&target);
+                        if !d.join("config.json").is_file() {
+                            eprintln!("modgrad tail: no run {target} in {} (local mode, from {})", d.parent().unwrap_or(&d).display(), f.dir.join(project::FILE).display());
+                            std::process::exit(1);
+                        }
+                        target = d.display().to_string();
+                    }
+                    // with a project token, `exp1` is stored as <project>/exp1
+                    Some(f) if !target.contains('/') && f.p.token_for(&server).is_some() => {
+                        if let Some(p) = &f.p.project {
+                            target = format!("{p}/{target}");
+                        }
+                    }
+                    _ => {}
+                }
+            }
             let o = tail::Opts {
-                target: target.clone(),
-                server: flag(&args, "--server").or_else(|| env("MODGRAD_URL")).unwrap_or_else(|| "http://127.0.0.1:8790".into()),
+                target,
+                server,
                 keys: flag(&args, "--keys").map(|k| k.split(',').filter(|s| !s.is_empty()).map(String::from).collect()).unwrap_or_default(),
                 follow: args.iter().any(|a| a == "--follow" || a == "-f"),
                 interval: flag(&args, "--interval").and_then(|s| s.parse().ok()).unwrap_or(2.0),
@@ -183,13 +267,18 @@ fn main() {
             // --dir is the obs root holding runs/ (default $MODGRAD_DATA, else ./obs); --url
             // (or $MODGRAD_MCP_URL) selects remote mode against a modgrad-server, with --token /
             // $MODGRAD_TOKEN. Analysis always runs here, on fetched rows.
+            // Without --url/--dir/MODGRAD_DATA the project file decides: its server
+            // (remote, with its token) or its data dir (local).
             use modgrad_obs::mcp::{Server, serve_stdio, store};
-            let st: Box<dyn store::Store> = match flag(&args, "--url").or_else(|| env("MODGRAD_MCP_URL")) {
-                Some(url) => Box::new(store::RemoteStore::new(&url, flag(&args, "--token").or_else(|| env("MODGRAD_TOKEN")))),
-                None => {
-                    let dir = flag(&args, "--dir").or_else(|| env("MODGRAD_DATA")).unwrap_or_else(|| "obs".into());
-                    Box::new(store::LocalStore::open(Path::new(&dir), flag(&args, "--base-url")))
-                }
+            let pf = project::find_cwd();
+            let token = |url: &str| flag(&args, "--token").or_else(|| env("MODGRAD_TOKEN")).or_else(|| pf.as_ref().and_then(|f| f.p.token_for(url)));
+            let local = |dir: PathBuf| -> Box<dyn store::Store> { Box::new(store::LocalStore::open(&dir, flag(&args, "--base-url"))) };
+            let url = flag(&args, "--url").or_else(|| env("MODGRAD_MCP_URL"));
+            let st: Box<dyn store::Store> = match (url, flag(&args, "--dir"), pf.as_ref().and_then(|f| f.p.server.clone())) {
+                (Some(url), _, _) => Box::new(store::RemoteStore::new(&url, token(&url))),
+                (None, Some(dir), _) => local(dir.into()),
+                (None, None, Some(url)) if env("MODGRAD_DATA").is_none() => Box::new(store::RemoteStore::new(&url, token(&url))),
+                _ => local(data_dir(pf.as_ref())),
             };
             if let Err(e) = serve_stdio(&Server::new(st)) {
                 eprintln!("modgrad mcp: {e}");

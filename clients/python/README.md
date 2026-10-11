@@ -26,9 +26,12 @@ before publishing.
 
 ## What happens by default
 
-- **Server.** The client uses `MODGRAD_URL` or `MODGRAD_URL`, else `modgrad.DEFAULT_URL`
-  (`http://127.0.0.1:8790`, the same default as the `modgrad` CLI). Run a local server with
-  `modgrad-server --dev`.
+- **Server.** The client uses `init(url=...)`, else `MODGRAD_URL`, else the server in
+  `.modgrad.json` (written by `modgrad init`, looked up in the current directory and its
+  parents), else `modgrad.DEFAULT_URL` (`http://127.0.0.1:8790`, the same default as the
+  `modgrad` CLI). The token and project in `.modgrad.json` are used the same way, below
+  arguments and environment variables, and the token only goes to the server the file
+  names. Run a local server with `modgrad-server --dev`.
 - **No token and no project.** On first use the client creates an anonymous project
   (`POST /api/v1/projects`) and prints its board link. It caches the token in
   `~/.config/modgrad/anon.json`, so later runs on the same machine go to the same project.

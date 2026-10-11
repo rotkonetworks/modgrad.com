@@ -309,7 +309,9 @@ function decorateLegend(pid: string, tbl: HTMLTableElement | null, ss0: ChartSer
     if (s.fresh) h('span', { class: 'tagnew', title: 'run appeared since the last update' }, nb, 'new');
     tr.insertBefore(h('td', { class: 'al' }, null, t.letter), nm);
     const ctl = h('td', { class: 'ctl' }, tr);
-    const r = btn(ctl, 'R', s.y2 ? 'back to the left axis' : 'plot on the right-hand axis (one series per panel)', () => toggleY2(findPanel(pid)!, t.label), s.y2 ? 'on' : '');
+    // labelled by where the click sends the series: "→ y2" (right-hand axis) or, when there, "← y1"
+    const r = btn(ctl, s.y2 ? '← y1' : '→ y2', s.y2 ? `move ${t.label} back to the left y axis` : `move ${t.label} to a second y axis on the right (one series per panel)`,
+      () => toggleY2(findPanel(pid)!, t.label), s.y2 ? 'on y2btn' : 'y2btn');
     r.setAttribute('aria-pressed', String(!!s.y2));
     const single = t.runs.length === 1 && !t.metric.includes(' = ');
     const ref: TraceRef = { letter: t.letter, run: t.runs[0], single, label: t.label, entries: single ? `${t.metric}{run="${t.runs[0].replace(/"/g, '')}"}` : t.metric.includes(' = ') ? null : `${t.metric}{run=~"${t.runs.map((x) => x.replace(/"/g, '')).join('|')}"}` };

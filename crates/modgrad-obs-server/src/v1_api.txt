@@ -92,7 +92,7 @@ Read
                                                    "steps": [all steps], "keys": [all keys], "n": total}
       Samples are read from samples.jsonl directly (outside the snapshot the
       metric reads use), so they may be slightly newer than other reads; a torn
-      last line is never returned. They are not sent over the SSE stream.
+      last line is never returned. New ones also arrive over the SSE stream.
   GET /api/runs/<id %2F-encoded>/metrics/<key>?max_points=N   {"step": [...], "value": [...]}
   GET /api/v1/boards/<name>                       a saved board ({"panels": [{"query"}]}); opens as <server>/#board=<name>
 
@@ -124,6 +124,7 @@ Live (Server-Sent Events)
     run      {"entry": <index entry>}            a run appeared
     rows     {"rows": [{"step", "t", key: value, ...}]}
     events   {"events": [{"step", "t", "text"}]}
+    samples  {"samples": [{"step", "t", "key", "prompt", "completion", ...}], "n": total}
     summary  {"finished", "summary"}
     resync   {}                                  you fell behind: refetch
 

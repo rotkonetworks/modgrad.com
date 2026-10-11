@@ -1,7 +1,7 @@
 import { createEffect, createMemo, createResource, createSignal, For, on, Show } from 'solid-js';
 import { fmt } from '@/lib/fmt';
 import { setHash } from '@/lib/hash';
-import { runsVersion } from '@/stores/runs';
+import { runsVersion, runVersion } from '@/stores/runs';
 import { showToast } from '@/stores/ui';
 import { samplesOf, sampleRuns } from '@/stores/samples';
 import {
@@ -123,7 +123,8 @@ function Compare(props: { all: Sample[]; run: string; c: { key: string; prompt: 
 export default function SamplesView() {
   const runs = createMemo(() => { runsVersion(); return sampleRuns(); });
   const cur = () => (run() && runs().includes(run()!) ? run()! : runs()[0] || null);
-  const [data] = createResource(() => { const r = cur(); return r ? { r, v: runsVersion() } : null; }, ({ r }) => samplesOf(r));
+  // the run's own version: live samples (and rows) bump it
+  const [data] = createResource(() => { const r = cur(); return r ? { r, v: runsVersion() + ':' + runVersion(r) } : null; }, ({ r }) => samplesOf(r));
   const all = () => data()?.samples || [];
   const keys = createMemo(() => [...new Set(all().map((s) => s.key))].sort());
   const steps = createMemo(() => { const k = key(); return [...new Set(all().filter((s) => k === null || s.key === k).map((s) => s.step))].sort((a, b) => a - b); });

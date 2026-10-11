@@ -2,12 +2,13 @@
 // changes. Rows are appended to the cached series of that run only, so only the panels reading it
 // re-evaluate. Also: #new (anonymous project), the waiting panel, and the per-run live badges.
 import { createSignal } from 'solid-js';
-import { LiveClient, type HelloEv, type RowsEv, type RunEv, type SummaryEv, type EventsEv, type Row } from '@/logic/liveClient';
+import { LiveClient, type HelloEv, type RowsEv, type RunEv, type SummaryEv, type EventsEv, type SamplesEv, type Row } from '@/logic/liveClient';
 import { ssGet, ssSet } from '@/lib/storage';
 import { hash, setHash } from '@/lib/hash';
 import { ago } from '@/lib/fmt';
 import { DATA, dataURL } from '@/lib/base';
 import { S, appendRows, upsertRuns, reloadIndex, indexURL, touchRuns, runsVersion, invalidateEvents, bumpRun, setSelection, changed } from '@/stores/runs';
+import { appendSamples } from '@/stores/samples';
 
 const tokenKey = (p: string) => 'obs-anon-token:' + p;
 export const recallToken = (project: string): string | null => ssGet(tokenKey(project));
@@ -104,6 +105,15 @@ export function attachLive(): LiveClient {
     const r = S.byId.get(d.run); if (!r) return;
     r.n_events = (r.n_events || 0) + d.events.length;
     invalidateEvents(d.run); bumpRun(d.run);
+  });
+  c.addEventListener('samples', (e) => {
+    const d = (e as CustomEvent).detail as SamplesEv;
+    const r = S.byId.get(d.run); if (!r) return;
+    const first = !r.n_samples;
+    r.n_samples = Math.max(r.n_samples || 0, d.n);
+    appendSamples(d.run, d.samples, d.n); // cached under the next version, so the bump below finds it
+    bumpRun(d.run);
+    if (first) touchRuns(); // the run joins the Samples tab's run list
   });
   c.addEventListener('summary', (e) => {
     const d = (e as CustomEvent).detail as SummaryEv;

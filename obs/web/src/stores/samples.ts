@@ -1,7 +1,7 @@
-// Samples of a run, fetched once per run version (live rows bump it, so an RL run that logs every
-// step keeps its samples fresh) and cached. Server: api/v1/runs/<id>/samples; static export:
+// Samples of a run, fetched once per run version and cached. Live `samples` events append to the
+// cached copy (appendSamples) instead of refetching; other bumps (live rows) refetch. Server: api/v1/runs/<id>/samples; static export:
 // <run path>/samples.json; both have the shape {samples, steps, keys, n}.
-import type { SamplesData } from '@/logic/samples';
+import type { Sample, SamplesData } from '@/logic/samples';
 import { S, runVersion, getJSON } from '@/stores/runs';
 import { dataURL } from '@/lib/base';
 
@@ -28,6 +28,24 @@ export function samplesOf(runId: string): Promise<SamplesData> {
       : getJSON<SamplesData>(url).catch(() => EMPTY); // static export / bundle.json snapshot
   cache.set(runId, { v, p });
   return p;
+}
+/** live: `xs` are the run's newest samples and `n` its total after them. Merged into the cached
+ *  copy when it is exactly `xs.length` behind (a gap refetches; a fetch that already has them is
+ *  kept). Stored under the run's next version: call it right before bumpRun. */
+export function appendSamples(runId: string, xs: Sample[], n: number): void {
+  const c = cache.get(runId);
+  if (!c) return;
+  const v = runVersion(runId) + 1;
+  const p = c.p.then((d): SamplesData | Promise<SamplesData> => {
+    if (d.n >= n) return d; // the fetch already saw them
+    if (d.n + xs.length !== n) { cache.delete(runId); return samplesOf(runId); } // missed some: refetch
+    const steps = new Set(d.steps), keys = new Set(d.keys);
+    for (const s of xs) { steps.add(s.step); keys.add(s.key); }
+    const samples = d.samples.concat(xs);
+    return { samples: samples.length > SAMPLES_LIMIT ? samples.slice(samples.length - SAMPLES_LIMIT) : samples,
+      steps: [...steps].sort((a, b) => a - b), keys: [...keys].sort(), n };
+  });
+  cache.set(runId, { v, p });
 }
 /** runs that logged samples */
 export const sampleRuns = (): string[] => S.runs.filter((r) => (r.n_samples || 0) > 0).map((r) => r.id);

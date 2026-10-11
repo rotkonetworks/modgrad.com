@@ -341,3 +341,26 @@ async fn sse_resends_the_entry_when_config_changes() {
     let run = next_event(&mut body, &mut buf, "run").await;
     assert_eq!((run["entry"]["last_step"].clone(), run["entry"]["arrays"]["g"]["kind"].clone()), (json!(7), json!("histogram")), "{run}");
 }
+
+#[tokio::test]
+async fn sse_streams_new_samples() {
+    let (app, _) = app("ssesamples", true);
+    send(&app, "POST", "/api/v1/runs/s/log", None, r#"{"rows": [{"step": 0, "loss": 1}]}"#).await;
+    let resp = app.clone().oneshot(Request::get("/api/v1/stream").body(Body::empty()).unwrap()).await.unwrap();
+    let mut body = resp.into_body().into_data_stream();
+    let mut buf = String::new();
+    next_event(&mut body, &mut buf, "hello").await;
+    send(&app, "POST", "/api/v1/runs/s/samples", None, r#"{"step": 0, "prompt": "2+2=", "completion": "5"}"#).await;
+    let ev = next_event(&mut body, &mut buf, "samples").await;
+    assert_eq!((ev["run"].clone(), ev["n"].clone(), ev["samples"][0]["completion"].clone()), (json!("s"), json!(1), json!("5")), "{ev}");
+    // each event carries only the new lines, and the run's running count
+    send(&app, "POST", "/api/v1/runs/s/samples", None, r#"[{"step": 1, "key": "eval", "prompt": "2+2=", "completion": "4", "reward": 1}, {"step": 1, "key": "eval", "prompt": "3+3=", "completion": "6"}]"#).await;
+    let ev = next_event(&mut body, &mut buf, "samples").await;
+    let got: Vec<_> = ev["samples"].as_array().unwrap().iter().map(|s| (s["key"].clone(), s["completion"].clone())).collect();
+    assert_eq!((ev["run"].clone(), ev["n"].clone()), (json!("s"), json!(3)), "{ev}");
+    assert_eq!(got, vec![(json!("eval"), json!("4")), (json!("eval"), json!("6"))], "{ev}");
+    assert_eq!(ev["samples"][0]["reward"], json!(1.0), "{ev}");
+    send(&app, "POST", "/api/v1/runs/s/samples", None, r#"{"step": 2, "completion": "again"}"#).await;
+    let ev = next_event(&mut body, &mut buf, "samples").await;
+    assert_eq!((ev["n"].clone(), ev["samples"].as_array().map(Vec::len)), (json!(4), Some(1)), "{ev}");
+}

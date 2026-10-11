@@ -8,6 +8,11 @@
 //! task last saw, `watch` coalescing several writes into one wake-up loses
 //! nothing. `State` is untouched; this is a reader like [`crate::ReadState`].
 //!
+//! Text samples (`samples.jsonl`) are outside the committed-length
+//! snapshot, but every sample write publishes one; this task tracks how far
+//! into that file it has read (up to the last complete line) and ships the
+//! new lines the same way.
+//!
 //! Messages go out on a `broadcast` channel. A subscriber that falls
 //! behind gets [`LiveKind::Resync`] and should refetch.
 
@@ -32,6 +37,9 @@ pub enum LiveKind {
     Rows,
     /// New events: `data.events` = `[{step, t, text}]`.
     Events,
+    /// New text samples: `data.samples` = `[{step, t, key, prompt, completion, ...}]`
+    /// (as in `samples.jsonl`); `data.n` = the run's sample count after them.
+    Samples,
     /// The run's summary changed (`data.finished` says whether it ended).
     Summary,
     /// Too much changed to ship; refetch `data.run` (or everything if absent).
@@ -44,6 +52,7 @@ impl LiveKind {
             LiveKind::Run => "run",
             LiveKind::Rows => "rows",
             LiveKind::Events => "events",
+            LiveKind::Samples => "samples",
             LiveKind::Summary => "summary",
             LiveKind::Resync => "resync",
         }
@@ -70,6 +79,43 @@ struct Seen {
     finished: bool,
     summary_mtime: Option<std::time::SystemTime>,
     config_mtime: Option<std::time::SystemTime>,
+    /// Bytes of `samples.jsonl` read (always ends at a line end) and the lines in them.
+    samples: (u64, u64),
+}
+
+/// `(bytes up to the last newline, newline count)` of a run's `samples.jsonl`.
+fn samples_extent(dir: &Path) -> (u64, u64) {
+    match std::fs::read(dir.join(modgrad_obs::SAMPLES_FILE)) {
+        Ok(b) => (b.iter().rposition(|&c| c == b'\n').map_or(0, |i| i as u64 + 1), b.iter().filter(|&&c| c == b'\n').count() as u64),
+        Err(_) => (0, 0),
+    }
+}
+
+/// New complete sample lines after byte `from`: `(lines, bytes consumed,
+/// newline count)`, or `None` when there is nothing new. Over
+/// [`MAX_DELTA_BYTES`] it returns `Err` with the file's current extent.
+fn new_samples(dir: &Path, from: u64) -> std::io::Result<Option<Result<(Vec<Value>, u64, u64), (u64, u64)>>> {
+    let path = dir.join(modgrad_obs::SAMPLES_FILE);
+    let len = match std::fs::metadata(&path) {
+        Ok(m) => m.len(),
+        Err(_) => return Ok(None),
+    };
+    if len <= from {
+        return Ok(None);
+    }
+    if len - from > MAX_DELTA_BYTES {
+        return Ok(Some(Err(samples_extent(dir))));
+    }
+    let mut f = std::fs::File::open(&path)?;
+    f.seek(SeekFrom::Start(from))?;
+    let mut buf = vec![0u8; (len - from) as usize];
+    f.read_exact(&mut buf)?;
+    // a line still being written stays for the next round
+    let Some(end) = buf.iter().rposition(|&c| c == b'\n') else { return Ok(None) };
+    let buf = &buf[..=end];
+    let n = buf.iter().filter(|&&c| c == b'\n').count() as u64;
+    let lines = buf.split(|&b| b == b'\n').filter(|l| !l.is_empty()).filter_map(|l| serde_json::from_slice(l).ok()).collect();
+    Ok(Some(Ok((lines, end as u64 + 1, n))))
 }
 
 /// Lines in `[from, to)` of a JSONL file, parsed (bad lines skipped).
@@ -102,7 +148,7 @@ impl Live {
         let mut seen: HashMap<String, Seen> = first
             .runs
             .iter()
-            .map(|(k, c)| (k.clone(), Seen { committed: c.committed, finished: c.finished, summary_mtime: mtime(&c.dir.join("summary.json")), config_mtime: mtime(&c.dir.join("config.json")) }))
+            .map(|(k, c)| (k.clone(), Seen { committed: c.committed, finished: c.finished, summary_mtime: mtime(&c.dir.join("summary.json")), config_mtime: mtime(&c.dir.join("config.json")), samples: samples_extent(&c.dir) }))
             .collect();
         let reader = live.clone();
         tokio::spawn(async move {
@@ -152,7 +198,7 @@ impl Live {
         };
         for (run, c) in &snap.runs {
             let fresh = !seen.contains_key(run);
-            let prev = seen.get(run).copied().unwrap_or(Seen { committed: [0; 3], finished: false, summary_mtime: None, config_mtime: None });
+            let prev = seen.get(run).copied().unwrap_or(Seen { committed: [0; 3], finished: false, summary_mtime: None, config_mtime: None, samples: (0, 0) });
             let cm = mtime(&c.dir.join("config.json"));
             // the entry carries config, the arrays index and last_step: re-send
             // it when config changes after the first rows or arrays land
@@ -179,6 +225,28 @@ impl Live {
                     _ => resync = true,
                 }
             }
+            // a fresh run's samples are counted in its entry (`n_samples`)
+            let dir = c.dir.clone();
+            let mut samples = prev.samples;
+            if fresh {
+                samples = tokio::task::spawn_blocking(move || samples_extent(&dir)).await.unwrap_or((0, 0));
+            } else {
+                let from = prev.samples.0;
+                match tokio::task::spawn_blocking(move || new_samples(&dir, from)).await {
+                    Ok(Ok(None)) => {}
+                    Ok(Ok(Some(Ok((lines, bytes, n))))) => {
+                        samples = (from + bytes, prev.samples.1 + n);
+                        if !lines.is_empty() {
+                            out.push(msg(LiveKind::Samples, run, json!({ "samples": lines, "n": samples.1 })));
+                        }
+                    }
+                    Ok(Ok(Some(Err(extent)))) => {
+                        resync = true;
+                        samples = extent;
+                    }
+                    _ => resync = true,
+                }
+            }
             if resync {
                 out.push(msg(LiveKind::Resync, run, json!({})));
             }
@@ -187,7 +255,7 @@ impl Live {
                 let summary = std::fs::read(c.dir.join("summary.json")).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).unwrap_or(Value::Null);
                 out.push(msg(LiveKind::Summary, run, json!({ "finished": c.finished, "summary": summary })));
             }
-            seen.insert(run.clone(), Seen { committed: c.committed, finished: c.finished, summary_mtime: sm, config_mtime: cm });
+            seen.insert(run.clone(), Seen { committed: c.committed, finished: c.finished, summary_mtime: sm, config_mtime: cm, samples });
         }
         out
     }

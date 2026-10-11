@@ -342,7 +342,7 @@ function drawOverlay(p: Panel, api: OverlayApi, series: ChartSeries[], fcs: Map<
     // on a stitched axis a run's events move with it
     const shift = new Map((stitch || []).map((s) => [s.run, s.step_off]));
     const evs = new Map<number, string[]>();
-    for (const s of vis) for (const r of s.trace.runs) for (const e of events.get(r) || []) { const k = e.step + (shift.get(r) || 0); if (!evs.has(k)) evs.set(k, []); evs.get(k)!.push(`${r}: ${e.text}${shift.get(r) ? ` (own step ${e.step})` : ''}`); }
+    for (const s of vis) for (const r of s.trace.runs) for (const e of events.get(r) || []) { const off = shift.get(r) ?? shift.get(s.trace.runs[0]) ?? 0, k = e.step + off; if (!evs.has(k)) evs.set(k, []); evs.get(k)!.push(`${r}: ${e.text}${off ? ` (own step ${e.step})` : ''}`); }
     for (const [step, texts] of evs) {
       const px = X(step); if (!inPlot(px)) continue;
       el('line', { x1: px, x2: px, y1: T, y2: T + ph, style: 'stroke:var(--c4);stroke-width:1;stroke-dasharray:1 3;pointer-events:none' });

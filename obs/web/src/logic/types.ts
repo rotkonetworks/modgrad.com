@@ -44,7 +44,10 @@ export interface Board { version: number; panels: Panel[] }
 
 // ------------------------------------------------------------ query engine (query.rs)
 export interface Chip { kind: string; text: string; letter?: string | null; entry: number | null }
-export type Parsed = { ok: true; canonical: string; chips: Chip[] } | { ok: false; error: string; start: number; end: number };
+/** a failed parse: `start..end` (string indices) is the span, `suggest` replacements for it ("did you mean") */
+export type Parsed = { ok: true; canonical: string; chips: Chip[] } | { ok: false; error: string; start: number; end: number; suggest: string[] };
+/** a "did you mean" fix from evaluation: the whole query with one name replaced */
+export interface QueryFix { msg: string; label: string; query: string }
 export interface TraceMeta {
   label: string; letter: string; metric: string; runs: string[]; color: string; cell?: string; band: boolean; off: number; n: number; [k: string]: unknown;
 }
@@ -53,7 +56,7 @@ export interface Trace extends TraceMeta { xs: Float64Array; ys: Float64Array; r
 export interface HeatmapMeta { run: string; family: string; layers: number[]; metrics: string[]; ncols: number; off: number }
 export interface LayerHeatmap extends HeatmapMeta { cols: Float64Array; z: Float64Array }
 export interface QueryMeta {
-  traces: TraceMeta[]; heatmaps?: HeatmapMeta[]; warnings: string[]; cells: string[]; x_label: string; ylog: boolean;
+  traces: TraceMeta[]; heatmaps?: HeatmapMeta[]; warnings: string[]; fixes?: QueryFix[]; cells: string[]; x_label: string; ylog: boolean;
   by?: string | null; by_numeric?: boolean; forecast?: { to?: number | null; method?: string } | null; downsampled?: number | null; [k: string]: unknown;
 }
 export type QueryResult = { ok: true; meta: QueryMeta; traces: Trace[]; heatmaps: LayerHeatmap[]; streams: number } | { ok: false; error: string; start?: number; end?: number };

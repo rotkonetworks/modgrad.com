@@ -67,11 +67,52 @@ export function makeUndo(limit = 40): Undo {
 }
 
 // ------------------------------------------------------------ query text operations (via wasm)
+/** string index of UTF-8 byte offset `b` in `s` (the Rust parser reports byte offsets) */
+export function byteIdx(s: string, b: number): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    if (n >= b) return i;
+    const c = s.codePointAt(i)!;
+    n += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+    if (c >= 0x10000) i++;
+  }
+  return s.length;
+}
 export function parse(q: string): Parsed {
   const r = A.query_parse(q);
-  const out: Parsed = r.ok() ? { ok: true, canonical: r.canonical(), chips: JSON.parse(r.chips()) as Chip[] } : { ok: false, error: r.error(), start: r.err_start(), end: r.err_end() };
+  const out: Parsed = r.ok() ? { ok: true, canonical: r.canonical(), chips: JSON.parse(r.chips()) as Chip[] }
+    : { ok: false, error: r.error(), start: byteIdx(q, r.err_start()), end: byteIdx(q, r.err_end()), suggest: r.suggest().split('\n').filter(Boolean) };
   r.free();
   return out;
+}
+/** matcher texts carried by every selector entry of every query (the board's default filter,
+ *  e.g. `synthetic!=true` or `run=~"proj/*"`); [] when a query has no selector or fails to parse */
+export function sharedMatchers(qs: string[]): string[] {
+  let common: string[] | null = null;
+  for (const q of qs) {
+    const p = parse(q);
+    if (!p.ok) return [];
+    const per = new Map<number, Set<string>>();
+    for (const c of p.chips) {
+      if (c.kind === 'metric' && c.entry !== null) per.set(c.entry, per.get(c.entry) || new Set());
+      if (c.kind === 'matcher' && c.entry !== null) (per.get(c.entry) || per.set(c.entry, new Set()).get(c.entry)!).add(c.text);
+    }
+    for (const ms of per.values()) common = (common ?? [...ms]).filter((t) => ms.has(t));
+    if (common && !common.length) return [];
+  }
+  return common || [];
+}
+/** replace matcher `old` in every entry of `q` (`text` empty removes it) */
+export function replaceMatcherAll(q: string, old: string, text: string): string {
+  if (text.trim() === old) return q;
+  for (;;) {
+    const p = parse(q); if (!p.ok) return q;
+    const i = p.chips.findIndex((c) => c.kind === 'matcher' && c.text === old);
+    if (i < 0) return q;
+    const next = replaceChip(q, i, text);
+    if (next === q) return q;
+    q = next;
+  }
 }
 export function replaceChip(q: string, idx: number, text: string): string {
   const r = A.query_replace_chip(q, idx, text);

@@ -116,6 +116,10 @@ pub struct Forecast {
     /// Other runs that were usable for pooling.
     pub n_pool: usize,
     pub spacing: f64,
+    /// Configurations searched whose fits succeeded and whose validation
+    /// rollouts stayed finite as far as they were run (a config dropped by
+    /// the branch-and-bound still counts; test-origin rollouts are only run
+    /// for the selected config).
     pub n_configs: usize,
 }
 
@@ -214,43 +218,70 @@ fn series_stats(v: &[f64], scaler: Scaler, global: (f64, f64)) -> (f64, f64) {
     }
 }
 
-/// Feature layout: `lookback` lag values, then position (optional), then bias.
-struct Feat {
-    lookback: usize,
-    scaler: Scaler,
-    position: bool,
-    ref_ln: f64,
+/// How a window is centred before scaling (see [`Scaler`]); `Const` holds
+/// the series centre in original units.
+#[derive(Clone, Copy)]
+enum Centre {
+    Const(f64),
+    Last,
+    Mean,
 }
 
-impl Feat {
-    fn dim(&self) -> usize {
-        self.lookback + self.position as usize + 1
-    }
-    fn centre(&self, win: &[f64], mu: f64) -> f64 {
-        match self.scaler {
-            Scaler::LocalLast => win[win.len() - 1],
-            Scaler::LocalMean => win.iter().sum::<f64>() / win.len() as f64,
-            _ => mu,
-        }
-    }
-    /// Fill `x` for a window predicting the value at `step`; returns the centre.
-    fn row(&self, win: &[f64], step: f64, (mu, sd): (f64, f64), x: &mut [f64]) -> f64 {
-        let c = self.centre(win, mu);
-        for (j, &w) in win.iter().enumerate() {
-            x[j] = (w - c) / sd;
-        }
-        let mut k = self.lookback;
-        if self.position {
-            x[k] = log1p(step.max(0.0)) / self.ref_ln;
-            k += 1;
-        }
-        x[k] = 1.0;
-        c
+fn centre_of(s: Scaler, mu: f64) -> Centre {
+    match s {
+        Scaler::LocalLast => Centre::Last,
+        Scaler::LocalMean => Centre::Mean,
+        _ => Centre::Const(mu),
     }
 }
 
-/// Gram matrix `XᵀX`, `Xᵀy` and row count.
-#[derive(Clone)]
+/// Prefix sums of `z zᵀ` (upper triangle, row-major, `D = L + 4`) over the
+/// rows of one series for one lookback,
+/// `z = [w_j − w_last (L), v − w_last, w_last − shift, position, 1]`:
+/// the window and target relative to the window's last value, plus that
+/// value relative to a constant per-series `shift`. Every scaler's Gram is an
+/// affine image of it (see [`Gram::add_raw`]) without cancelling large
+/// offsets, so a series is walked once per lookback instead of once per
+/// (scaler, position, origin).
+struct Raw {
+    r: Vec<f64>,
+    n: usize,
+    shift: f64,
+}
+
+/// [`Raw`] for the prefixes `v[..e]`, `e` in `ends` (ascending).
+fn raw_prefixes(v: &[f64], pos: &[f64], shift: f64, l: usize, ends: &[usize]) -> Vec<Raw> {
+    let dd = l + 4;
+    let mut r = vec![0.0; dd * dd];
+    let mut z = vec![0.0; dd];
+    let mut out = Vec::with_capacity(ends.len());
+    let mut i = l;
+    for &e in ends {
+        while i < e {
+            let win = &v[i - l..i];
+            let c = win[l - 1];
+            for j in 0..l {
+                z[j] = win[j] - c;
+            }
+            z[l] = v[i] - c;
+            z[l + 1] = c - shift;
+            z[l + 2] = pos[i];
+            z[l + 3] = 1.0;
+            for a in 0..dd {
+                let za = z[a];
+                for (x, &zb) in r[a * dd + a..(a + 1) * dd].iter_mut().zip(&z[a..]) {
+                    *x += za * zb;
+                }
+            }
+            i += 1;
+        }
+        out.push(Raw { r: r.clone(), n: e.saturating_sub(l), shift });
+    }
+    out
+}
+
+/// Gram matrix `XᵀX` (upper triangle), `Xᵀy` and row count of the scaled
+/// features: `lookback` lags, position (optional), bias.
 struct Gram {
     d: usize,
     g: Vec<f64>,
@@ -262,38 +293,67 @@ impl Gram {
     fn new(d: usize) -> Self {
         Gram { d, g: vec![0.0; d * d], b: vec![0.0; d], n: 0 }
     }
-    /// Add every window of `v[..m]` (scaled by `stats`) as a row.
-    fn add_series(&mut self, f: &Feat, st: &[f64], v: &[f64], m: usize, stats: (f64, f64)) {
-        let d = self.d;
-        let mut x = vec![0.0; d];
-        for i in f.lookback..m {
-            let c = f.row(&v[i - f.lookback..i], st[i], stats, &mut x);
-            let y = (v[i] - c) / stats.1;
-            for a in 0..d {
-                self.b[a] += x[a] * y;
-                for bb in a..d {
-                    self.g[a * d + bb] += x[a] * x[bb];
+    /// Add the rows of `raw` scaled as `x_j = (w_j − c(w)) / sd`,
+    /// `y = (v − c(w)) / sd`. With `c` a linear functional `αᵀz` of the raw
+    /// row, `E[(z_a − c)(z_b − c)] = R_ab − (Rα)_a − (Rα)_b + αᵀRα` on the
+    /// centred coordinates (lags, target) and `R_ab − (Rα)_b` against the
+    /// uncentred ones (position, bias).
+    fn add_raw(&mut self, raw: &Raw, l: usize, centre: Centre, sd: f64, position: bool) {
+        let dd = l + 4;
+        let (q, bias) = (l + 1, l + 3);
+        let r = &raw.r;
+        let at = |a: usize, b: usize| if a <= b { r[a * dd + b] } else { r[b * dd + a] };
+        // (Rα)_a = E[c z_a] for the centre c = αᵀz in raw coordinates; the
+        // centred lags and target are z_a − c (a ≤ l)
+        let mut ra = [0.0f64; 36];
+        let cc = match centre {
+            Centre::Const(mu) => {
+                // c = (mu − shift) − (w_last − shift), so z_a − c = w_a − mu
+                let c = mu - raw.shift;
+                for (a, x) in ra.iter_mut().enumerate().take(dd) {
+                    *x = c * at(a, bias) - at(a, q);
                 }
+                c * ra[bias] - ra[q]
             }
-            self.n += 1;
+            Centre::Mean => {
+                let inv = 1.0 / l as f64;
+                for (a, x) in ra.iter_mut().enumerate().take(dd) {
+                    *x = (0..l).map(|k| at(a, k)).sum::<f64>() * inv;
+                }
+                ra[..l].iter().sum::<f64>() * inv
+            }
+            Centre::Last => 0.0,
+        };
+        let inv_sd = 1.0 / sd;
+        let entry = |a: usize, b: usize| {
+            let (ca, cb) = (a <= l, b <= l);
+            let x = at(a, b)
+                - match (ca, cb) {
+                    (true, true) => ra[a] + ra[b] - cc,
+                    (true, false) => ra[b],
+                    (false, true) => ra[a],
+                    (false, false) => 0.0,
+                };
+            x * if ca { inv_sd } else { 1.0 } * if cb { inv_sd } else { 1.0 }
+        };
+        let d = self.d;
+        let coord = |j: usize| if j < l { j } else if position && j == l { l + 2 } else { bias };
+        for i in 0..d {
+            let ci = coord(i);
+            for j in i..d {
+                self.g[i * d + j] += entry(ci, coord(j));
+            }
+            self.b[i] += entry(ci, l);
         }
+        self.n += raw.n;
     }
-    fn merged(&self, o: &Gram) -> Gram {
-        let mut r = self.clone();
-        for (a, b) in r.g.iter_mut().zip(&o.g) {
-            *a += b;
-        }
-        for (a, b) in r.b.iter_mut().zip(&o.b) {
-            *a += b;
-        }
-        r.n += o.n;
-        r
-    }
-    /// Ridge solve: `(G + λN·I_nonbias + σ²N·I_lag) w = b`, by Cholesky.
-    fn solve(&self, lookback: usize, lambda: f64, noise: f64) -> Option<Vec<f64>> {
+    /// Ridge solve: `(G + λN·I_nonbias + σ²N·I_lag) w = b`, by Cholesky
+    /// (`a` is scratch).
+    fn solve(&self, lookback: usize, lambda: f64, noise: f64, a: &mut Vec<f64>) -> Option<Vec<f64>> {
         let d = self.d;
         let n = self.n as f64;
-        let mut a = vec![0.0; d * d];
+        a.clear();
+        a.resize(d * d, 0.0);
         for i in 0..d {
             for j in i..d {
                 a[i * d + j] = self.g[i * d + j];
@@ -307,7 +367,7 @@ impl Gram {
             a[i * d + i] += noise * noise * n;
         }
         a[(d - 1) * d + d - 1] += 1e-9 * n; // bias: numerically safe, effectively unpenalised
-        cholesky_solve(&mut a, &self.b, d)
+        cholesky_solve(a, &self.b, d)
     }
 }
 
@@ -315,20 +375,14 @@ impl Gram {
 /// with its Cholesky factor). `None` when `A` is not positive definite.
 pub fn cholesky_solve(a: &mut [f64], b: &[f64], d: usize) -> Option<Vec<f64>> {
     for j in 0..d {
-        let mut s = a[j * d + j];
-        for k in 0..j {
-            s -= a[j * d + k] * a[j * d + k];
-        }
+        let s = a[j * d + j] - dot(&a[j * d..j * d + j], &a[j * d..j * d + j]);
         if !(s > 0.0) || !s.is_finite() {
             return None;
         }
         let l = sqrt(s);
         a[j * d + j] = l;
         for i in j + 1..d {
-            let mut t = a[i * d + j];
-            for k in 0..j {
-                t -= a[i * d + k] * a[j * d + k];
-            }
+            let t = a[i * d + j] - dot(&a[i * d..i * d + j], &a[j * d..j * d + j]);
             a[i * d + j] = t / l;
         }
     }
@@ -350,20 +404,80 @@ pub fn cholesky_solve(a: &mut [f64], b: &[f64], d: usize) -> Option<Vec<f64>> {
     Some(y)
 }
 
-/// Roll the one-step model forward from the window `v[m-L..m]`.
-fn rollout(f: &Feat, w: &[f64], v: &[f64], m: usize, stats: (f64, f64), at: &[f64]) -> Vec<f64> {
-    let mut win: Vec<f64> = v[m - f.lookback..m].to_vec();
-    let mut x = vec![0.0; f.dim()];
-    let mut out = Vec::with_capacity(at.len());
-    for &s in at {
-        let c = f.row(&win, s, stats, &mut x);
-        let z: f64 = w.iter().zip(&x).map(|(a, b)| a * b).sum();
-        let y = c + z * stats.1;
-        out.push(y);
-        win.remove(0);
-        win.push(y);
+/// The fitted one-step model in original units:
+/// `y_t = Σ_j a_j y_{t−L+j} + k0 + k1·pos_t`. Every scaler is affine in the
+/// window: `y = c + Σ w_j (y_j − c) + sd·(w_pos·pos + w_bias)` with `c` a
+/// constant, the last value or the window mean.
+struct Lin {
+    a: [f64; 32],
+    l: usize,
+    k0: f64,
+    k1: f64,
+}
+
+fn linear(w: &[f64], l: usize, centre: Centre, sd: f64, position: bool) -> Lin {
+    let mut a = [0.0; 32];
+    a[..l].copy_from_slice(&w[..l]);
+    let rest = 1.0 - w[..l].iter().sum::<f64>();
+    let wb = sd * w[w.len() - 1];
+    let k0 = match centre {
+        Centre::Const(mu) => mu * rest + wb,
+        Centre::Last => {
+            a[l - 1] += rest;
+            wb
+        }
+        Centre::Mean => {
+            let r = rest / l as f64;
+            for x in &mut a[..l] {
+                *x += r;
+            }
+            wb
+        }
+    };
+    Lin { a, l, k0, k1: if position { sd * w[l] } else { 0.0 } }
+}
+
+/// Dot product with four partial sums (no bounds checks in the loop).
+fn dot(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    let (a, b) = (&a[..n], &b[..n]);
+    let (ac, bc) = (a.chunks_exact(4), b.chunks_exact(4));
+    let (ar, br) = (ac.remainder(), bc.remainder());
+    let mut s = [0.0f64; 4];
+    for (x, y) in ac.zip(bc) {
+        s[0] += x[0] * y[0];
+        s[1] += x[1] * y[1];
+        s[2] += x[2] * y[2];
+        s[3] += x[3] * y[3];
     }
-    out
+    let mut t = (s[0] + s[1]) + (s[2] + s[3]);
+    for (x, y) in ar.iter().zip(br) {
+        t += x * y;
+    }
+    t
+}
+
+/// Roll the model forward from the window `init` (length `L`) at the
+/// position features `pos`; the forecasts are `buf[L..]`.
+fn rollout(m: &Lin, init: &[f64], pos: &[f64], buf: &mut Vec<f64>) {
+    let l = m.l;
+    buf.clear();
+    buf.extend_from_slice(init);
+    for (t, &p) in pos.iter().enumerate() {
+        let y = dot(&m.a[..l], &buf[t..t + l]) + m.k0 + m.k1 * p;
+        buf.push(y);
+    }
+}
+
+/// One scored point of the search, in the original iteration order.
+struct Cand {
+    li: usize,
+    scaler: Scaler,
+    position: bool,
+    ci: usize,
+    /// Position in the search order (lookback, scaler, position, λ, σ).
+    order: usize,
+    val: f64,
 }
 
 /// Forecast `steps`/`vals` up to `opt.horizon_step`. `pool` holds other runs
@@ -372,6 +486,12 @@ fn rollout(f: &Feat, w: &[f64], v: &[f64], m: usize, stats: (f64, f64), at: &[f6
 /// [`MIN_POINTS`] finite points, the horizon is not past the last step, or no
 /// configuration can be backtested.
 pub fn forecast(steps: &[f64], vals: &[f64], pool: &[(&[f64], &[f64])], opt: &Options) -> Option<Forecast> {
+    search(steps, vals, pool, opt, true)
+}
+
+/// [`forecast`]; `prune = false` scores every configuration in full on
+/// validation (same result, kept for the equivalence test).
+fn search(steps: &[f64], vals: &[f64], pool: &[(&[f64], &[f64])], opt: &Options, prune: bool) -> Option<Forecast> {
     let t = clean(steps, vals);
     let n = t.v.len();
     if n < MIN_POINTS {
@@ -452,79 +572,216 @@ pub fn forecast(steps: &[f64], vals: &[f64], pool: &[(&[f64], &[f64])], opt: &Op
     let mae_val_naive = mae_of(&naive_err, 0);
     let mae_test_naive = mae_of(&naive_err, 1);
 
-    // search: one Gram per (family, lookback, scaler, position, origin), all (λ, σ) solved on it
-    let mut n_configs = 0usize;
-    let mut best: [Option<(Config, f64, Vec<f64>)>; 2] = [None, None]; // (cfg, val mae, residuals per pair)
-    for pooled in [false, true] {
-        if pooled && pool.is_empty() {
-            continue;
+    // Search. Each series is walked once per lookback into prefix Grams
+    // (raw_prefixes); every (family, scaler, position, origin) Gram is an
+    // O(d²) transform of those, and all (λ, σ) are solved on it.
+    // Phase 1 rolls out only the validation origins, up to the first test
+    // origin, which is all that selection reads. Phase 2 walks each family's
+    // configs by validation MAE (ties: search order, as a strict `<` scan)
+    // and keeps the first whose rollouts are finite at every origin and
+    // horizon, the same winner as scoring every config in full.
+    const SCALERS: [Scaler; 5] = [Scaler::Standard, Scaler::Robust, Scaler::LocalLast, Scaler::LocalMean, Scaler::Global];
+    let n_o = origins.len();
+    let tpos: Vec<f64> = t.st.iter().map(|&s| log1p(s.max(0.0)) / ref_ln).collect();
+    let mean_of = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+    let t_shift = mean_of(&t.v);
+    // stats per (scaler, origin); index n_o is the full series
+    let tstats: Vec<Vec<(f64, f64)>> = SCALERS
+        .iter()
+        .map(|&s| origins.iter().map(|&o| series_stats(&t.v[..o], s, gstats)).chain(core::iter::once(series_stats(&t.v, s, gstats))).collect())
+        .collect();
+    let pstats: Vec<Vec<(f64, f64)>> = SCALERS.iter().map(|&s| pool.iter().map(|p| series_stats(&p.v, s, gstats)).collect()).collect();
+    let mut ends = origins.clone();
+    ends.push(n);
+    let usable = |l: usize| l <= origins[0];
+    let traw: Vec<Vec<Raw>> = LOOKBACKS.iter().map(|&l| if usable(l) { raw_prefixes(&t.v, &tpos, t_shift, l, &ends) } else { Vec::new() }).collect();
+    let ppos: Vec<Vec<f64>> = pool.iter().map(|p| p.st.iter().map(|&s| log1p(s.max(0.0)) / ref_ln).collect()).collect();
+    let praw: Vec<Vec<Raw>> = LOOKBACKS
+        .iter()
+        .map(|&l| {
+            if !usable(l) {
+                return Vec::new();
+            }
+            pool.iter().zip(&ppos).map(|(p, pos)| raw_prefixes(&p.v, pos, mean_of(&p.v), l, &[p.v.len()]).pop().unwrap()).collect()
+        })
+        .collect();
+    // Gram of one (lookback, scaler, position, family) at origin index k (n_o = full series)
+    let gram = |li: usize, scaler: Scaler, position: bool, pooled: bool, k: usize| -> Gram {
+        let l = LOOKBACKS[li];
+        let mut g = Gram::new(l + position as usize + 1);
+        let s = scaler as usize;
+        if pooled {
+            for (p, r) in praw[li].iter().enumerate() {
+                let (mu, sd) = pstats[s][p];
+                g.add_raw(r, l, centre_of(scaler, mu), sd, position);
+            }
         }
-        let scalers: &[Scaler] = if pooled {
-            &[Scaler::Standard, Scaler::Robust, Scaler::LocalLast, Scaler::LocalMean, Scaler::Global]
-        } else {
-            &[Scaler::Standard, Scaler::Robust, Scaler::LocalLast, Scaler::LocalMean]
-        };
-        for &lookback in LOOKBACKS.iter() {
-            // the rollout needs a full window of the target's own prefix at every origin
-            if lookback > origins[0] {
+        let (mu, sd) = tstats[s][k];
+        g.add_raw(&traw[li][k], l, centre_of(scaler, mu), sd, position);
+        g
+    };
+    let nc = LAMBDAS.len() * NOISES.len();
+    let lam_noise = |ci: usize| (LAMBDAS[ci / NOISES.len()], NOISES[ci % NOISES.len()]);
+    // Phase 1. Validation error is a running sum of non-negative terms
+    // (accumulated in pair order, so a partial sum never exceeds the final
+    // one), and a config whose partial sum already exceeds the best complete
+    // sum of its family cannot be selected: with `prune` it is dropped there
+    // (branch and bound). The 15 (λ, σ) chains of one origin step in
+    // lockstep, which hides the latency of each recurrence.
+    let phase1 = |prune: bool| -> ([Vec<Cand>; 2], usize) {
+        const BLOCK: usize = 32;
+        let mut n_configs = 0usize;
+        let mut cands: [Vec<Cand>; 2] = [Vec::new(), Vec::new()];
+        let (mut sums, mut ok, mut cut) = (vec![0.0; nc], vec![true; nc], vec![false; nc]);
+        let (mut models, mut live, mut act): (Vec<Lin>, Vec<usize>, Vec<usize>) = (Vec::with_capacity(nc), Vec::with_capacity(nc), Vec::with_capacity(nc));
+        let (mut abuf, mut buf) = (Vec::new(), Vec::new());
+        for pooled in [false, true] {
+            if pooled && pool.is_empty() {
                 continue;
             }
-            if !pooled && origins[0] < lookback + 2 {
-                continue;
-            }
-            for &scaler in scalers {
-                for position in [false, true] {
-                    let f = Feat { lookback, scaler, position, ref_ln };
-                    let mut pg = Gram::new(f.dim());
-                    if pooled {
-                        for p in &pool {
-                            pg.add_series(&f, &p.st, &p.v, p.v.len(), series_stats(&p.v, scaler, gstats));
-                        }
-                        if pg.n == 0 {
-                            continue;
-                        }
-                    }
-                    let nc = LAMBDAS.len() * NOISES.len();
-                    let mut preds: Vec<Vec<Option<Vec<f64>>>> = vec![Vec::new(); nc];
-                    for &o in &origins {
-                        let stats = series_stats(&t.v[..o], scaler, gstats);
-                        let mut tg = Gram::new(f.dim());
-                        tg.add_series(&f, &t.st, &t.v, o, stats);
-                        let g = if pooled { pg.merged(&tg) } else { tg };
-                        let hm = h_bt.min(n - o);
-                        for (li, &lambda) in LAMBDAS.iter().enumerate() {
-                            for (ni, &noise) in NOISES.iter().enumerate() {
-                                let p = if g.n >= 2 {
-                                    g.solve(lookback, lambda, noise).map(|w| rollout(&f, &w, &t.v, o, stats, &t.st[o..o + hm]))
-                                } else {
-                                    None
-                                };
-                                preds[li * NOISES.len() + ni].push(p.filter(|p| p.iter().all(|x| x.is_finite())));
+            let mut bound = f64::INFINITY;
+            let scalers: &[Scaler] = if pooled { &SCALERS } else { &SCALERS[..4] };
+            for (li, &lookback) in LOOKBACKS.iter().enumerate() {
+                // the rollout needs a full window of the target's own prefix at every origin
+                if !usable(lookback) {
+                    continue;
+                }
+                if !pooled && origins[0] < lookback + 2 {
+                    continue;
+                }
+                if pooled && praw[li].iter().all(|r| r.n == 0) {
+                    continue;
+                }
+                for &scaler in scalers {
+                    for position in [false, true] {
+                        sums.fill(0.0);
+                        ok.fill(true);
+                        cut.fill(false);
+                        for (k, &o) in origins.iter().enumerate() {
+                            if o >= first_test {
+                                break;
+                            }
+                            let g = gram(li, scaler, position, pooled, k);
+                            let (mu, sd) = tstats[scaler as usize][k];
+                            let hv = h_bt.min(n - o).min(first_test - o);
+                            models.clear();
+                            live.clear();
+                            for ci in 0..nc {
+                                if !ok[ci] || cut[ci] {
+                                    continue;
+                                }
+                                let (lambda, noise) = lam_noise(ci);
+                                match if g.n >= 2 { g.solve(lookback, lambda, noise, &mut abuf) } else { None } {
+                                    Some(w) => {
+                                        models.push(linear(&w, lookback, centre_of(scaler, mu), sd, position));
+                                        live.push(ci);
+                                    }
+                                    None => ok[ci] = false,
+                                }
+                            }
+                            let stride = lookback + hv;
+                            buf.clear();
+                            buf.resize(live.len() * stride, 0.0);
+                            for c in 0..live.len() {
+                                buf[c * stride..c * stride + lookback].copy_from_slice(&t.v[o - lookback..o]);
+                            }
+                            act.clear();
+                            act.extend(0..live.len());
+                            let mut t0 = 0;
+                            while t0 < hv && !act.is_empty() {
+                                let t1 = (t0 + BLOCK).min(hv);
+                                for i in t0..t1 {
+                                    let p = tpos[o + i];
+                                    for &c in &act {
+                                        let m = &models[c];
+                                        let base = c * stride + i;
+                                        buf[base + lookback] = dot(&m.a[..lookback], &buf[base..base + lookback]) + m.k0 + m.k1 * p;
+                                    }
+                                }
+                                for i in t0..t1 {
+                                    let y0 = t.v[o + i];
+                                    for &c in &act {
+                                        sums[live[c]] += (y0 - buf[c * stride + lookback + i]).abs();
+                                    }
+                                }
+                                act.retain(|&c| {
+                                    let ci = live[c];
+                                    if !buf[c * stride + lookback + t0..c * stride + lookback + t1].iter().all(|y| y.is_finite()) {
+                                        ok[ci] = false;
+                                        return false;
+                                    }
+                                    if prune && sums[ci] > bound {
+                                        cut[ci] = true;
+                                        return false;
+                                    }
+                                    true
+                                });
+                                t0 = t1;
                             }
                         }
-                    }
-                    for (ci, pr) in preds.iter().enumerate() {
-                        if pr.iter().any(|p| p.is_none()) {
-                            continue;
-                        }
-                        n_configs += 1;
-                        let res: Vec<f64> = pairs.iter().map(|&(oi, h, _)| t.v[origins[oi] + h - 1] - pr[oi].as_ref().unwrap()[h - 1]).collect();
-                        let (mut s, mut c) = (0.0, 0usize);
-                        for (r, p) in res.iter().zip(&pairs) {
-                            if p.2 == 0 {
-                                s += r.abs();
-                                c += 1;
+                        for ci in 0..nc {
+                            if ok[ci] {
+                                n_configs += 1;
+                                if !cut[ci] {
+                                    bound = bound.min(sums[ci]);
+                                    let order = ((li * SCALERS.len() + scaler as usize) * 2 + position as usize) * nc + ci;
+                                    cands[pooled as usize].push(Cand { li, scaler, position, ci, order, val: sums[ci] / n_val as f64 });
+                                }
                             }
-                        }
-                        let val = s / c as f64;
-                        let slot = &mut best[pooled as usize];
-                        if slot.as_ref().is_none_or(|b| val < b.1) {
-                            let cfg = Config { lookback, lambda: LAMBDAS[ci / NOISES.len()], noise: NOISES[ci % NOISES.len()], scaler, pooled, position };
-                            *slot = Some((cfg, val, res));
                         }
                     }
                 }
             }
+        }
+        (cands, n_configs)
+    };
+    let (mut abuf, mut rbuf) = (Vec::new(), Vec::new());
+    // full backtest of one config: residuals per pair, None if any fit fails or any rollout is non-finite
+    let mut full = |c: &Cand, pooled: bool| -> Option<Vec<f64>> {
+        let l = LOOKBACKS[c.li];
+        let (lambda, noise) = lam_noise(c.ci);
+        let mut preds: Vec<Vec<f64>> = Vec::with_capacity(n_o);
+        for (k, &o) in origins.iter().enumerate() {
+            let g = gram(c.li, c.scaler, c.position, pooled, k);
+            if g.n < 2 {
+                return None;
+            }
+            let w = g.solve(l, lambda, noise, &mut abuf)?;
+            let (mu, sd) = tstats[c.scaler as usize][k];
+            let hm = h_bt.min(n - o);
+            rollout(&linear(&w, l, centre_of(c.scaler, mu), sd, c.position), &t.v[o - l..o], &tpos[o..o + hm], &mut rbuf);
+            if rbuf.iter().any(|y| !y.is_finite()) {
+                return None;
+            }
+            preds.push(rbuf[l..].to_vec());
+        }
+        Some(pairs.iter().map(|&(oi, h, _)| t.v[origins[oi] + h - 1] - preds[oi][h - 1]).collect())
+    };
+    let (mut cands, n_configs) = phase1(prune);
+    let mut best: [Option<(Config, f64, Vec<f64>)>; 2] = [None, None]; // (cfg, val mae, residuals per pair)
+    for fam in 0..2 {
+        // With pruning only the best-scoring config may be taken: a config pruned against its
+        // bound can beat the runner-up, so if the best one fails in full, rescore unpruned and walk.
+        let mut exhaustive = !prune;
+        loop {
+            let cs = &mut cands[fam];
+            cs.sort_by(|a, b| a.val.partial_cmp(&b.val).unwrap_or(core::cmp::Ordering::Equal).then(a.order.cmp(&b.order))); // ties: search order, as a strict `<` scan
+            for c in cs.iter() {
+                if let Some(res) = full(c, fam == 1) {
+                    let (lambda, noise) = lam_noise(c.ci);
+                    let cfg = Config { lookback: LOOKBACKS[c.li], lambda, noise, scaler: c.scaler, pooled: fam == 1, position: c.position };
+                    best[fam] = Some((cfg, c.val, res));
+                    break;
+                }
+                if !exhaustive {
+                    break;
+                }
+            }
+            if best[fam].is_some() || exhaustive || cands[fam].is_empty() {
+                break;
+            }
+            cands[fam] = phase1(false).0[fam].drain(..).collect(); // rare
+            exhaustive = true;
         }
     }
     let test_mae = |res: &[f64]| {
@@ -552,17 +809,13 @@ pub fn forecast(steps: &[f64], vals: &[f64], pool: &[(&[f64], &[f64])], opt: &Op
 
     // final point forecast
     let mean: Vec<f64> = if skill {
-        let f = Feat { lookback: cfg.lookback, scaler: cfg.scaler, position: cfg.position, ref_ln };
-        let stats = series_stats(&t.v, cfg.scaler, gstats);
-        let mut g = Gram::new(f.dim());
-        if cfg.pooled {
-            for p in &pool {
-                g.add_series(&f, &p.st, &p.v, p.v.len(), series_stats(&p.v, cfg.scaler, gstats));
-            }
-        }
-        g.add_series(&f, &t.st, &t.v, n, stats);
-        let w = g.solve(cfg.lookback, cfg.lambda, cfg.noise)?;
-        let m = rollout(&f, &w, &t.v, n, stats, &future);
+        let li = LOOKBACKS.iter().position(|&l| l == cfg.lookback)?;
+        let g = gram(li, cfg.scaler, cfg.position, cfg.pooled, n_o);
+        let w = g.solve(cfg.lookback, cfg.lambda, cfg.noise, &mut abuf)?;
+        let (mu, sd) = tstats[cfg.scaler as usize][n_o];
+        let fpos: Vec<f64> = future.iter().map(|&s| log1p(s.max(0.0)) / ref_ln).collect();
+        rollout(&linear(&w, cfg.lookback, centre_of(cfg.scaler, mu), sd, cfg.position), &t.v[n - cfg.lookback..], &fpos, &mut rbuf);
+        let m = rbuf[cfg.lookback..].to_vec();
         if m.iter().any(|x| !x.is_finite()) {
             return None;
         }
@@ -573,8 +826,12 @@ pub fn forecast(steps: &[f64], vals: &[f64], pool: &[(&[f64], &[f64])], opt: &Op
 
     // conformal-style band from the drawn method's backtest residuals, per horizon
     let resid: Vec<f64> = if skill { res } else { pairs.iter().map(|&(oi, h, _)| t.v[origins[oi] + h - 1] - t.v[origins[oi] - 1]).collect() };
-    let by_h = |h: usize| -> Vec<f64> { resid.iter().zip(&pairs).filter(|(_, p)| p.1 == h).map(|(r, _)| *r).collect() };
-    let max_backtest_h = (1..=h_bt).filter(|&h| by_h(h).len() >= 3).max().unwrap_or(0);
+    let mut grouped: Vec<Vec<f64>> = vec![Vec::new(); h_bt + 1]; // residuals by horizon, in pair order
+    for (r, p) in resid.iter().zip(&pairs) {
+        grouped[p.1].push(*r);
+    }
+    let by_h = |h: usize| -> Vec<f64> { grouped[h].clone() };
+    let max_backtest_h = (1..=h_bt).filter(|&h| grouped[h].len() >= 3).max().unwrap_or(0);
     let (mut lo, mut hi) = (Vec::with_capacity(h_out), Vec::with_capacity(h_out));
     for h in 1..=h_out {
         let (mut r, scale) = if h <= max_backtest_h {
@@ -625,6 +882,53 @@ mod tests {
         assert!((x[0] - 1.0).abs() < 1e-12 && (x[1] + 1.0).abs() < 1e-12);
         let mut bad = [1.0, 2.0, 2.0, 1.0];
         assert!(cholesky_solve(&mut bad, &[1.0, 1.0], 2).is_none());
+    }
+
+    #[test]
+    fn pruned_search_selects_exactly_what_the_full_search_does() {
+        let mut x = 7u64;
+        let mut rnd = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % 20001) as f64 / 10000.0 - 1.0
+        };
+        for case in 0..24 {
+            let n = [6, 9, 15, 40, 120, 400][case % 6];
+            let s: Vec<f64> = (0..n).map(|i| (i * 10) as f64).collect();
+            let kind = case / 6;
+            let mut walk = 0.0;
+            let mut series = |off: f64| -> Vec<f64> {
+                (0..n)
+                    .map(|i| {
+                        let e = rnd();
+                        walk += e;
+                        let t = i as f64 + 1.0;
+                        match kind {
+                            0 => 2.0 + off + 5.0 * libm::pow(t, -0.5) + 0.05 * e,
+                            1 => walk,
+                            2 => 1e4 + off + libm::sin(t / 3.0) + 0.01 * e,
+                            _ => off + 0.3 * t + 2.0 * e,
+                        }
+                    })
+                    .collect()
+            };
+            let v = series(0.0);
+            let pools: Vec<Vec<f64>> = (0..(case % 3)).map(|k| series(0.1 * k as f64)).collect();
+            let pool: Vec<(&[f64], &[f64])> = pools.iter().map(|p| (s.as_slice(), p.as_slice())).collect();
+            let o = Options::to_step(s[n - 1] * 1.6);
+            let (a, b) = (search(&s, &v, &pool, &o, true), search(&s, &v, &pool, &o, false));
+            match (a, b) {
+                (None, None) => {}
+                (Some(a), Some(b)) => {
+                    assert_eq!(a.config, b.config, "case {case}");
+                    assert_eq!((a.skill, a.single, a.pooled), (b.skill, b.single, b.pooled), "case {case}");
+                    assert_eq!((&a.mean, &a.lo, &a.hi), (&b.mean, &b.lo, &b.hi), "case {case}");
+                    assert_eq!(a.n_configs, b.n_configs, "case {case}");
+                }
+                (a, b) => panic!("case {case}: {a:?} vs {b:?}"),
+            }
+        }
     }
 
     #[test]

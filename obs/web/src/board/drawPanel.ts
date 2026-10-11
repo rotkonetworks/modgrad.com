@@ -8,7 +8,8 @@ import { h, btn, svgEl } from '@/lib/dom';
 import { fmt, fmtTick, fmtTime, fmtStep } from '@/lib/fmt';
 import { PALETTE, cssv, hexToRgb, mixRgb } from '@/lib/color';
 import * as Dt from '@/logic/data';
-import type { FitForecast, Forecast, Panel, QueryResult, RunEvent, Trace } from '@/logic/types';
+import { fitInWorker } from '@/logic/forecasts';
+import type { FitForecast, Forecast, Panel, QueryFix, QueryResult, RunEvent, Trace } from '@/logic/types';
 import { S } from '@/stores/runs';
 import {
   fcCache, fcHist, fresh, hiddenTrace, settings, commit, setStage, placeTarget, soloTrace, toggleY2, removeTrace, pauseFollow,
@@ -39,7 +40,30 @@ const lastX = (t: { xs: ArrayLike<number> }): number => { for (let i = t.xs.leng
 const FC_LIVE_MS = 2000;
 const fcLast = new Map<string, { f: Forecast; at: number; n: number }>();
 const fcTimers = new Map<string, ReturnType<typeof setTimeout>>();
+/** one redraw per panel per frame when several worker fits land together */
+const fcRedraws = new Set<string>();
+function redrawSoon(id: string, redraw: () => void) {
+  if (fcRedraws.has(id)) return;
+  fcRedraws.add(id);
+  requestAnimationFrame(() => { fcRedraws.delete(id); redraw(); });
+}
 const niceRound = (v: number) => { const e = Math.pow(10, Math.floor(Math.log10(v)) - 1); return Math.round(v / e) * e; };
+
+/** "no metric 'losss': did you mean [loss]?" with each suggestion a button that rewrites the query */
+function fixLine(id: string, fixes: QueryFix[] | undefined, into: HTMLElement) {
+  if (!fixes || !fixes.length) return;
+  const byMsg = new Map<string, QueryFix[]>();
+  for (const f of fixes) byMsg.set(f.msg, [...(byMsg.get(f.msg) || []), f]);
+  for (const [msg, fs] of byMsg) {
+    const line = h('div', { class: 'berr', role: 'alert' }, into, `${msg}: did you mean `);
+    fs.forEach((f, i) => {
+      if (i) line.append(' or ');
+      const b = btn(line, f.label, `use ${f.label}: ${f.query}`, () => { const p = findPanel(id); if (p) commit(`fix query: ${f.label}`, () => { p.q = f.query; }); });
+      b.classList.add('mini', 'fix'); b.setAttribute('aria-label', `fix: use ${f.label}`);
+    });
+    line.append('?');
+  }
+}
 
 export function drawPanel(c: DrawCtx): DrawOut {
   const { panel: p, host, foot, res } = c;
@@ -52,6 +76,7 @@ export function drawPanel(c: DrawCtx): DrawOut {
     // with warnings the reason is known (e.g. no run logs the x-axis metric): say it in the panel, not under it
     if (!meta.warnings.length) { h('div', { class: 'bempty' }, host, 'nothing matches this query yet; it updates as runs arrive'); return out; }
     const box = h('div', { class: 'bempty' }, host, `nothing to draw: ${meta.warnings.join('; ')}`);
+    fixLine(p.id, meta.fixes, box);
     const xs = getStage(p.q, 'x');
     if (xs) { h('br', {}, box); btn(box, 'plot against step instead', `plot against step instead (removes "${xs}")`, () => setStage(findPanel(p.id)!, 'x', null, 'x axis: step')); }
     return out;
@@ -84,7 +109,7 @@ export function drawPanel(c: DrawCtx): DrawOut {
       if (!p.view.fc.live && fr) f = fr;
       else {
         // keyed on what the fit reads (this trace's and the pooled traces' data), not on the query
-        // text: a display stage (log y, ema, colour, another series) must not refit (~0.3-0.8 s each)
+        // text: a display stage (log y, ema, colour, another series) must not refit (~10-35 ms each)
         // (the default horizon moves with the data, so only a horizon the viewer set is identity)
         const id = JSON.stringify([p.id, traceKey(t), fc.to || null, fc.method, p.view.fc.window, p.view.fc.band, p.view.fc.pool]);
         const ck = JSON.stringify([id, to, dataSig(t), pool.map(dataSig)]);
@@ -101,9 +126,17 @@ export function drawPanel(c: DrawCtx): DrawOut {
             f = prev.f;
             if (!fcTimers.has(p.id)) fcTimers.set(p.id, setTimeout(() => { fcTimers.delete(p.id); c.redraw!(); }, FC_LIVE_MS - (now - prev.at) + 20));
           } else {
-            f = Dt.forecastTrace(t, to, { method: fc.method, window: p.view.fc.window, band: p.view.fc.band, pool });
-            if (fcCache.size > 400) fcCache.clear();
-            fcCache.set(ck, f); fcLast.set(id, { f, at: now, n });
+            const opts = { method: fc.method, window: p.view.fc.window, band: p.view.fc.band, pool };
+            const keep = (r: Forecast) => { if (fcCache.size > 400) fcCache.clear(); fcCache.set(ck, r); fcLast.set(id, { f: r, at: Date.now(), n }); };
+            if (c.redraw) {
+              // fit in the worker; meanwhile draw this trace's last fit (or a "fitting" badge)
+              const redraw = c.redraw;
+              fitInWorker(ck, t, to, opts, (r) => { keep(r); redrawSoon(p.id, redraw); });
+              f = prev ? prev.f : { none: 'fitting…' };
+            } else {
+              f = Dt.forecastTrace(t, to, opts);
+              keep(f);
+            }
           }
         }
       }
@@ -196,6 +229,7 @@ export function drawPanel(c: DrawCtx): DrawOut {
   } else if (meta.forecast && !isStep) h('div', { class: 'bnote' }, foot, 'forecasts are drawn on the step axis only');
   if (meta.downsampled) h('div', { class: 'bnote' }, foot, `long series block-averaged to ${MAX_POINTS} points (longest ${meta.downsampled}); legend statistics are over block means`);
   for (const w of meta.warnings) h('div', { class: 'bnote' }, foot, w);
+  fixLine(p.id, meta.fixes, foot);
   return out;
 }
 
@@ -236,6 +270,7 @@ function drawHeatmaps(c: DrawCtx, res: Extract<QueryResult, { ok: true }>): Draw
   if (rownorm) h('div', { class: 'bnote' }, foot, 'rownorm: each layer divided by its own median, so 1 is typical for that layer and a spike in one layer stands out');
   h('div', { class: 'bnote' }, foot, 'click a cell for that layer as a line; columns are the union of logged steps, block-reduced past 400');
   for (const w of res.meta.warnings) h('div', { class: 'bnote' }, foot, w);
+  fixLine(p.id, res.meta.fixes, foot);
   return { badge: null };
 }
 
@@ -274,7 +309,9 @@ function decorateLegend(pid: string, tbl: HTMLTableElement | null, ss0: ChartSer
     if (s.fresh) h('span', { class: 'tagnew', title: 'run appeared since the last update' }, nb, 'new');
     tr.insertBefore(h('td', { class: 'al' }, null, t.letter), nm);
     const ctl = h('td', { class: 'ctl' }, tr);
-    const r = btn(ctl, 'R', s.y2 ? 'back to the left axis' : 'plot on the right-hand axis (one series per panel)', () => toggleY2(findPanel(pid)!, t.label), s.y2 ? 'on' : '');
+    // labelled by where the click sends the series: "→ y2" (right-hand axis) or, when there, "← y1"
+    const r = btn(ctl, s.y2 ? '← y1' : '→ y2', s.y2 ? `move ${t.label} back to the left y axis` : `move ${t.label} to a second y axis on the right (one series per panel)`,
+      () => toggleY2(findPanel(pid)!, t.label), s.y2 ? 'on y2btn' : 'y2btn');
     r.setAttribute('aria-pressed', String(!!s.y2));
     const single = t.runs.length === 1 && !t.metric.includes(' = ');
     const ref: TraceRef = { letter: t.letter, run: t.runs[0], single, label: t.label, entries: single ? `${t.metric}{run="${t.runs[0].replace(/"/g, '')}"}` : t.metric.includes(' = ') ? null : `${t.metric}{run=~"${t.runs.map((x) => x.replace(/"/g, '')).join('|')}"}` };

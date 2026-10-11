@@ -297,10 +297,56 @@ pub struct QueryError {
     pub start: usize,
     pub end: usize,
     pub msg: String,
+    /// Replacements for `start..end` that would fix it ("did you mean"), best first.
+    pub suggest: Vec<String>,
 }
 
 fn qe<T>(start: usize, end: usize, msg: impl Into<String>) -> Result<T, QueryError> {
-    Err(QueryError { start, end, msg: msg.into() })
+    Err(QueryError { start, end, msg: msg.into(), suggest: Vec::new() })
+}
+
+/// Stage keywords, as the parser accepts them.
+pub const STAGES: [&str; 17] = ["ema", "by", "split", "mean±sd", "mean", "median", "min", "max", "x", "forecast", "log", "norm", "baseline", "align", "show", "heatmap", "mean+-sd"];
+
+/// Levenshtein distance over chars, case-insensitive.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().flat_map(char::to_lowercase).collect();
+    let b: Vec<char> = b.chars().flat_map(char::to_lowercase).collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            cur[j + 1] = (prev[j] + (ca != cb) as usize).min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        core::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+/// Up to `k` candidates close to `word` ("did you mean"), nearest first
+/// (ties by name): an edit distance of at most max(1, len/4), or the word as
+/// a prefix of a candidate (`grad` → `grad_norm`).
+pub fn nearest<'a>(word: &str, cands: impl IntoIterator<Item = &'a str>, k: usize) -> Vec<String> {
+    let max = (word.chars().count() / 4).max(1);
+    let lw = word.to_lowercase();
+    let mut v: Vec<(usize, &str)> = cands
+        .into_iter()
+        .filter(|c| *c != word)
+        .filter_map(|c| {
+            let d = edit_distance(word, c);
+            if d <= max {
+                Some((d, c))
+            } else if lw.len() >= 3 && c.to_lowercase().starts_with(&lw) {
+                Some((max + 1, c))
+            } else {
+                None
+            }
+        })
+        .collect();
+    v.sort();
+    v.dedup_by(|a, b| a.1 == b.1);
+    v.into_iter().take(k).map(|(_, c)| c.to_string()).collect()
 }
 
 const fn bare_char(c: u8) -> bool {
@@ -467,7 +513,12 @@ fn split_top(s: &str, sep: u8) -> Vec<(usize, usize)> {
     out
 }
 
-fn parse_entry(src: &str, a: usize, b: usize) -> Result<Option<(Option<String>, Entry)>, QueryError> {
+/// One entry of the query text: an optional formula name, the entry, and the
+/// span of a selector's metric name in `src` (`None` for formulas and for
+/// selectors without a name).
+type ParsedEntry = (Option<String>, Entry, Option<(usize, usize)>);
+
+fn parse_entry(src: &str, a: usize, b: usize) -> Result<Option<ParsedEntry>, QueryError> {
     let text = &src[a..b];
     let t = text.trim();
     if t.is_empty() {
@@ -483,7 +534,7 @@ fn parse_entry(src: &str, a: usize, b: usize) -> Result<Option<(Option<String>, 
             if expr.is_empty() {
                 return qe(off, off + t.len(), "formula needs an expression after '='");
             }
-            return Ok(Some((Some(t[..nb].to_string()), Entry::Formula { expr: expr.to_string() })));
+            return Ok(Some((Some(t[..nb].to_string()), Entry::Formula { expr: expr.to_string() }, None)));
         }
     }
     let mut lx = Lx { s: src, i: off };
@@ -510,7 +561,8 @@ fn parse_entry(src: &str, a: usize, b: usize) -> Result<Option<(Option<String>, 
     if lx.i < b {
         return qe(lx.i, b, "unexpected text in selector (separate selectors with ';')");
     }
-    Ok(Some((None, Entry::Sel { metric: if metric.is_empty() { "*".into() } else { metric }, matchers })))
+    let span = if metric.is_empty() { None } else { Some((ms, me)) };
+    Ok(Some((None, Entry::Sel { metric: if metric.is_empty() { "*".into() } else { metric }, matchers }, span)))
 }
 
 fn parse_stages(src: &str, a: usize, b: usize, out: &mut Vec<Stage>) -> Result<(), QueryError> {
@@ -660,7 +712,10 @@ fn parse_stages(src: &str, a: usize, b: usize, out: &mut Vec<Stage>) -> Result<(
                 }
                 Stage::Show(l)
             }
-            _ => return qe(ka, kb, format!("unknown stage '{kw}'")),
+            _ => {
+                let list = "ema, by, split, mean±sd/mean/median/min/max over, x, forecast, log, norm, baseline, align, show, heatmap";
+                return Err(QueryError { start: ka, end: kb, msg: format!("unknown stage '{kw}'; stages: {list}"), suggest: nearest(&kw, STAGES.iter().copied().filter(|s| *s != "mean+-sd"), 3) });
+            }
         };
         out.push(st);
     }
@@ -679,10 +734,10 @@ pub fn parse(src: &str) -> Result<Query, QueryError> {
     if raw.is_empty() {
         return qe(0, src.len(), "empty query: give a metric, e.g. loss or loss{run=\"x\"}");
     }
-    let taken: Vec<String> = raw.iter().filter_map(|(n, _)| n.clone()).collect();
+    let taken: Vec<String> = raw.iter().filter_map(|(n, _, _)| n.clone()).collect();
     let mut entries = Vec::new();
     let mut k = 0;
-    for (n, e) in raw {
+    for (n, e, _) in raw {
         let letter = match n {
             Some(n) => n,
             None => loop {
@@ -703,6 +758,37 @@ pub fn parse(src: &str) -> Result<Query, QueryError> {
         parse_stages(src, a, b, &mut stages)?;
     }
     Ok(Query { entries, stages })
+}
+
+/// A "did you mean" fix: what is wrong, the suggested replacement, and the
+/// whole query with only that replacement made.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Fix {
+    pub msg: String,
+    pub label: String,
+    pub query: String,
+}
+
+/// Fixes for selector metric names that match no metric of any run
+/// (`losss` → `loss`), nearest first, up to 3 per name. Names with glob
+/// characters are left alone; the rest of the text is kept byte for byte.
+pub fn metric_fixes(src: &str, cat: &Catalog) -> Vec<Fix> {
+    let segs = split_top(src, b'|');
+    let (ea, eb) = segs[0];
+    let mut known: Vec<&str> = cat.runs.iter().flat_map(|r| r.metrics.iter().map(String::as_str)).filter(|m| m.bytes().all(bare_char)).collect();
+    known.sort_unstable();
+    known.dedup();
+    let mut out = Vec::new();
+    for (a, b) in split_top(&src[ea..eb], b';') {
+        let Ok(Some((_, Entry::Sel { metric, .. }, Some((ms, me))))) = parse_entry(src, ea + a, ea + b) else { continue };
+        if metric.contains(['*', '?', '|']) || cat.runs.iter().any(|r| r.metrics.iter().any(|m| glob(&metric, m))) {
+            continue;
+        }
+        for m in nearest(&metric, known.iter().copied(), 3) {
+            out.push(Fix { msg: format!("no metric '{metric}'"), query: format!("{}{}{}", &src[..ms], m, &src[me..]), label: m });
+        }
+    }
+    out
 }
 
 pub fn letter(i: usize) -> String {
@@ -939,6 +1025,9 @@ pub struct Output {
     pub downsampled: usize,
     /// `heatmap over layer`: one matrix per (run, layer family).
     pub heatmaps: Vec<LayerHeatmap>,
+    /// "Did you mean" fixes for the query text (set by the caller that has
+    /// it, see [`metric_fixes`]).
+    pub fixes: Vec<Fix>,
 }
 
 /// Columns per heatmap: the union of steps, block-reduced past this.
@@ -1357,11 +1446,12 @@ pub fn output_json(o: &Output, cat: &Catalog) -> (String, Vec<f64>) {
         Some((to, m)) => format!("{{\"to\":{},\"method\":{}}}", to.map_or("null".into(), |v| format!("{v}")), js_str(m)),
     };
     let meta = format!(
-        "{{\"traces\":[{}],\"heatmaps\":[{}],\"cells\":{},\"warnings\":{},\"by\":{},\"by_numeric\":{},\"ylog\":{},\"forecast\":{fc},\"x_label\":{},\"downsampled\":{}}}",
+        "{{\"traces\":[{}],\"heatmaps\":[{}],\"cells\":{},\"warnings\":{},\"fixes\":[{}],\"by\":{},\"by_numeric\":{},\"ylog\":{},\"forecast\":{fc},\"x_label\":{},\"downsampled\":{}}}",
         tr.join(","),
         hm.join(","),
         js_list(&o.cells),
         js_list(&o.warnings),
+        o.fixes.iter().map(|f| format!("{{\"msg\":{},\"label\":{},\"query\":{}}}", js_str(&f.msg), js_str(&f.label), js_str(&f.query))).collect::<Vec<_>>().join(","),
         o.by.as_ref().map_or("null".into(), |b| js_str(b)),
         o.by_numeric,
         o.ylog,
@@ -1452,6 +1542,26 @@ R\tlocal/pilot1\nI\tname\tpilot1\nC\tsize\t494053\nM\tloss\n";
         let p = plan(&q, &cat);
         assert_eq!(p.streams.len(), 3);
         assert!(p.warnings.iter().any(|w| w.contains("small_s2 has no tokens")));
+    }
+
+    #[test]
+    fn did_you_mean_stages_and_metrics() {
+        let e = parse("loss | emaa .9").unwrap_err();
+        assert_eq!(e.suggest, vec!["ema"]);
+        assert!(e.msg.contains("stages: ema, by, split"), "{}", e.msg);
+        assert_eq!(parse("loss | forcast to 10k").unwrap_err().suggest[0], "forecast");
+        assert!(parse("loss | frobnicate").unwrap_err().suggest.is_empty());
+        let cat = Catalog::parse("R\tr/a\nM\tloss\nM\tval_loss\nM\tgrad_norm\nR\tr/b\nM\tloss\n");
+        // only the misspelt name changes, the rest of the text is kept byte for byte
+        let src = "losss{run=~\"r/*\"} ;  grad_norm | ema .9";
+        let f = metric_fixes(src, &cat);
+        assert_eq!(f.iter().map(|f| f.label.as_str()).collect::<Vec<_>>(), ["loss"]);
+        assert_eq!(f[0].query, "loss{run=~\"r/*\"} ;  grad_norm | ema .9");
+        assert_eq!(f[0].msg, "no metric 'losss'");
+        // known names, globs and formulas get no fixes; a prefix finds the full name
+        assert!(metric_fixes("loss; val_*; d = a - b", &cat).is_empty());
+        assert_eq!(metric_fixes("grad", &cat)[0].query, "grad_norm");
+        assert_eq!(nearest("vall_loss", ["loss", "val_loss"], 3), ["val_loss"]);
     }
 
     fn run_eval(src: &str, data: impl Fn(&str, &str) -> (Vec<f64>, Vec<f64>)) -> Output {

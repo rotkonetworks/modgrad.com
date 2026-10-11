@@ -400,6 +400,10 @@ impl QueryParse {
     pub fn err_end(&self) -> usize {
         self.error.as_ref().map_or(0, |e| e.end)
     }
+    /// Newline-joined replacements for `err_start..err_end` ("did you mean"), best first.
+    pub fn suggest(&self) -> String {
+        self.error.as_ref().map(|e| e.suggest.join("\n")).unwrap_or_default()
+    }
 }
 
 fn qp(r: Result<crate::query::Query, crate::query::QueryError>) -> QueryParse {
@@ -463,7 +467,8 @@ pub fn query_eval(src: &str, catalog: &str, off: &[u32], steps: &[f64], vals: &[
         .map(|w| (w[0] as usize, w[1] as usize))
         .map(|(a, b)| if a <= b && b <= steps.len() && b <= vals.len() { (&steps[a..b], &vals[a..b]) } else { (&steps[..0], &vals[..0]) })
         .collect();
-    let o = crate::query::eval(&q, &cat, &p, &data, max_points);
+    let mut o = crate::query::eval(&q, &cat, &p, &data, max_points);
+    o.fixes = crate::query::metric_fixes(src, &cat);
     let (meta, data) = crate::query::output_json(&o, &cat);
     QueryOut { meta, data }
 }

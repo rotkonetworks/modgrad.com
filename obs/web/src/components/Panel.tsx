@@ -1,7 +1,7 @@
 import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from 'solid-js';
 import type { Chip, Panel as PanelT, QueryResult, RunEvent } from '@/logic/types';
 import * as Bd from '@/logic/board';
-import { evalQuery, planOf, varyingFields, SAMPLES_METRIC } from '@/logic/data';
+import { evalQuery, planOf, varyingFields, fieldsOf, hasReplicates, layerFamilies, SAMPLES_METRIC } from '@/logic/data';
 import SamplesPanel from '@/components/SamplesPanel';
 import { A } from '@/lib/wasm';
 import { themeVersion } from '@/lib/theme';
@@ -9,7 +9,7 @@ import { catalog, catalogVersion, runVersion, eventsOf } from '@/stores/runs';
 import {
   findPanel, titleOf, parseQ, selPanel, setSelPanel, editing, toggleEditing, settings, results, seen, fresh, commit,
   setStage, setQuery, renamePanel, toggleFollow, deletePanel, duplicatePanel, movePanel, mergePanel, showAll, openFocus,
-  panelRuns, setInspector, focusId, board,
+  panelRuns, setInspector, focusId, board, boardFilters,
 } from '@/stores/board';
 import { openMenu, openPopover } from '@/stores/ui';
 import { drawPanel, chartWidth, MAX_POINTS, type DrawOut } from '@/board/drawPanel';
@@ -19,7 +19,7 @@ import { loader } from '@/board/loader';
 import ForecastControls from '@/components/ForecastControls';
 import ErrLine from '@/components/ErrLine';
 
-const CHIP_LABEL = (c: Chip): string => {
+export const CHIP_LABEL = (c: Chip): string => {
   if (c.kind === 'matcher') { const m = c.text.match(/^run(=~|=|!=|!~)"?(.*?)"?$/); if (m) return `${m[1].startsWith('!') ? 'not ' : ''}runs: ${m[2]}`; return c.text.replace(/"/g, ''); }
   if (c.kind === 'metric') return c.text === '*' ? 'all metrics' : c.text === SAMPLES_METRIC ? 'text samples' : c.text;
   return c.text;
@@ -32,9 +32,14 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
   const model = () => findPanel(id);
   const title = () => titleOf(props.panel);
   const parsed = createMemo(() => parseQ(props.panel.q));
+  // a matcher on every entry of this panel is shown once (after the entries); one on every panel
+  // of the board is shown above the board. Display only: the query text is unchanged.
+  const shared = createMemo(() => { const pq = parsed(); return pq.ok && pq.chips.filter((c) => c.kind === 'metric').length >= 2 ? Bd.sharedMatchers([props.panel.q]) : []; });
+  const hiddenChip = (c: Chip) => c.kind === 'matcher' && (boardFilters().includes(c.text) || shared().includes(c.text));
+  const [sharedEdit, setSharedEdit] = createSignal<string | null>(null);
   const [badge, setBadge] = createSignal<DrawOut['badge']>(null);
   const [chipEdit, setChipEdit] = createSignal<number | null>(null);
-  const [qErr, setQErr] = createSignal<{ src: string | null; msg: string; a: number; b: number } | null>(null);
+  const [qErr, setQErr] = createSignal<{ src: string | null; msg: string; a: number; b: number; suggest?: string[] } | null>(null);
   const [pending, setPending] = createSignal(true);
   let host!: HTMLDivElement, foot!: HTMLDivElement, titleBtn!: HTMLButtonElement;
 
@@ -90,7 +95,7 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
     const cur = model(); if (!cur) return;
     // keep keyboard/wheel focus on the same chart across a redraw (click-then-wheel zoom)
     const fi = [...host.querySelectorAll('svg')].indexOf(document.activeElement as SVGSVGElement);
-    drawnW = chartWidth(host.clientWidth);
+    drawnW = chartWidth(host.clientWidth); drawnH = hStep();
     const out = drawPanel({ panel: cur, host, foot, res, events, inFocus: !!props.inFocus, focusOpen: !!focusId(), dataKey: dataKey(), title: title(), redraw: () => { draw(); } }); // the latest draw: a timer set by an earlier one must still land
     if (fi >= 0) host.querySelectorAll('svg')[fi]?.focus({ preventScroll: true });
     setBadge(out.badge);
@@ -98,10 +103,16 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
   }
   createEffect(on(sig, () => { draw(); }));
   // charts are drawn at the box's width (rounded to 60 px): redraw when that step changes
-  let drawnW = -1;
+  // in the focus view the chart height follows the window height too (drawPanel: innerHeight - 300)
+  let drawnW = -1, drawnH = -1;
+  const hStep = () => (props.inFocus ? Math.floor(innerHeight / 30) : 0);
   onMount(() => {
     const ro = new ResizeObserver(() => { const w = chartWidth(host.clientWidth); if (drawnW >= 0 && w !== drawnW && !pending()) draw(); });
     ro.observe(host); onCleanup(() => ro.disconnect());
+    if (props.inFocus) {
+      const onResize = () => { if (drawnH >= 0 && hStep() !== drawnH && !pending()) draw(); };
+      addEventListener('resize', onResize); onCleanup(() => removeEventListener('resize', onResize));
+    }
   });
   createEffect(on(() => props.panel.view.follow, (f) => { if (f) draw(); }, { defer: true }));
   onCleanup(() => { tok++; });
@@ -123,6 +134,8 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
     const p = model(); if (!p) return;
     openMenu(anchor, [
       { label: 'rename', run: rename },
+      { label: editing().has(id) ? 'close the text editor' : 'edit the query as text', run: () => toggleEditing(id) },
+      { label: p.view.follow ? 'pause following' : 'follow the newest data', run: () => toggleFollow(p) },
       { label: 'inspect (settings)', run: () => { setSelPanel(id); setInspector(true); } },
       { label: 'duplicate', run: () => duplicatePanel(p) },
       { label: 'move up', run: () => movePanel(p, 'up') },
@@ -139,24 +152,35 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
     const vf = varyingFields(runs);
     const lets = Bd.letters(p.q);
     const st = (kind: string, text: string) => () => setStage(p, kind, text);
+    // only stages that apply to what this panel reads
+    const streams = planOf(p.q, catalog());
+    const metrics = [...new Set(streams.map(([, m]) => m))];
+    const nRuns = new Set(streams.map(([r]) => r)).size;
+    const runMetrics = new Set(runs.flatMap((r) => Object.keys(r.metrics || {})));
+    const tokens = [...runMetrics].some((m) => m.includes('tokens')); // x tokens takes the first metric containing it
+    const layered = layerFamilies(metrics, 2).length > 0;
+    const numeric = fieldsOf(runs).filter((k) => runs.some((r) => typeof (r.config || {})[k] === 'number'));
+    const when = <T,>(c: boolean, items: T[]): T[] => (c ? items : []);
     openMenu(anchor, [
       { label: 'ema .9 (smoothing)', run: st('ema', 'ema .9') },
-      { label: 'mean±sd over seed', run: st('agg', 'mean±sd over seed') },
+      ...when(vf.includes('seed') || hasReplicates(runs), [{ label: 'mean±sd over seed', run: st('agg', 'mean±sd over seed') }]),
       ...vf.slice(0, 6).map((f) => ({ label: `colour by ${f}`, run: st('by', `by ${f}`) })),
-      { label: 'split by metric', run: st('split', 'split metric') },
-      { label: 'split by run', run: st('split', 'split run') },
+      ...when(metrics.length > 1, [{ label: 'split by metric', run: st('split', 'split metric') }]),
+      ...when(nRuns > 1, [{ label: 'split by run', run: st('split', 'split run') }]),
       ...vf.slice(0, 4).map((f) => ({ label: `split by ${f}`, run: st('split', `split ${f}`) })),
-      { label: 'x axis: time', run: st('x', 'x time') },
-      { label: 'x axis: tokens', run: st('x', 'x tokens') },
+      ...when(runMetrics.has('elapsed_min'), [{ label: 'x axis: time', run: st('x', 'x time') }]),
+      ...when(tokens, [{ label: 'x axis: tokens', run: st('x', 'x tokens') }]),
       { label: 'forecast', run: st('forecast', 'forecast') },
       { label: 'log y', run: st('log', 'log') },
-      { label: 'layer x step heatmap (layers/<i>/<stat>)', run: st('heatmap', 'heatmap over layer') },
-      { label: 'layer heatmap, each layer / its median', run: st('heatmap', 'heatmap over layer rownorm') },
+      ...when(layered, [
+        { label: 'layer x step heatmap (layers/<i>/<stat>)', run: st('heatmap', 'heatmap over layer') },
+        { label: 'layer heatmap, each layer / its median', run: st('heatmap', 'heatmap over layer rownorm') },
+      ]),
       { label: 'normalise: z-score', run: st('norm', 'norm z') },
-      ...runs.slice(0, 8).map((r) => ({ label: `baseline ${r.id} (difference)`, run: st('baseline', `baseline ${Bd.quote(r.id)}`) })),
+      ...when(nRuns > 1, runs.slice(0, 8).map((r) => ({ label: `baseline ${r.id} (difference)`, run: st('baseline', `baseline ${Bd.quote(r.id)}`) }))),
       ...(lets.length >= 2 ? [{ label: `formula: ${lets[0]} - ${lets[1]}`, run: () => commit('add formula', () => { p.q = Bd.addEntries(p.q, `${Bd.nextLetter(lets)} = ${lets[0]} - ${lets[1]}`); }) }] : []),
       { label: 'formula (type it)...', run: () => toggleEditing(id, true) },
-      { label: 'filter: lr > ...', run: () => toggleEditing(id, true) },
+      ...when(numeric.length > 0, [{ label: `filter: ${numeric.includes('lr') ? 'lr' : numeric[0]} > ... (type it)`, run: () => toggleEditing(id, true) }]),
     ], 'add a stage');
   }
   function applyChip(i: number, c: Chip, text: string): void {
@@ -168,7 +192,7 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
   }
   function applyText(v: string): void {
     const r = parseQ(v);
-    if (!r.ok) { setQErr({ src: v, msg: r.error, a: r.start, b: r.end }); return; }
+    if (!r.ok) { setQErr({ src: v, msg: r.error, a: r.start, b: r.end, suggest: r.suggest }); return; }
     setQErr(null);
     const p = model(); if (p) setQuery(p, r.canonical);
   }
@@ -180,19 +204,20 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
         <button type="button" class="bt" ref={(el) => { titleBtn = el; draggable(el, () => ({ type: 'panel', pid: id, label: `panel "${title()}"` })); }}
           title={`panel "${title()}": drag to reorder (drop on a panel edge) or merge (drop on its middle); double-click to rename`}
           aria-label={`panel ${title()}: drag to reorder or merge, double-click to rename`} onDblClick={rename}>{title()}</button>
-        <button type="button" class="mini" classList={{ on: props.panel.view.follow }} aria-pressed={props.panel.view.follow}
+        <button type="button" class="mini wideonly" classList={{ on: props.panel.view.follow }} aria-pressed={props.panel.view.follow}
           title={props.panel.view.follow ? 'following the newest data; click to pause' : 'follow the newest data (keeps the zoom width, slides to the end)'}
           aria-label="follow the newest data" onClick={() => { const p = model(); if (p) toggleFollow(p); }}>{props.panel.view.follow ? '|| follow' : '> follow'}</button>
-        <button type="button" class="mini" classList={{ on: editing().has(id) }} aria-pressed={editing().has(id)} title="edit the query as text" aria-label="edit the query as text" onClick={() => toggleEditing(id)}>text</button>
-        <button type="button" class="mini" title="panel settings in the inspector" aria-label="inspect panel settings" onClick={() => { setSelPanel(id); setInspector(true); }}>inspect</button>
+        <button type="button" class="mini wideonly" classList={{ on: editing().has(id) }} aria-pressed={editing().has(id)} title="edit the query as text" aria-label="edit the query as text" onClick={() => toggleEditing(id)}>text</button>
+        <button type="button" class="mini wideonly" title="panel settings in the inspector" aria-label="inspect panel settings" onClick={() => { setSelPanel(id); setInspector(true); }}>inspect</button>
         <button type="button" class="mini" title="panel menu" aria-label="panel menu" onClick={(e) => panelMenu(e.currentTarget)}>menu</button>
         <Show when={!props.inFocus}>
-          <button type="button" class="mini" title="expand this panel into the focus view" aria-label="expand this panel" onClick={() => openFocus(id)}>expand</button>
+          <button type="button" class="mini wideonly" title="expand this panel into the focus view" aria-label="expand this panel" onClick={() => openFocus(id)}>expand</button>
         </Show>
         <button type="button" class="mini" title={`delete panel "${title()}"`} aria-label={`delete panel ${title()}`} onClick={() => { const p = model(); if (p) deletePanel(p); }}>x</button>
       </div>
       <div class="bchips">
         <For each={(() => { const pq = parsed(); return pq.ok ? pq.chips : []; })()}>{(c, i) => (
+          <Show when={!hiddenChip(c)}>
           <span class={'chipw k-' + c.kind}>
             <Show when={chipEdit() === i()} fallback={
               <button type="button" class="c" title={`edit "${c.text}"`} aria-label={`edit ${c.text}`} onClick={() => setChipEdit(i())}>
@@ -203,6 +228,19 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
             </Show>
             <button type="button" class="x" title={`remove "${c.text}"`} aria-label={`remove ${c.text}`} onClick={() => { const p = model(); if (p) commit(`remove ${c.text}`, () => { p.q = Bd.replaceChip(p.q, i(), ''); }); }}>x</button>
           </span>
+          </Show>
+        )}</For>
+        <For each={shared().filter((t) => !boardFilters().includes(t))}>{(t) => (
+          <span class="chipw k-matcher k-shared">
+            <Show when={sharedEdit() === t} fallback={
+              <button type="button" class="c" title={`on every series of this panel: ${t}; click to edit it everywhere`} aria-label={`edit ${t} on every series`} onClick={() => setSharedEdit(t)}>
+                {'all: ' + CHIP_LABEL({ kind: 'matcher', text: t, entry: null })}
+              </button>
+            }>
+              <ChipEditor text={t} onApply={(v) => { setSharedEdit(null); const p = model(); if (p) commit(`edit ${t} on every series`, () => { p.q = Bd.replaceMatcherAll(p.q, t, v); }); }} onCancel={() => setSharedEdit(null)} />
+            </Show>
+            <button type="button" class="x" title={`remove "${t}" from every series of this panel`} aria-label={`remove ${t} from every series`} onClick={() => { const p = model(); if (p) commit(`remove ${t}`, () => { p.q = Bd.replaceMatcherAll(p.q, t, ''); }); }}>x</button>
+          </span>
         )}</For>
         <button type="button" class="mini" title="add a stage: smoothing, colour by, split, seeds, x axis, forecast, ..." aria-label="add a stage" onClick={(e) => stageMenu(e.currentTarget)}>+</button>
         <Show when={hasForecast()}>
@@ -211,9 +249,9 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
         </Show>
       </div>
       <Show when={!parsed().ok}>
-        {(() => { const pq = parsed(); return pq.ok ? null : <ErrLine src={props.panel.q} msg={pq.error} a={pq.start} b={pq.end} />; })()}
+        {(() => { const pq = parsed(); return pq.ok ? null : <ErrLine src={props.panel.q} msg={pq.error} a={pq.start} b={pq.end} suggest={pq.suggest} onFix={applyText} />; })()}
       </Show>
-      <Show when={qErr()}>{(e) => <ErrLine src={e().src} msg={e().msg} a={e().a} b={e().b} />}</Show>
+      <Show when={qErr()}>{(e) => <ErrLine src={e().src} msg={e().msg} a={e().a} b={e().b} suggest={e().suggest} onFix={applyText} />}</Show>
       <Show when={editing().has(id)}>
         <QueryText q={props.panel.q} onApply={applyText} />
       </Show>

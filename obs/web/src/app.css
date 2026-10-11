@@ -173,6 +173,10 @@ details.run .dh { font-weight: 600; margin-top: 6px; }
 .chipw button { border: 0; font: 10px var(--mono); padding: 0 4px; line-height: 15px; background: var(--bg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .chipw button.x { border-left: 1px solid var(--rule); color: var(--muted); flex: none; }
 .chipw.k-metric { border-color: var(--frame); }
+.chipw.k-shared { border-style: dotted; }
+.bfilt { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; font: 10px var(--mono); color: var(--muted); padding: 0 2px 4px; }
+.bfilt-item { display: inline-flex; gap: 3px; align-items: center; }
+.bfilt code { font: 10px var(--mono); color: var(--ink); }
 .chipw.k-metric button.c { font-weight: 600; }
 .chipw.k-forecast, .chipw.k-agg, .chipw.k-by, .chipw.k-split { border-style: dashed; }
 .chipw input { font: 10px var(--mono); width: 16em; max-width: 60vw; border: 0; }
@@ -275,7 +279,15 @@ body.bdragging, body.bdragging * { cursor: grabbing !important; }
   body { padding: 8px 16px 32px; }
   input[type=range] { width: 120px; }
   .droptools .hint { display: none; }
+  /* secondary actions live in the header's "more" menu; tabs stay one (scrollable) row */
+  .wideonly { display: none !important; }
+  header.top { gap: 4px 8px; margin-bottom: 6px; }
+  nav.tabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: thin; }
+  nav.tabs a { padding: 4px 7px 3px; white-space: nowrap; flex: none; }
+  .btool { margin-bottom: 4px; gap: 6px; }
+  .btool select { width: 8.5em; }
 }
+@media (min-width: 601px) { .narrowonly { display: none !important; } }
 
 /* board panels share the row: as many ~420px+ columns as fit, each stretching */
 .bcanvas .panel { max-width: none; }

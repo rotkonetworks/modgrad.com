@@ -81,7 +81,11 @@ function wireDrag() {
   let depth = 0;
   addEventListener('dragenter', (e) => { if (!hasFiles(e)) return; e.preventDefault(); depth++; ui.zone.classList.add('on'); });
   addEventListener('dragover', (e) => { if (!hasFiles(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
-  addEventListener('dragleave', (e) => { if (!hasFiles(e)) return; depth = Math.max(0, depth - 1); if (!depth) ui.zone.classList.remove('on'); });
+  // enter/leave pairs are counted; a leave at the window edge (drag taken out or cancelled
+  // there) always hides, in case the browser dropped a pair
+  const outside = (e) => e.clientX <= 0 || e.clientY <= 0 || e.clientX >= innerWidth || e.clientY >= innerHeight;
+  addEventListener('dragleave', (e) => { if (!hasFiles(e)) return; depth = Math.max(0, depth - 1); if (!depth || outside(e)) { depth = 0; ui.zone.classList.remove('on'); } });
+  addEventListener('dragend', () => { depth = 0; ui.zone.classList.remove('on'); });
   addEventListener('drop', async (e) => {
     if (!hasFiles(e)) return;
     e.preventDefault(); depth = 0; ui.zone.classList.remove('on');

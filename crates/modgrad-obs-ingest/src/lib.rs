@@ -499,7 +499,7 @@ pub fn detect(name: &str, head: &[u8]) -> Format {
     if head.starts_with(b":W&B") || ext == "wandb" {
         return Format::Wandb;
     }
-    if lower.contains("tfevents") || tfevents::looks_like(head) {
+    if lower.starts_with("events.out.tfevents.") || tfevents::looks_like(head) {
         return Format::TfEvents;
     }
     match lower.as_str() {
@@ -800,7 +800,28 @@ fn json_doc(buf: &[u8], name: &str, run: &mut LocalRun, rep: &mut FileReport) ->
             run.rows += st.len();
             Ok(())
         }
+        // HF Trainer's trainer_state.json: rows under log_history
+        Value::Object(o) if o.get("log_history").is_some_and(|h| h.is_array()) => {
+            rep.format = "hf trainer_state".into();
+            for k in ["max_steps", "num_train_epochs", "train_batch_size", "logging_steps", "eval_steps", "save_steps"] {
+                if let Some(x) = o.get(k).filter(|x| x.is_number()) {
+                    run.config.insert(k.into(), x.clone());
+                }
+            }
+            json_doc_rows(o["log_history"].as_array().unwrap(), run, rep);
+            Ok(())
+        }
         Value::Array(a) if a.iter().all(|x| x.is_object()) && !a.is_empty() => {
+            json_doc_rows(a, run, rep);
+            Ok(())
+        }
+        _ => Err("JSON document with no series (expected {step:[],value:[]}, an array of row objects, or trainer_state.json)".into()),
+    }
+}
+
+fn json_doc_rows(a: &[Value], run: &mut LocalRun, rep: &mut FileReport) {
+    {
+        {
             let mut p = jsonl::Jsonl::new(false);
             for x in a {
                 if !p.value(x) {
@@ -809,9 +830,7 @@ fn json_doc(buf: &[u8], name: &str, run: &mut LocalRun, rep: &mut FileReport) ->
             }
             rep.lines = a.len();
             p.finish(run, rep);
-            Ok(())
         }
-        _ => Err("JSON document with no series (expected {step:[],value:[]} or an array of row objects)".into()),
     }
 }
 

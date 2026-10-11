@@ -308,3 +308,21 @@ fn duplicate_steps_keep_last() {
     assert_eq!(series(&run, "loss").step, [0.0, 1.0, 2.0]);
     assert_eq!(series(&run, "loss").value, [6.0, 5.0, 3.5]);
 }
+
+#[test]
+fn hf_trainer_state_json() {
+    let doc = br#"{"global_step": 30, "max_steps": 100, "log_history": [
+        {"epoch": 0.1, "grad_norm": 1.2, "learning_rate": 5e-05, "loss": 2.31, "step": 10},
+        {"epoch": 0.2, "grad_norm": 1.0, "learning_rate": 4.5e-05, "loss": 2.01, "step": 20},
+        {"epoch": 0.2, "eval_loss": 2.2, "eval_runtime": 3.1, "step": 20},
+        {"epoch": 0.3, "loss": 1.8, "step": 30}]}"#;
+    let mut run = LocalRun::new("hf");
+    let rep = ingest_bytes(&mut run, "checkpoint-30/trainer_state.json", doc, 1 << 20);
+    run.finalize();
+    assert_eq!(rep.format, "hf trainer_state");
+    assert_eq!(series(&run, "loss").step, [10.0, 20.0, 30.0]);
+    assert_eq!(series(&run, "eval_loss").step, [20.0]);
+    assert_eq!(run.config["max_steps"], 100);
+    // a script that merely mentions tfevents is not a TensorBoard file
+    assert_eq!(detect("gen_tfevents.py", b"import os\n"), Format::Text);
+}

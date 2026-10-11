@@ -106,11 +106,12 @@ export function drawPanel(c: DrawCtx): DrawOut {
     const ct = traces.map((t, i) => ({ t, i })).filter(({ t }) => (t.cell || '') === cell);
     const cbox = split ? h('div', { class: 'bcell' }, wrap) : wrap;
     if (split) h('div', { class: 'ctitle' }, cbox, cell || '(none)');
-    const series = ct.map(({ t, i }, k) => {
+    const series = ct.map(({ t, i }) => {
       const f = fcs.get(t.label);
       return {
         name: shortName(t, ct.map((x) => x.t)) + (meta.by ? `  [${meta.by}=${t.color}]` : ''), trace: t, color: colour(i),
-        area: k === 0 && !meta.by && !anyBand && nTr <= 6 && !split, xs: t.xs, ys: t.ys, raw: t.raw,
+        // a wash under the line only when it is the one visible series: under an overlay it hides the others
+        area: nTr === 1 && !hiddenTrace(p, t) && !meta.by && !anyBand && !split, xs: t.xs, ys: t.ys, raw: t.raw,
         band: t.band ? { lo: t.lo, hi: t.hi } : null, hidden: hiddenTrace(p, t), y2: p.view.y2 === t.label,
         ghost: f && f.none === undefined ? { xs: f.xs, ys: f.ys, lo: f.lo, hi: f.hi } : null,
         fresh: t.runs.some((r) => now - (fresh.get(p.id + '\u0001' + r) || 0) < 20000),

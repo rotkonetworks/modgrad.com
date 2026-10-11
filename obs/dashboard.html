@@ -149,6 +149,7 @@ input[type=range] { width: 160px; }
 
 <script type="module">
 import init, * as A from './pkg/modgrad_obs_analysis.js';
+import { attachLive, indexURL, prepareLive } from './live.js';
 
 const NS = 'http://www.w3.org/2000/svg';
 const $ = (id) => document.getElementById(id);
@@ -393,6 +394,17 @@ function chart2d(parent, o) {
 
   const me = {
     panel,
+    // live data: replace one series' points and redraw, keeping the zoom (live.js)
+    update(name, xs, ys, raw) {
+      const s = series.find((q) => q.name === name);
+      if (!s) return false;
+      s.X = Array.from(xs, tx); s.Y = Array.from(ys); s.S = nums(raw || ys);
+      [fx0, fx1] = finiteRange(series.map((q) => q.X).concat(ghosts.map((q) => q.G.X)));
+      if (!Number.isFinite(fx0)) { fx0 = 0; fx1 = 1; }
+      if (fx1 === fx0) { fx0 -= 0.5; fx1 += 0.5; }
+      render();
+      return true;
+    },
     setView(v, fromGroup) {
       if (v && v.x0 <= fx0 && v.x1 >= fx1 && v.y0 === undefined) v = null;
       view = v; render();
@@ -406,6 +418,7 @@ function chart2d(parent, o) {
     },
   };
   if (group) group.charts.add(me);
+  panel.chart = me;
 
   // overlay: hover hairline, rubber band, and the event surface (created once, above the layer)
   const hair = svgEl('line', { y1: T, y2: T + ph, style: 'stroke:var(--muted);stroke-width:1;display:none', 'shape-rendering': 'crispEdges' }, svg);
@@ -803,7 +816,7 @@ function renderRuns() {
   const col = COLS.find((c) => c[0] === S.sort.k) || COLS[1];
   const rows = S.runs.filter((r) => matches(r, q)).sort((a, b) => { const x = col[1](a), y = col[1](b); return (x > y ? 1 : x < y ? -1 : 0) * S.sort.dir; });
   for (const r of rows) {
-    const tr = h('tr', {}, t);
+    const tr = h('tr', { 'data-run': r.id }, t);
     const cb = h('input', { type: 'checkbox' }, h('td', {}, tr));
     cb.checked = S.sel.has(r.id);
     cb.addEventListener('change', () => { cb.checked ? S.sel.add(r.id) : S.sel.delete(r.id); onSelection(); });
@@ -896,7 +909,7 @@ async function renderHistory() {
     if (!p.series.length) { h('div', { class: 'note' }, box, `${p.k}: no data in the selected runs`); continue; }
     const notes = fc ? addForecasts(p.series, hz) : null;
     // legend stats on raw values; history panels share their x range
-    chart2d(box, { title: p.k + (w > 0 ? `  (EMA ${w.toFixed(2)})` : ''), xlabel: useT ? 'time' : 'step', xfmt: useT ? fmtTime : fmtTick, series: p.series.map((s) => ({ ...s })), legendHead: p.series.length > 6 ? `${p.series.length} runs (colours repeat after 6)` : '', group: $('xsync').checked ? 'history:' + (useT ? 't' : 'step' + (fc ? ':f' + hz.key : '')) : null, ghostNotes: notes });
+    chart2d(box, { title: p.k + (w > 0 ? `  (EMA ${w.toFixed(2)})` : ''), xlabel: useT ? 'time' : 'step', xfmt: useT ? fmtTime : fmtTick, series: p.series.map((s) => ({ ...s })), legendHead: p.series.length > 6 ? `${p.series.length} runs (colours repeat after 6)` : '', group: $('xsync').checked ? 'history:' + (useT ? 't' : 'step' + (fc ? ':f' + hz.key : '')) : null, ghostNotes: notes }).dataset.key = p.k;
   }
 }
 
@@ -1172,7 +1185,8 @@ function rerenderAll() { renderHistory(); renderCross(); renderArrays(true); }
 async function main() {
   try { await init(); } catch (e) { err('could not load ./pkg/modgrad_obs_analysis_bg.wasm (' + e + '). Build it with scripts/build_obs_wasm.sh and serve this folder over HTTP.'); return; }
   // server mode when the API answers, else static files next to the page
-  try { const r = await fetch('api/index'); if (r.ok) { const j = await r.json(); if (j.server) { S.api = true; S.index = j; } } } catch (e) { /* static mode */ }
+  await prepareLive();
+  try { const r = await fetch(indexURL()); if (r.ok) { const j = await r.json(); if (j.server) { S.api = true; S.index = j; } } } catch (e) { /* static mode */ }
   if (!S.api) { try { S.index = await getJSON('index.json'); } catch (e) { err('could not load index.json (' + e + '). Run scripts/obs_collect.sh and serve this folder over HTTP: python3 -m http.server --directory obs 8781'); return; } }
   S.runs = S.index.runs; for (const r of S.runs) S.byId.set(r.id, r);
   for (const e of S.index.errors || []) err('export error: ' + JSON.stringify(e));
@@ -1189,7 +1203,7 @@ async function main() {
   $('filter').addEventListener('input', renderRuns);
   $('reload').addEventListener('click', async () => {
     S.cache.clear();
-    try { S.index = S.api ? await (await fetch('api/index')).json() : await getJSON('index.json'); } catch (e) { err(String(e)); return; }
+    try { S.index = S.api ? await (await fetch(indexURL())).json() : await getJSON('index.json'); } catch (e) { err(String(e)); return; }
     S.runs = S.index.runs; S.byId.clear(); for (const r of S.runs) S.byId.set(r.id, r);
     renderRuns(); refreshMetricSelect(); refreshArrayRuns(); rerenderAll();
   });
@@ -1211,6 +1225,7 @@ async function main() {
   $('astep').addEventListener('input', () => renderArrays(true));
   $('atick').addEventListener('input', () => renderArrays(true));
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', rerenderAll);
+  if (S.api) attachLive({ S, A, $, src, renderRuns, refreshMetricSelect, renderHistory, onSelection });
 }
 main();
 </script>

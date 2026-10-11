@@ -251,7 +251,7 @@ pub(crate) async fn index(AxState(st): AxState<AppState>, Query(q): Query<HashMa
     let filter = q.get("filter").cloned().or_else(|| project.as_ref().map(|p| format!("{p}/")));
     match read(&st, ReadRequest::ListRuns { filter }).await? {
         ReadResponse::Runs(runs) => {
-            let runs: Vec<Value> = runs.into_iter().filter(keep).collect(); ok_json(json!({ "generated_unix": modgrad_obs::now_unix(), "runs": runs, "errors": [], "server": true, "project": project }))
+            let runs: Vec<Value> = runs.into_iter().filter(keep).collect(); ok_json(json!({ "generated_unix": modgrad_obs::now_unix(), "runs": runs, "errors": [], "server": true, "project": project, "dev": st.auth.dev() }))
         }
         _ => Err(ApiError::NotFound),
     }

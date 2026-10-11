@@ -59,8 +59,10 @@ table.runs a { color: inherit; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 540px), 540px)); gap: 14px; align-items: start; }
 .panel { width: 100%; max-width: 540px; background: var(--panel); }
 .panel .ptitle { font: 600 12px var(--mono); text-align: center; margin: 0 0 2px; overflow-wrap: anywhere; }
-.panel svg { display: block; width: 100%; height: auto; }
+.panel svg { display: block; width: 100%; height: auto; user-select: none; -webkit-user-select: none; }
 .panel svg.drag { cursor: grab; touch-action: none; }
+.panel svg.zoom { touch-action: pan-y; }
+.panel svg:focus { outline: none; }
 .panel .sub { font: 11px var(--mono); color: var(--muted); text-align: center; }
 table.legend { border-collapse: collapse; width: 100%; font: 11px var(--mono); margin-top: 2px; }
 table.legend td, table.legend th { padding: 0 4px; text-align: right; white-space: nowrap; }
@@ -111,6 +113,7 @@ input[type=range] { width: 160px; }
   <label>metrics <select id="metrics" multiple></select></label>
   <label>x <select id="xaxis"><option value="step">step</option><option value="t">time</option></select></label>
   <label>EMA <input type="range" id="ema" min="0" max="0.99" step="0.01" value="0"><span id="emaval" style="font-family:var(--mono)">0.00</span></label>
+  <label><input type="checkbox" id="xsync" checked> link x zoom</label>
 </div>
 <div class="note">First selected run is drawn as a solid area, the rest as 1 px lines. Legend statistics are over the raw (unsmoothed) values. Single-point series are drawn as squares.</div>
 <div class="grid" id="history"></div>
@@ -246,7 +249,7 @@ function legendTable(parent, rows, extraHead) {
     }
     h('td', { class: 'name', title: r.name }, tr, r.name);
     const st = r.stats || Array.from(A.legend_stats(nums(r.values || [])));
-    for (const v of st) h('td', {}, tr, fmt(v));
+    for (const v of st) h('td', {}, tr, Number.isFinite(v) ? fmt(v) : '-');
   }
   return t;
 }
@@ -256,113 +259,282 @@ function kvTable(parent, pairs) {
 }
 
 // ------------------------------------------------------------ 2D chart (RRD look)
+// Zoom: drag = x range (y refits to what is visible), alt-drag = box, shift-drag = pan,
+// ctrl/cmd + wheel = zoom at the cursor, double-click or Esc = reset. Charts that share
+// o.group share their x range. Legend Max/Avg/Min/Cur cover the visible window only.
+const ZOOM_GROUPS = new Map(); // name -> { view, charts: Set }
+let clipSeq = 0;
 function chart2d(parent, o) {
   const W = 540, H = 210, L = 58, R = 14, T = 10, B = 28;
   const pw = W - L - R, ph = H - T - B;
   const panel = h('div', { class: 'panel' }, parent);
   h('div', { class: 'ptitle' }, panel, o.title);
-  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': o.title }, panel);
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': o.title, tabindex: 0, class: 'zoom' }, panel);
+  const sub = h('div', { class: 'sub' }, panel);
   const tx = o.xlog ? (x) => (x > 0 ? Math.log10(x) : NaN) : (x) => x;
-  const series = o.series.map((s) => ({ ...s, X: Array.from(s.xs, tx), Y: Array.from(s.ys) }));
-  let [x0, x1] = finiteRange(series.map((s) => s.X));
-  let [y0, y1] = finiteRange(series.map((s) => s.Y));
-  if (!Number.isFinite(x0)) { x0 = 0; x1 = 1; }
-  if (!Number.isFinite(y0)) { y0 = 0; y1 = 1; }
-  if (x1 === x0) { x0 -= 0.5; x1 += 0.5; }
-  if (y1 === y0) { const d = Math.abs(y0) * 0.05 || 0.5; y0 -= d; y1 += d; }
-  let yt = Array.from(A.nice_ticks(y0, y1, 5));
-  if (yt.length > 1) { // widen to whole tick steps so the frame starts and ends on a gridline
-    const st = yt[1] - yt[0];
-    y0 = Math.floor(y0 / st + 1e-9) * st; y1 = Math.ceil(y1 / st - 1e-9) * st;
-    yt = Array.from(A.nice_ticks(y0, y1, 5));
-  }
-  const xt = Array.from(A.nice_ticks(x0, x1, 6));
-  const X = (x) => L + ((x - x0) / (x1 - x0)) * pw;
-  const Y = (y) => T + ph - ((y - y0) / (y1 - y0)) * ph;
-  const g = svgEl('g', { 'shape-rendering': 'crispEdges' }, svg);
-  for (const t of yt) { svgEl('line', { x1: L, x2: L + pw, y1: Y(t), y2: Y(t), style: 'stroke:var(--grid);stroke-dasharray:1 2' }, g); }
-  for (const t of xt) { if (t >= x0 && t <= x1) svgEl('line', { x1: X(t), x2: X(t), y1: T, y2: T + ph, style: 'stroke:var(--grid);stroke-dasharray:1 2' }, g); }
-  const lab = svgEl('g', { style: 'font:10px var(--mono);fill:var(--ink)' }, svg);
-  for (const t of yt) { const e = svgEl('text', { x: L - 4, y: Y(t) + 3, 'text-anchor': 'end' }, lab); e.textContent = fmtTick(t); }
   const xf = o.xlog ? (t) => fmtTick(Math.pow(10, t)) : (o.xfmt || fmtTick);
-  for (const t of xt) { if (t >= x0 && t <= x1) { const e = svgEl('text', { x: X(t), y: T + ph + 13, 'text-anchor': 'middle' }, lab); e.textContent = xf(t); } }
-  if (o.xlabel) { const e = svgEl('text', { x: L + pw, y: H - 3, 'text-anchor': 'end', style: 'fill:var(--muted)' }, lab); e.textContent = o.xlabel; }
-  if (o.ylabel) { const e = svgEl('text', { x: 10, y: T + ph / 2, transform: `rotate(-90 10 ${T + ph / 2})`, 'text-anchor': 'middle', style: 'fill:var(--muted)' }, lab); e.textContent = o.ylabel; }
-  const plot = svgEl('g', {}, svg);
-  const segs = (s) => { // contiguous finite runs
-    const out = []; let cur = [];
-    for (let i = 0; i < s.X.length; i++) {
-      if (Number.isFinite(s.X[i]) && Number.isFinite(s.Y[i])) cur.push([X(s.X[i]), Y(s.Y[i])]);
-      else if (cur.length) { out.push(cur); cur = []; }
+  const series = o.series.map((s) => ({ ...s, X: Array.from(s.xs, tx), Y: Array.from(s.ys), S: nums(s.raw || s.ys) }));
+  let [fx0, fx1] = finiteRange(series.map((s) => s.X));
+  if (!Number.isFinite(fx0)) { fx0 = 0; fx1 = 1; }
+  if (fx1 === fx0) { fx0 -= 0.5; fx1 += 0.5; }
+  const cid = 'clip' + (++clipSeq);
+  let layer = null, legend = null, x0, x1, y0, y1;
+  const group = o.group ? (ZOOM_GROUPS.get(o.group) || ZOOM_GROUPS.set(o.group, { view: null, charts: new Set() }).get(o.group)) : null;
+  let view = group ? group.view : null; // {x0, x1, y0?, y1?} in transformed x
+  const inX = (x) => x >= x0 && x <= x1;
+
+  function render() {
+    x0 = view ? view.x0 : fx0; x1 = view ? view.x1 : fx1;
+    if (view && view.y0 !== undefined) { y0 = view.y0; y1 = view.y1; }
+    else {
+      // fit y to the visible points plus the nearest point either side, so lines leaving the window stay in frame
+      const near = (s) => s.Y.filter((_, i) => inX(s.X[i]) || (s.X[i] < x0 && !(s.X[i + 1] < x0)) || (s.X[i] > x1 && !(s.X[i - 1] > x1)));
+      [y0, y1] = finiteRange(series.map(near));
+      if (!Number.isFinite(y0)) [y0, y1] = finiteRange(series.map((s) => s.Y));
+      if (!Number.isFinite(y0)) { y0 = 0; y1 = 1; }
+      if (y1 === y0) { const d = Math.abs(y0) * 0.05 || 0.5; y0 -= d; y1 += d; }
     }
-    if (cur.length) out.push(cur);
-    return out;
+    let yt = Array.from(A.nice_ticks(y0, y1, 5));
+    if (yt.length > 1 && !(view && view.y0 !== undefined)) { // widen to whole tick steps so the frame starts and ends on a gridline
+      const st = yt[1] - yt[0];
+      y0 = Math.floor(y0 / st + 1e-9) * st; y1 = Math.ceil(y1 / st - 1e-9) * st;
+      yt = Array.from(A.nice_ticks(y0, y1, 5));
+    }
+    const xt = Array.from(A.nice_ticks(x0, x1, 6));
+    const X = (x) => L + ((x - x0) / (x1 - x0)) * pw;
+    const Y = (y) => T + ph - ((y - y0) / (y1 - y0)) * ph;
+    const next = svgEl('g', {});
+    const cp = svgEl('clipPath', { id: cid }, svgEl('defs', {}, next));
+    svgEl('rect', { x: L, y: T, width: pw, height: ph }, cp);
+    const g = svgEl('g', { 'shape-rendering': 'crispEdges' }, next);
+    for (const t of yt) if (t >= y0 - 1e-12 && t <= y1 + 1e-12) svgEl('line', { x1: L, x2: L + pw, y1: Y(t), y2: Y(t), style: 'stroke:var(--grid);stroke-dasharray:1 2' }, g);
+    for (const t of xt) if (inX(t)) svgEl('line', { x1: X(t), x2: X(t), y1: T, y2: T + ph, style: 'stroke:var(--grid);stroke-dasharray:1 2' }, g);
+    const lab = svgEl('g', { style: 'font:10px var(--mono);fill:var(--ink)' }, next);
+    for (const t of yt) if (t >= y0 - 1e-12 && t <= y1 + 1e-12) { const e = svgEl('text', { x: L - 4, y: Y(t) + 3, 'text-anchor': 'end' }, lab); e.textContent = fmtTick(t); }
+    for (const t of xt) if (inX(t)) { const e = svgEl('text', { x: X(t), y: T + ph + 13, 'text-anchor': 'middle' }, lab); e.textContent = xf(t); }
+    if (o.xlabel) { const e = svgEl('text', { x: L + pw, y: H - 3, 'text-anchor': 'end', style: 'fill:var(--muted)' }, lab); e.textContent = o.xlabel; }
+    if (o.ylabel) { const e = svgEl('text', { x: 10, y: T + ph / 2, transform: `rotate(-90 10 ${T + ph / 2})`, 'text-anchor': 'middle', style: 'fill:var(--muted)' }, lab); e.textContent = o.ylabel; }
+    const plot = svgEl('g', { 'clip-path': `url(#${cid})` }, next);
+    const segs = (s) => { // contiguous finite runs
+      const out = []; let cur = [];
+      for (let i = 0; i < s.X.length; i++) {
+        if (Number.isFinite(s.X[i]) && Number.isFinite(s.Y[i])) cur.push([X(s.X[i]), Y(s.Y[i])]);
+        else if (cur.length) { out.push(cur); cur = []; }
+      }
+      if (cur.length) out.push(cur);
+      return out;
+    };
+    const dots = view && series.every((s) => s.X.filter(inX).length <= 60); // zoomed in far enough: mark samples
+    for (const s of series.filter((s) => s.area)) {
+      for (const sg of segs(s)) {
+        if (sg.length === 1) { svgEl('rect', { x: sg[0][0] - 2.5, y: sg[0][1] - 2.5, width: 5, height: 5, style: `fill:var(${s.color})` }, plot); continue; }
+        const d = 'M' + sg.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join('L') + `L${sg[sg.length - 1][0].toFixed(1)},${T + ph}L${sg[0][0].toFixed(1)},${T + ph}Z`;
+        svgEl('path', { d, style: `fill:var(${s.color});stroke:none` }, plot);
+      }
+    }
+    for (const s of series.filter((s) => !s.area)) {
+      for (const sg of segs(s)) {
+        if (sg.length === 1) { svgEl('rect', { x: sg[0][0] - 2.5, y: sg[0][1] - 2.5, width: 5, height: 5, style: `fill:none;stroke:var(${s.color});stroke-width:1` }, plot); continue; }
+        svgEl('path', { d: 'M' + sg.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join('L'), style: `fill:none;stroke:var(${s.color});stroke-width:1` }, plot);
+      }
+    }
+    if (dots) for (const s of series) for (const sg of segs(s)) for (const p of sg) svgEl('rect', { x: p[0] - 1.5, y: p[1] - 1.5, width: 3, height: 3, style: `fill:var(--bg);stroke:var(${s.area ? '--frame' : s.color});stroke-width:1` }, plot);
+    if (o.marker) for (const m of o.marker) svgEl('line', { x1: X(tx(m)), x2: X(tx(m)), y1: T, y2: T + ph, style: 'stroke:var(--c3);stroke-width:1;stroke-dasharray:3 2' }, plot);
+    svgEl('rect', { x: L + 0.5, y: T + 0.5, width: pw - 1, height: ph, style: 'fill:none;stroke:var(--frame);stroke-width:1', 'shape-rendering': 'crispEdges' }, next);
+    if (layer) layer.replaceWith(next); else svg.insertBefore(next, svg.firstChild);
+    layer = next;
+    // legend: statistics over the visible window
+    const rows = series.map((s) => {
+      const vis = []; for (let i = 0; i < s.S.length; i++) if (inX(s.X[i])) vis.push(s.S[i]);
+      return { name: s.name, color: s.color, area: s.area, stats: Array.from(A.legend_stats(nums(vis))) };
+    });
+    const nl = legendTable(h('div', {}), rows, o.legendHead).parentNode;
+    if (legend) legend.replaceWith(nl); else panel.appendChild(nl);
+    legend = nl;
+    sub.textContent = view
+      ? `showing ${xf(+x0.toPrecision(3))} to ${xf(+x1.toPrecision(3))}${view.y0 !== undefined ? `, y ${fmtTick(+y0.toPrecision(3))} to ${fmtTick(+y1.toPrecision(3))}` : ''}; double-click or Esc to reset`
+      : 'drag to zoom, alt-drag box, shift-drag pan, ctrl+wheel zoom';
+  }
+
+  const me = {
+    panel,
+    setView(v, fromGroup) {
+      if (v && v.x0 <= fx0 && v.x1 >= fx1 && v.y0 === undefined) v = null;
+      view = v; render();
+      if (group && !fromGroup) {
+        group.view = v ? { x0: v.x0, x1: v.x1 } : null;
+        for (const c of [...group.charts]) {
+          if (!c.panel.isConnected) { group.charts.delete(c); continue; }
+          if (c !== me) c.setView(group.view, true);
+        }
+      }
+    },
   };
-  for (const s of series.filter((s) => s.area)) {
-    for (const sg of segs(s)) {
-      if (sg.length === 1) { svgEl('rect', { x: sg[0][0] - 2.5, y: sg[0][1] - 2.5, width: 5, height: 5, style: `fill:var(${s.color})` }, plot); continue; }
-      const d = 'M' + sg.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join('L') + `L${sg[sg.length - 1][0].toFixed(1)},${T + ph}L${sg[0][0].toFixed(1)},${T + ph}Z`;
-      svgEl('path', { d, style: `fill:var(${s.color});stroke:none` }, plot);
-    }
-  }
-  for (const s of series.filter((s) => !s.area)) {
-    for (const sg of segs(s)) {
-      if (sg.length === 1) { svgEl('rect', { x: sg[0][0] - 2.5, y: sg[0][1] - 2.5, width: 5, height: 5, style: `fill:none;stroke:var(${s.color});stroke-width:1` }, plot); continue; }
-      svgEl('path', { d: 'M' + sg.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join('L'), style: `fill:none;stroke:var(${s.color});stroke-width:1` }, plot);
-    }
-  }
-  if (o.marker) for (const m of o.marker) svgEl('line', { x1: X(tx(m)), x2: X(tx(m)), y1: T, y2: T + ph, style: 'stroke:var(--c3);stroke-width:1;stroke-dasharray:3 2' }, plot);
-  svgEl('rect', { x: L + 0.5, y: T + 0.5, width: pw - 1, height: ph, style: 'fill:none;stroke:var(--frame);stroke-width:1', 'shape-rendering': 'crispEdges' }, svg);
-  // hover: hairline + boxed values at the nearest x of each series
+  if (group) group.charts.add(me);
+
+  // overlay: hover hairline, rubber band, and the event surface (created once, above the layer)
   const hair = svgEl('line', { y1: T, y2: T + ph, style: 'stroke:var(--muted);stroke-width:1;display:none', 'shape-rendering': 'crispEdges' }, svg);
-  const hit = svgEl('rect', { x: L, y: T, width: pw, height: ph, style: 'fill:transparent' }, svg);
+  const band = svgEl('rect', { style: 'fill:var(--hl);fill-opacity:0.6;stroke:var(--muted);stroke-width:1;stroke-dasharray:2 2;display:none', 'shape-rendering': 'crispEdges' }, svg);
+  const hit = svgEl('rect', { x: L, y: T, width: pw, height: ph, style: 'fill:transparent;cursor:crosshair' }, svg);
   const pt = svg.createSVGPoint();
-  hit.addEventListener('mousemove', (ev) => {
-    pt.x = ev.clientX; pt.y = ev.clientY;
-    const p = pt.matrixTransform(svg.getScreenCTM().inverse());
-    const xv = x0 + ((p.x - L) / pw) * (x1 - x0);
+  const local = (ev) => { pt.x = ev.clientX; pt.y = ev.clientY; return pt.matrixTransform(svg.getScreenCTM().inverse()); };
+  const clampX = (p) => Math.min(L + pw, Math.max(L, p));
+  const clampY = (p) => Math.min(T + ph, Math.max(T, p));
+  const dataX = (px) => x0 + ((px - L) / pw) * (x1 - x0);
+  const dataY = (py) => y0 + ((T + ph - py) / ph) * (y1 - y0);
+  let drag = null;
+  hit.addEventListener('pointerdown', (ev) => {
+    if (ev.button !== 0) return;
+    const p = local(ev);
+    drag = { mode: ev.shiftKey ? 'pan' : ev.altKey ? 'box' : 'x', px: p.x, py: p.y, x0, x1, y0, y1, moved: false, hadY: view && view.y0 !== undefined };
+    hit.setPointerCapture(ev.pointerId); hideTip(); hair.style.display = 'none';
+    if (drag.mode === 'pan') hit.style.cursor = 'grabbing';
+    ev.preventDefault(); svg.focus({ preventScroll: true });
+  });
+  hit.addEventListener('pointermove', (ev) => {
+    const p = local(ev);
+    if (drag) {
+      if (Math.abs(p.x - drag.px) > 3 || Math.abs(p.y - drag.py) > 3) drag.moved = true;
+      if (!drag.moved) return;
+      if (drag.mode === 'pan') {
+        const span = drag.x1 - drag.x0;
+        let nx0 = drag.x0 - ((p.x - drag.px) / pw) * span;
+        nx0 = Math.min(Math.max(nx0, fx0), fx1 - span);
+        const v = { x0: nx0, x1: nx0 + span };
+        if (drag.hadY) { const ys = drag.y1 - drag.y0, dy = ((p.y - drag.py) / ph) * ys; v.y0 = drag.y0 + dy; v.y1 = drag.y1 + dy; }
+        me.setView(v);
+        return;
+      }
+      const ax = clampX(drag.px), bx = clampX(p.x);
+      const ay = drag.mode === 'box' ? clampY(drag.py) : T, by = drag.mode === 'box' ? clampY(p.y) : T + ph;
+      Object.entries({ x: Math.min(ax, bx), y: Math.min(ay, by), width: Math.abs(bx - ax), height: Math.abs(by - ay) }).forEach(([k, v]) => band.setAttribute(k, v));
+      band.style.display = '';
+      return;
+    }
+    const xv = dataX(p.x);
     const lines = [];
     let best = null;
     for (const s of series) {
       let bi = -1, bd = Infinity;
-      for (let i = 0; i < s.X.length; i++) { const d = Math.abs(s.X[i] - xv); if (d < bd && Number.isFinite(s.Y[i])) { bd = d; bi = i; } }
+      for (let i = 0; i < s.X.length; i++) { const d = Math.abs(s.X[i] - xv); if (d < bd && Number.isFinite(s.Y[i]) && inX(s.X[i])) { bd = d; bi = i; } }
       if (bi >= 0) { lines.push(`${s.name.slice(0, 28).padEnd(28)} ${fmt(s.Y[bi]).padStart(9)}`); if (best === null) best = s.X[bi]; }
     }
     if (best === null) return;
-    hair.setAttribute('x1', X(best)); hair.setAttribute('x2', X(best)); hair.style.display = '';
+    const hx = L + ((best - x0) / (x1 - x0)) * pw;
+    hair.setAttribute('x1', hx); hair.setAttribute('x2', hx); hair.style.display = '';
     showTip(ev, `${o.xlabel || 'x'} ${xf(best)}\n` + lines.join('\n'));
   });
+  const endDrag = (ev) => {
+    if (!drag) return;
+    const d = drag; drag = null; band.style.display = 'none'; hit.style.cursor = 'crosshair';
+    if (!d.moved) { if (o.onclick && ev.type === 'pointerup') o.onclick(ev); return; }
+    if (d.mode === 'pan') return;
+    const p = local(ev);
+    const ax = clampX(d.px), bx = clampX(p.x);
+    if (Math.abs(bx - ax) < 4) return;
+    const v = { x0: dataX(Math.min(ax, bx)), x1: dataX(Math.max(ax, bx)) };
+    if (d.mode === 'box') {
+      const ay = clampY(d.py), by = clampY(p.y);
+      if (Math.abs(by - ay) >= 4) { v.y0 = dataY(Math.max(ay, by)); v.y1 = dataY(Math.min(ay, by)); }
+    }
+    me.setView(v);
+  };
+  hit.addEventListener('pointerup', endDrag);
+  hit.addEventListener('pointercancel', endDrag);
   hit.addEventListener('mouseleave', () => { hair.style.display = 'none'; hideTip(); });
-  if (o.onclick) hit.addEventListener('click', o.onclick);
-  legendTable(panel, o.series.map((s) => ({ name: s.name, color: s.color, area: s.area, values: s.ys })), o.legendHead);
+  hit.addEventListener('dblclick', () => me.setView(null));
+  svg.addEventListener('keydown', (ev) => { if (ev.key === 'Escape' && view) { me.setView(null); ev.preventDefault(); } });
+  hit.addEventListener('wheel', (ev) => {
+    if (!(ev.ctrlKey || ev.metaKey)) return; // plain wheel scrolls the page
+    ev.preventDefault();
+    const c = dataX(local(ev).x), f = Math.pow(1.0015, ev.deltaY);
+    let nx0 = c - (c - x0) * f, nx1 = c + (x1 - c) * f;
+    if (nx1 - nx0 >= fx1 - fx0) { me.setView(view && view.y0 !== undefined ? { x0: fx0, x1: fx1, y0: view.y0, y1: view.y1 } : null); return; }
+    if (nx0 < fx0) { nx1 += fx0 - nx0; nx0 = fx0; }
+    if (nx1 > fx1) { nx0 -= nx1 - fx1; nx1 = fx1; }
+    me.setView({ x0: nx0, x1: nx1 });
+  }, { passive: false });
+  render();
   return panel;
 }
 
 // ------------------------------------------------------------ 3D scene (gnuplot splot look)
 class Scene {
+  // Navigation: drag = rotate, shift/right/middle-drag = pan, wheel = zoom at the cursor
+  // (once the view has focus; ctrl+wheel always), two fingers = pinch zoom + pan,
+  // keys: arrows rotate, shift+arrows pan, +/- zoom, 0 or Esc reset; double-click resets.
   constructor(parent, o) {
-    this.o = o; this.az = o.az ?? -50; this.el = o.el ?? 28;
-    this.W = 540; this.H = o.H || 380;
+    this.o = o; this.W = 540; this.H = o.H || 380;
+    this.reset(false);
     this.panel = h('div', { class: 'panel' }, parent);
     h('div', { class: 'ptitle' }, this.panel, o.title);
-    this.svg = svgEl('svg', { viewBox: `0 0 ${this.W} ${this.H}`, class: 'drag', role: 'img', 'aria-label': o.title }, this.panel);
-    this.sub = h('div', { class: 'sub' }, this.panel, 'drag to rotate, double-click to reset');
-    let drag = null;
-    this.svg.addEventListener('pointerdown', (e) => { if (e.target.dataset.pick) return; drag = [e.clientX, e.clientY, this.az, this.el]; this.svg.setPointerCapture(e.pointerId); });
-    this.svg.addEventListener('pointermove', (e) => {
+    const svg = this.svg = svgEl('svg', { viewBox: `0 0 ${this.W} ${this.H}`, class: 'drag', role: 'img', 'aria-label': o.title, tabindex: 0 }, this.panel);
+    this.sub = h('div', { class: 'sub' }, this.panel, 'drag rotate, shift-drag pan, click then wheel to zoom, double-click reset');
+    const pt = svg.createSVGPoint();
+    const local = (e) => { pt.x = e.clientX; pt.y = e.clientY; return pt.matrixTransform(svg.getScreenCTM().inverse()); };
+    const ptrs = new Map(); // pointerId -> {x, y} in viewBox units
+    let drag = null, pinch = null;
+    const pinchState = () => { const [a, b] = [...ptrs.values()]; return { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2, zoom: this.zoom, panX: this.panX, panY: this.panY }; };
+    svg.addEventListener('contextmenu', (e) => e.preventDefault());
+    svg.addEventListener('pointerdown', (e) => {
+      if (e.target.dataset.pick) return;
+      e.preventDefault(); svg.focus({ preventScroll: true });
+      svg.setPointerCapture(e.pointerId);
+      const p = local(e); ptrs.set(e.pointerId, p);
+      if (ptrs.size === 2) { drag = null; pinch = pinchState(); return; }
+      const pan = e.shiftKey || e.button === 1 || e.button === 2;
+      drag = { pan, x: p.x, y: p.y, az: this.az, el: this.el, panX: this.panX, panY: this.panY };
+      svg.style.cursor = pan ? 'move' : 'grabbing';
+    });
+    svg.addEventListener('pointermove', (e) => {
+      if (!ptrs.has(e.pointerId)) return;
+      const p = local(e); ptrs.set(e.pointerId, p);
+      if (pinch && ptrs.size === 2) {
+        const q = pinchState(), f = q.d / pinch.d;
+        this.zoomAt(pinch.mx, pinch.my, pinch.zoom * f, pinch);
+        this.panX += q.mx - pinch.mx; this.panY += q.my - pinch.my;
+        this.render(); return;
+      }
       if (!drag) return;
-      this.az = drag[2] + (e.clientX - drag[0]) * 0.5;
-      this.el = Math.max(-89, Math.min(89, drag[3] + (e.clientY - drag[1]) * 0.4));
+      if (drag.pan) { this.panX = drag.panX + (p.x - drag.x); this.panY = drag.panY + (p.y - drag.y); }
+      else { this.az = drag.az + (p.x - drag.x) * 0.5; this.el = Math.max(-89, Math.min(89, drag.el + (p.y - drag.y) * 0.4)); }
       this.render();
     });
-    const end = () => { drag = null; };
-    this.svg.addEventListener('pointerup', end); this.svg.addEventListener('pointercancel', end);
-    this.svg.addEventListener('dblclick', () => { this.az = o.az ?? -50; this.el = o.el ?? 28; this.render(); });
+    const end = (e) => { ptrs.delete(e.pointerId); if (ptrs.size < 2) pinch = null; if (!ptrs.size) { drag = null; svg.style.cursor = ''; } };
+    svg.addEventListener('pointerup', end); svg.addEventListener('pointercancel', end);
+    svg.addEventListener('dblclick', () => this.reset(true));
+    svg.addEventListener('wheel', (e) => {
+      if (!(e.ctrlKey || e.metaKey || document.activeElement === svg)) return; // otherwise the page scrolls
+      e.preventDefault();
+      const p = local(e);
+      this.zoomAt(p.x, p.y, this.zoom * Math.pow(0.998, e.deltaY));
+      this.render();
+    }, { passive: false });
+    svg.addEventListener('keydown', (e) => {
+      const k = e.key, st = 24;
+      if (k === 'ArrowLeft' || k === 'ArrowRight' || k === 'ArrowUp' || k === 'ArrowDown') {
+        const dx = k === 'ArrowLeft' ? -1 : k === 'ArrowRight' ? 1 : 0, dy = k === 'ArrowUp' ? -1 : k === 'ArrowDown' ? 1 : 0;
+        if (e.shiftKey) { this.panX += dx * st; this.panY += dy * st; } else { this.az += dx * 5; this.el = Math.max(-89, Math.min(89, this.el + dy * 5)); }
+      } else if (k === '+' || k === '=') this.zoomAt(this.W / 2, this.H / 2, this.zoom * 1.2);
+      else if (k === '-' || k === '_') this.zoomAt(this.W / 2, this.H / 2, this.zoom / 1.2);
+      else if (k === '0' || k === 'Escape') { this.reset(false); }
+      else return;
+      e.preventDefault(); this.render();
+    });
+  }
+  reset(draw) { this.az = this.o.az ?? -50; this.el = this.o.el ?? 28; this.zoom = 1; this.panX = 0; this.panY = 0; if (draw) this.render(); }
+  // zoom to z keeping the viewBox point (mx, my) fixed; `from` = {zoom, panX, panY} to zoom relative to
+  zoomAt(mx, my, z, from = this) {
+    z = Math.max(0.3, Math.min(40, z));
+    const cx = this.W / 2, cy = (this.H - 16) / 2, r = z / from.zoom;
+    this.panX = mx - cx - (mx - cx - from.panX) * r;
+    this.panY = my - cy - (my - cy - from.panY) * r;
+    this.zoom = z;
   }
   // flat [x,y,z,...] in the unit box -> [{x,y,d}] screen points
   proj(xyz) {
     const p = A.project(Float64Array.from(xyz), this.az, this.el);
-    const sc = Math.min(this.W, this.H - 30) / 3.7, cx = this.W / 2, cy = (this.H - 16) / 2;
+    const sc = this.zoom * Math.min(this.W, this.H - 30) / 3.7, cx = this.W / 2 + this.panX, cy = (this.H - 16) / 2 + this.panY;
     const out = [];
     for (let i = 0; i < p.length; i += 3) out.push({ x: cx + p[i] * sc, y: cy - p[i + 1] * sc, d: p[i + 2] });
     return out;
@@ -674,10 +846,8 @@ async function renderHistory() {
   if (!keys.length) { h('div', { class: 'note' }, box, 'Select one or more metrics.'); return; }
   for (const p of panels) {
     if (!p.series.length) { h('div', { class: 'note' }, box, `${p.k}: no data in the selected runs`); continue; }
-    const panel = chart2d(box, { title: p.k + (w > 0 ? `  (EMA ${w.toFixed(2)})` : ''), xlabel: useT ? 'time' : 'step', xfmt: useT ? fmtTime : fmtTick, series: p.series.map((s) => ({ ...s })), legendHead: p.series.length > 6 ? `${p.series.length} runs (colours repeat after 6)` : '' });
-    // legend stats on raw values
-    const rows = panel.querySelectorAll('table.legend tr');
-    p.series.forEach((s, i) => { const st = A.legend_stats(nums(s.raw)); const tds = rows[i + 1].querySelectorAll('td'); for (let c = 0; c < 4; c++) tds[2 + c].textContent = fmt(st[c]); });
+    // legend stats on raw values; history panels share their x range
+    chart2d(box, { title: p.k + (w > 0 ? `  (EMA ${w.toFixed(2)})` : ''), xlabel: useT ? 'time' : 'step', xfmt: useT ? fmtTime : fmtTick, series: p.series.map((s) => ({ ...s })), legendHead: p.series.length > 6 ? `${p.series.length} runs (colours repeat after 6)` : '', group: $('xsync').checked ? 'history:' + (useT ? 't' : 'step') : null });
   }
 }
 
@@ -939,6 +1109,7 @@ async function main() {
   $('selnone').addEventListener('click', () => { S.sel.clear(); onSelection(); });
   $('metrics').addEventListener('change', renderHistory);
   $('xaxis').addEventListener('change', renderHistory);
+  $('xsync').addEventListener('change', () => { for (const k of [...ZOOM_GROUPS.keys()]) if (k.startsWith('history:')) ZOOM_GROUPS.delete(k); renderHistory(); });
   $('ema').addEventListener('input', renderHistory);
   $('xmetric').addEventListener('change', () => renderCross());
   $('xfield').addEventListener('change', () => { delete $('xlog').dataset.touched; renderCross(); });

@@ -5,8 +5,13 @@ edition = "2024"
 description = "Zebra-style tower services (Ingest, State, ReadState) serving modgrad-obs runs; storage and selection only, no analysis"
 license = "MIT"
 
+[features]
+default = ["h3"]
+# HTTP/3 (QUIC) listener next to the TCP one: `modgrad-server --h3 <udp addr>`.
+h3 = ["dep:quinn", "dep:h3", "dep:h3-quinn", "dep:rustls", "dep:rcgen", "dep:bytes", "dep:http-body-util"]
+
 [dependencies]
-modgrad-obs = { path = "../modgrad-obs" }
+modgrad-obs = { path = "../modgrad-obs", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -19,8 +24,18 @@ base64 = "0.22"
 sha2 = "0.10"
 async-stream = "0.3"
 futures-util = { version = "0.3", default-features = false }
+quinn = { version = "0.11.9", optional = true, default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+h3 = { version = "0.0.8", optional = true }
+h3-quinn = { version = "0.0.10", optional = true }
+rustls = { version = "0.23.37", optional = true, default-features = false, features = ["ring", "std"] }
+rcgen = { version = "0.13.2", optional = true }
+bytes = { version = "1.11", optional = true }
+http-body-util = { version = "0.1", optional = true }
 
 [dev-dependencies]
+# the CLI's HTTP/3 client, to test the listener with the code that talks to it
+modgrad-obs = { path = "../modgrad-obs", features = ["h3"] }
+rcgen = "0.13.2"
 tower-test = "0.4"
 proptest = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }

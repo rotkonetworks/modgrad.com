@@ -171,6 +171,16 @@ returned. If the server is unreachable, rows are spooled to disk and
 `modgrad push <spool dir>` resends them. `modgrad tail <run>` prints the latest
 values with sparklines.
 
+Transport: with an https server that advertises HTTP/3 (`Alt-Svc: h3`),
+`modgrad run` and `push` send rows over QUIC (UDP), else over TCP. If UDP is
+blocked (common on HPC clusters and corporate networks), the handshake gives
+up after 1.5 s and the run continues over TCP for the rest of the process.
+One line says which: `modgrad: pushing over HTTP/3 (udp ...)` or
+`modgrad: pushing over HTTPS (UDP blocked, fell back: ...)`. `--h3` tries
+HTTP/3 even for an http:// URL, `--no-h3` (or `MODGRAD_H3=0`) never tries it,
+and `--tls-ca <pem>` trusts a dev server's self-signed certificate. The spool
+works the same over either. curl, browsers and the Python client use TCP.
+
 To instrument a silent script: add one print per logging step, e.g.
 `print(f"step {step} loss={loss:.6f} lr={lr:.3e}", flush=True)`, then wrap it
 with `modgrad run`.
@@ -178,7 +188,8 @@ with `modgrad run`.
 ## 3. HTTP API
 
 Full reference, plain text: `curl $OBS/api/v1`. Bodies are JSON whatever the
-Content-Type; errors are JSON with a corrected example.
+Content-Type; errors are JSON with a corrected example. A server started with
+`--h3 <udp addr>` also serves the same API over HTTP/3; TCP always works.
 
     modgrad-server --root obs --dev                     # local server; --dev = writes need no token
     curl -X POST $OBS/api/v1/projects               # -> {"project", "token": "obsp_...", "board"}

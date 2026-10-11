@@ -13,7 +13,7 @@ default = []
 wasm = ["dep:wasm-bindgen"]
 
 [dependencies]
-modgrad-obs = { path = "../modgrad-obs" }
+modgrad-obs = { path = "../modgrad-obs", default-features = false }
 modgrad-obs-wandb = { path = "../modgrad-obs-wandb" }
 prost = "0.13"
 serde_json = "1"

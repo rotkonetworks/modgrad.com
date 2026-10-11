@@ -49,6 +49,6 @@ COPY --from=build /out/bin/ /usr/local/bin/
 COPY --from=web /src/obs/web/dist/ /srv/obs/
 USER obs
 VOLUME /data
-EXPOSE 8790
+EXPOSE 8790 8790/udp
 ENV RUST_LOG=info
 ENTRYPOINT ["/usr/bin/tini", "--", "modgrad-server", "--root", "/data", "--static", "/srv/obs", "--listen", "0.0.0.0:8790"]

@@ -13,17 +13,21 @@
 //! modgrad show <run_dir>
 //!     Print keys, last step and skipped-line count of a run.
 //! modgrad run [--server URL] [--token T] [--name N] [--project P] [--offline [--out DIR]]
-//!         [--sys-interval S] [--no-gpu] [--spool DIR] [--json] -- <command...>
+//!         [--sys-interval S] [--no-gpu] [--spool DIR] [--h3 | --no-h3] [--tls-ca PEM] [--json] -- <command...>
 //!     Run a command, pass its output through unchanged, parse metric lines,
 //!     sample RSS/CPU/GPU, and stream it all to the server (or a local run).
+//!     Rows go over HTTP/3 when the server offers it (https + Alt-Svc) or
+//!     with --h3, else TCP (always with --no-h3); a blocked UDP path falls
+//!     back to TCP after 1.5 s.
 //! modgrad tail <run id | run dir> [--server URL] [--keys a,b] [--follow] [--interval S] [--json]
 //!     Latest values and a sparkline per metric.
-//! modgrad push <spool dir> [--json]
+//! modgrad push <spool dir> [--h3 | --no-h3] [--tls-ca PEM] [--json]
 //!     Resend rows an earlier `modgrad run` could not deliver.
 //! ```
 //!
 //! Environment: MODGRAD_URL (server, default http://127.0.0.1:8790), MODGRAD_TOKEN,
-//! MODGRAD_PROJECT. Settings resolve as flag > environment > project file
+//! MODGRAD_PROJECT, MODGRAD_H3=1|0 (same as --h3 / --no-h3), MODGRAD_TLS_CA
+//! (same as --tls-ca). Settings resolve as flag > environment > project file
 //! (`.modgrad.json` here or in a parent directory) > default. No command
 //! prompts; `--json` makes the CLI's own messages one JSON object per line
 //! on stderr (`init --json` prints its one result object on stdout).
@@ -40,15 +44,16 @@ const USAGE: &str = "usage:
   modgrad init [--server URL] [--token T] [--project P] [--local] [--data DIR]
           [--mcp claude|cursor] [--json]                set up this directory (.modgrad.json)
   modgrad run [--server URL] [--token T] [--name N] [--project P] [--offline [--out DIR]]
-          [--sys-interval S] [--no-gpu] [--spool DIR] [--json] -- <command...>
+          [--sys-interval S] [--no-gpu] [--spool DIR] [--h3 | --no-h3] [--tls-ca PEM] [--json] -- <command...>
   modgrad tail <run id | run dir> [--server URL] [--keys a,b] [--follow] [--interval S] [--json]
-  modgrad push <spool dir> [--json]
+  modgrad push <spool dir> [--h3 | --no-h3] [--tls-ca PEM] [--json]
   modgrad legacy <log.txt> <out_run_dir> [--name N] [--source S]
   modgrad export <obs_dir>
   modgrad show <run_dir>
   modgrad mcp [--dir <obs_dir>] [--base-url URL]   MCP server on stdio for coding agents (local data)
   modgrad mcp --url <server> [--token T]           same tools against a modgrad-server (analysis stays local)
 env: MODGRAD_URL (default http://127.0.0.1:8790), MODGRAD_TOKEN, MODGRAD_PROJECT,
+     MODGRAD_H3=1|0 (run/push: HTTP/3 even without Alt-Svc | never), MODGRAD_TLS_CA (extra CA, PEM),
      MODGRAD_DATA (local data dir: mcp, run --offline, tail), MODGRAD_MCP_URL (modgrad mcp server, same as --url);
      the pre-rename OBS_* names still work
 project file: .modgrad.json (from modgrad init) in this or a parent directory;
@@ -93,6 +98,22 @@ fn mcp_command() -> String {
 /// The local data directory: MODGRAD_DATA > the project file's `data` > `obs`.
 fn data_dir(pf: Option<&project::Found>) -> PathBuf {
     env("MODGRAD_DATA").map(PathBuf::from).or_else(|| pf.map(|f| f.data_dir())).unwrap_or_else(|| "obs".into())
+}
+
+/// `--h3` / `--no-h3` / `MODGRAD_H3` (1 or 0), and `--tls-ca` /
+/// `MODGRAD_TLS_CA` (installed for curl and QUIC).
+fn transport_flags(args: &[String]) -> net::H3 {
+    if let Some(ca) = flag(args, "--tls-ca").or_else(|| env("MODGRAD_TLS_CA")) {
+        net::set_tls_ca(PathBuf::from(ca));
+    }
+    let has = |k: &str| args.iter().any(|a| a == k);
+    match (has("--h3"), has("--no-h3"), env("MODGRAD_H3").as_deref()) {
+        (_, true, _) => net::H3::Off,
+        (true, _, _) => net::H3::Force,
+        (_, _, Some("0" | "off" | "false")) => net::H3::Off,
+        (_, _, Some(_)) => net::H3::Force,
+        _ => net::H3::Auto,
+    }
 }
 
 fn main() {
@@ -150,6 +171,7 @@ fn main() {
                 gpu: !has("--no-gpu"),
                 json: has("--json"),
                 spool_root: flag(&flags, "--spool").map(PathBuf::from).unwrap_or_else(spool_root),
+                h3: transport_flags(&flags),
                 cmd,
             };
             std::process::exit(run::run(o));
@@ -193,7 +215,7 @@ fn main() {
         }
         Some("push") => {
             let Some(d) = args.get(2) else { usage() };
-            std::process::exit(run::push(Path::new(d), args.iter().any(|a| a == "--json")));
+            std::process::exit(run::push(Path::new(d), args.iter().any(|a| a == "--json"), transport_flags(&args)));
         }
         Some("help" | "--help" | "-h") => {
             println!("{USAGE}");

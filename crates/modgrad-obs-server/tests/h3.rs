@@ -116,3 +116,62 @@ fn bodies_over_the_cap_are_refused() {
     assert!(t0.elapsed() < Duration::from_secs(20));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// SSE over HTTP/3: the response streams (hello at once, rows as they are
+/// logged), it does not wait for the body to end. A raw quinn + h3 client,
+/// since the CLI's client reads whole responses.
+#[test]
+fn sse_streams_over_h3() {
+    use bytes::Buf;
+    let root = tmp("sse");
+    serve(root.clone(), 18952);
+    let base = "http://127.0.0.1:18952";
+    let (r, n) = net::push_request("POST", &format!("{base}/api/v1/runs/sse/log"), None, Some(br#"{"step": 0, "loss": 1}"#), "application/json", Duration::from_secs(10), net::H3::Force);
+    let r = r.unwrap();
+    assert!(r.ok());
+    assert_eq!(n.unwrap().transport, "h3");
+    let token = r.json()["token"].as_str().map(String::from);
+    let (cert, _) = cert();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let got = rt.block_on(async {
+        let mut roots = rustls::RootCertStore::empty();
+        use rustls::pki_types::pem::PemObject;
+        roots.add(rustls::pki_types::CertificateDer::from_pem_slice(cert.as_bytes()).unwrap()).unwrap();
+        let mut tls = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(rustls::crypto::ring::default_provider()))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        tls.alpn_protocols = vec![b"h3".to_vec()];
+        let mut ep = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        ep.set_default_client_config(quinn::ClientConfig::new(std::sync::Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(tls).unwrap())));
+        let conn = ep.connect("127.0.0.1:18952".parse().unwrap(), "127.0.0.1").unwrap().await.unwrap();
+        let (mut driver, mut send) = ::h3::client::new(h3_quinn::Connection::new(conn)).await.unwrap();
+        tokio::spawn(async move { std::future::poll_fn(|cx| driver.poll_close(cx)).await });
+        let req = axum::http::Request::get("https://127.0.0.1:18952/api/v1/runs/sse/stream").body(()).unwrap();
+        let mut s = send.send_request(req).await.unwrap();
+        s.finish().await.unwrap();
+        let resp = s.recv_response().await.unwrap();
+        assert_eq!(resp.headers()["content-type"], "text/event-stream");
+        let mut text = String::new();
+        let mut logged = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !text.contains("event: rows") {
+            let chunk = tokio::time::timeout_at(deadline, s.recv_data()).await.expect("no SSE event within 10 s").unwrap().expect("stream ended");
+            text.push_str(&String::from_utf8_lossy(chunk.chunk()));
+            if text.contains("event: hello") && !logged {
+                // log a row while the stream is open; it has to arrive as an event
+                logged = true;
+                let base = base.to_string();
+                let token = token.clone();
+                tokio::task::spawn_blocking(move || {
+                    let (r, _) = net::push_request("POST", &format!("{base}/api/v1/runs/sse/log"), token.as_deref(), Some(br#"{"step": 1, "loss": 0.5}"#), "application/json", Duration::from_secs(10), net::H3::Force);
+                    assert!(r.unwrap().ok());
+                });
+            }
+        }
+        text
+    });
+    assert!(got.contains("event: hello") && got.contains("\"loss\":0.5"), "{got}");
+    let _ = std::fs::remove_dir_all(&root);
+}

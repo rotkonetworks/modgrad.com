@@ -11,6 +11,11 @@
 //!   fresh `anon-<random>` project, which expires after
 //!   [`AuthConfig::anon_expiry_days`] unless claimed.
 //!
+//! An **SSH key** (the `ssh` feature) is an identity of its own: its SHA256
+//! fingerprint maps to one anonymous project, made on first connect and
+//! kept for good (the key is the claim). `ssh <server> token` mints
+//! expiring project tokens for that project.
+//!
 //! Run ids: with a project token, an id without `/` is put in the token's
 //! project (`exp1` -> `anon-3f9a…/exp1`). Writing to a run that does not
 //! exist creates it (no mandatory create call).
@@ -90,6 +95,8 @@ struct Db {
     projects: BTreeMap<String, ProjectTok>,
     /// claim-token hash -> project
     claims: BTreeMap<String, String>,
+    /// SSH key fingerprint (`SHA256:…`) -> project
+    ssh_keys: BTreeMap<String, String>,
 }
 
 /// The token store. Cheap to clone (shared).
@@ -162,6 +169,11 @@ impl Auth {
                         db.claims.insert(h.clone(), p.into());
                     }
                 }
+                for (fp, p) in v["ssh_keys"].as_object().into_iter().flatten() {
+                    if let Some(p) = p.as_str() {
+                        db.ssh_keys.insert(fp.clone(), p.into());
+                    }
+                }
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
@@ -179,6 +191,7 @@ impl Auth {
             "runs": db.runs,
             "projects": db.projects.iter().map(|(h, p)| (h.clone(), json!({"project": p.project, "expires_unix": p.expires_unix}))).collect::<serde_json::Map<_, _>>(),
             "claims": db.claims,
+            "ssh_keys": db.ssh_keys,
         });
         let tmp = path.with_extension("json.tmp");
         {
@@ -202,22 +215,61 @@ impl Auth {
         Ok(t)
     }
 
-    /// Issue an anonymous project: `anon-<16 hex>`, a project token, and a
-    /// claim token (for attaching an SSH key or email later).
-    pub fn new_anon_project(&self) -> Result<AnonProject, AuthError> {
+    /// A fresh `anon-<16 hex>` name, if anonymous projects are allowed.
+    fn anon_name(&self) -> Result<String, AuthError> {
         if !self.cfg.anon_projects {
             return Err(AuthError::Forbidden("anonymous projects are disabled on this server".into()));
         }
-        let project = format!("{ANON_PREFIX}{}", random_hex(8).map_err(store_err)?);
+        Ok(format!("{ANON_PREFIX}{}", random_hex(8).map_err(store_err)?))
+    }
+
+    /// When an anonymous token issued now expires (None = never).
+    fn anon_expiry(&self) -> Option<f64> {
+        let d = self.cfg.anon_expiry_days;
+        (d > 0.0).then(|| modgrad_obs::now_unix() + d * 86400.0)
+    }
+
+    /// Issue an anonymous project: `anon-<16 hex>`, a project token, and a
+    /// claim token (for attaching an SSH key or email later).
+    pub fn new_anon_project(&self) -> Result<AnonProject, AuthError> {
+        let project = self.anon_name()?;
         let token = format!("obsp_{}", random_hex(24).map_err(store_err)?);
         let claim = format!("obsc_{}", random_hex(24).map_err(store_err)?);
-        let d = self.cfg.anon_expiry_days;
-        let expires_unix = (d > 0.0).then(|| modgrad_obs::now_unix() + d * 86400.0);
+        let expires_unix = self.anon_expiry();
         let mut db = self.db.write().unwrap();
         db.projects.insert(hash(&token), ProjectTok { project: project.clone(), expires_unix });
         db.claims.insert(hash(&claim), project.clone());
         self.persist(&db).map_err(store_err)?;
         Ok(AnonProject { project, token, claim, expires_unix })
+    }
+
+    /// The project of an SSH key (by its `SHA256:…` fingerprint), made on
+    /// first sight. Returns (project, new). With anonymous projects
+    /// disabled, known keys still work and new ones are refused.
+    pub fn ssh_key_project(&self, fingerprint: &str) -> Result<(String, bool), AuthError> {
+        if let Some(p) = self.db.read().unwrap().ssh_keys.get(fingerprint) {
+            return Ok((p.clone(), false));
+        }
+        let project = self.anon_name()?;
+        let mut db = self.db.write().unwrap();
+        // a concurrent first connect of the same key may have won the race
+        if let Some(p) = db.ssh_keys.get(fingerprint) {
+            return Ok((p.clone(), false));
+        }
+        db.ssh_keys.insert(fingerprint.to_string(), project.clone());
+        self.persist(&db).map_err(store_err)?;
+        Ok((project, true))
+    }
+
+    /// A new project token for an SSH key's project, expiring like an
+    /// anonymous one. Returns (token, expires_unix).
+    pub fn ssh_project_token(&self, project: &str) -> Result<(String, Option<f64>), AuthError> {
+        let token = format!("obsp_{}", random_hex(24).map_err(store_err)?);
+        let expires_unix = self.anon_expiry();
+        let mut db = self.db.write().unwrap();
+        db.projects.insert(hash(&token), ProjectTok { project: project.into(), expires_unix });
+        self.persist(&db).map_err(store_err)?;
+        Ok((token, expires_unix))
     }
 
     /// The project a claim token is for.
@@ -286,6 +338,9 @@ impl Auth {
 #[derive(Debug, Clone)]
 pub struct AuthedRequest {
     pub token: Option<String>,
+    /// A credential the transport already established (SSH: the key's
+    /// project); takes the place of `token`.
+    pub cred: Option<Cred>,
     pub req: IngestRequest,
 }
 
@@ -333,7 +388,10 @@ impl Service<AuthedRequest> for Authed {
     fn call(&mut self, r: AuthedRequest) -> Self::Future {
         let (auth, read, inner) = (self.auth.clone(), self.read.clone(), self.inner.clone());
         Box::pin(async move {
-            let cred = auth.cred(r.token.as_deref())?;
+            let cred = match r.cred {
+                Some(c) => c,
+                None => auth.cred(r.token.as_deref())?,
+            };
             let mut req = r.req;
             let id = Auth::resolve(req.run(), &cred);
             set_run(&mut req, id.clone());
@@ -452,6 +510,11 @@ mod tests {
         assert_eq!(b.cred(Some(&pt)).unwrap(), Cred::Project("p".into()));
         assert_eq!(b.cred(Some(&anon.token)).unwrap(), Cred::Project(anon.project.clone()));
         assert_eq!(b.claim_project(&anon.claim), Some(anon.project));
+        let (kp, new) = b.ssh_key_project("SHA256:abc").unwrap();
+        assert!(new && kp.starts_with(ANON_PREFIX));
+        let c = Auth::open(&dir, AuthConfig { anon_projects: false, ..cfg(false) }).unwrap();
+        assert_eq!(c.ssh_key_project("SHA256:abc").unwrap(), (kp, false), "a known key survives a restart and --no-anon");
+        assert!(c.ssh_key_project("SHA256:other").is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -66,6 +66,8 @@ impl IngestRequest {
         }
     }
     /// Split into (run, records) for batchable requests.
+    // the Err is the request itself, handed back by value on purpose
+    #[allow(clippy::result_large_err)]
     fn into_records(self) -> Result<(String, Vec<Record>), IngestRequest> {
         match self {
             IngestRequest::Log { run, step, t, items } => Ok((run, vec![Record::Log { step, t, items }])),

@@ -304,3 +304,32 @@ fn ssh_stalled_reader_frees_its_slot() {
         std::thread::sleep(Duration::from_millis(300));
     }
 }
+
+/// `ssh <server> login`: a one-time link whose token signs a browser in
+/// with the key (here consumed over HTTP without a cookie). Ports 18950-18951.
+#[test]
+fn ssh_login_link() {
+    if !have("ssh") || !have("ssh-keygen") {
+        eprintln!("skipped: no ssh / ssh-keygen");
+        return;
+    }
+    let s = server("login", 18950, 18951, &[]);
+    let keys = tmp("login-keys");
+    let k = keygen(&keys, "k");
+    let (o, out, err) = run(ssh(&s, Some(&k), &[], &["login"]), b"");
+    assert!(o.status.success(), "{o:?} {err}");
+    let link = out.trim();
+    let prefix = format!("{}/login#ssh=", s.http);
+    assert!(link.starts_with(&prefix) && !link.contains('\n'), "stdout is just the link: {out:?}");
+    assert!(err.contains("10 minutes") && err.contains("SHA256:"), "{err}");
+    let consume = |token: &str| net::request("POST", &format!("{}/api/v1/auth/ssh/consume", s.http), None, Some(serde_json::json!({ "token": token }).to_string().as_bytes()), "application/json", Duration::from_secs(10)).unwrap();
+    let r = consume(&link[prefix.len()..]);
+    assert!(r.ok(), "{} {}", r.status, String::from_utf8_lossy(&r.body));
+    let v = r.json();
+    assert_eq!((v["created"].as_bool(), v["linked"].as_bool()), (Some(false), Some(false)), "the key's first connect made its account: {v}");
+    let r = consume(&link[prefix.len()..]);
+    assert_eq!(r.status, 410, "single use");
+    // the help text lists the verb
+    let (_, out, _) = run(ssh(&s, Some(&k), &[], &["help"]), b"");
+    assert!(out.contains("ssh <server> login"), "{out}");
+}

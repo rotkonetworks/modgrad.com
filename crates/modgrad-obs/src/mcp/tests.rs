@@ -247,7 +247,8 @@ fn compare_tool() {
 fn board_tool() {
     let (root, s) = fixture("board");
     let t = ok(&s, "make_board", json!({"query": "heldout_nll{run=~\"small|mid\"}"}));
-    assert!(t.contains("URL: file://") && t.contains("#board="), "{t}");
+    // no base URL: link the default local viewer and say how to start it
+    assert!(t.contains("URL: http://127.0.0.1:8790/#board=") && t.contains(&format!("start one in a terminal: modgrad-server --root {}", root.display())), "{t}");
     assert!(t.contains("g/small, g/mid"), "{t}");
     let boards: Vec<_> = std::fs::read_dir(root.join("boards")).unwrap().collect();
     assert_eq!(boards.len(), 1);
@@ -263,6 +264,10 @@ fn board_tool() {
     assert!(t.contains("2 panels") && t.contains("heldout_nll for 2 runs"), "{t}");
     let (t, e) = s.call_tool("make_board", &json!({"query": "heldout_nll{run=~\"small/*\"}"}));
     assert!(e && t.contains("g/small"), "{t}");
+    // a base URL (--base-url, or the project file's server) is used as is
+    let based = Server::new(Box::new(LocalStore::open(&root, Some("https://obs.example.org/".into()))));
+    let t = ok(&based, "make_board", json!({"query": "heldout_nll{run=~\"small\"}"}));
+    assert!(t.contains("URL: https://obs.example.org/#board=") && !t.contains("modgrad-server"), "{t}");
 }
 
 #[test]

@@ -46,6 +46,10 @@ pub trait Store: Send + Sync {
     }
     /// Persist a board; returns `(where it was saved, URL that opens it)`.
     fn save_board(&self, slug: &str, board: &Value) -> Result<(String, String), String>;
+    /// How to make that URL work when nothing may be serving it yet.
+    fn view_hint(&self) -> Option<String> {
+        None
+    }
 }
 
 // ------------------------------------------------------------------ local
@@ -53,10 +57,15 @@ pub trait Store: Send + Sync {
 pub struct LocalStore {
     /// The obs root (holds `runs/`, `boards/`, `dashboard.html`).
     pub root: PathBuf,
-    /// Base URL of a served dashboard (`http://localhost:8080/`); boards
-    /// open as `file://<root>/dashboard.html#…` when unset.
+    /// Base URL of a served dashboard (`http://localhost:8080/`). When unset,
+    /// boards link to a local `modgrad-server` on its default address and
+    /// the tool says how to start it.
     pub base_url: Option<String>,
 }
+
+/// Where `modgrad-server` listens by default: the board link for local data
+/// when no `--base-url` or project file names a server.
+pub const LOCAL_VIEWER: &str = "http://127.0.0.1:8790";
 
 /// Seconds after which an unfinished run with no new rows counts as stale.
 pub const RUNNING_WINDOW_S: f64 = 15.0 * 60.0;
@@ -187,14 +196,13 @@ impl Store for LocalStore {
         let path = dir.join(format!("{slug}.json"));
         let tmp = dir.join(format!("{slug}.json.tmp"));
         std::fs::write(&tmp, serde_json::to_vec_pretty(board).unwrap_or_default()).and_then(|_| std::fs::rename(&tmp, &path)).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-        let url = match &self.base_url {
-            Some(b) => format!("{}#board={slug}", b.trim_end_matches('#')),
-            None => {
-                let root = std::fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());
-                format!("file://{}/dashboard.html#board={slug}", root.display())
-            }
-        };
+        let base = self.base_url.as_deref().unwrap_or(LOCAL_VIEWER);
+        let url = format!("{}/#board={slug}", base.trim_end_matches('#').trim_end_matches('/'));
         Ok((path.display().to_string(), url))
+    }
+
+    fn view_hint(&self) -> Option<String> {
+        self.base_url.is_none().then(|| format!("The URL needs a running viewer. If nothing serves {LOCAL_VIEWER} yet, start one in a terminal: modgrad-server --root {}", self.root.display()))
     }
 }
 

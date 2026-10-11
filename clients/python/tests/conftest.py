@@ -14,8 +14,16 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[3]
-SERVER_BIN = Path(os.environ.get("OBS_SERVER_BIN", REPO / "target" / "release" / "modgrad-server"))
-OBS_BIN = Path(os.environ.get("OBS_BIN", REPO / "target" / "release" / "obs"))
+
+
+def _built(name: str) -> Path:
+    """target/release/<name>, else target/debug/<name>."""
+    rel = REPO / "target" / "release" / name
+    return rel if rel.exists() else REPO / "target" / "debug" / name
+
+
+SERVER_BIN = Path(os.environ.get("OBS_SERVER_BIN") or _built("modgrad-server"))
+OBS_BIN = Path(os.environ.get("OBS_BIN") or _built("modgrad"))
 
 
 def free_port() -> int:

@@ -14,13 +14,14 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Union
 
-from . import _auth, _net
+from . import _auth, _net, _project
 from ._sender import Sender, say
 from ._spool import Spool, SpoolBusy, default_root, dir_for
 from ._types import convert, warn_once
 
-# The server used when neither MODGRAD_URL nor MODGRAD_URL is set. It matches the
-# `modgrad` CLI default; change it here once a hosted modgrad server exists.
+# The server used when neither `url`, MODGRAD_URL nor a project file (.modgrad.json from
+# `modgrad init`) names one. It matches the `modgrad` CLI default; change it here once a hosted
+# modgrad server exists.
 DEFAULT_URL = "http://127.0.0.1:8790"
 
 
@@ -644,7 +645,13 @@ def init(project: Optional[str] = None, entity: Optional[str] = None, config: An
         if mode not in ("online", "offline", "disabled"):
             raise Error(f"mode must be online, offline or disabled, got {mode!r}")
 
-        project = project or _env("MODGRAD_PROJECT", "WANDB_PROJECT", "OBS_PROJECT")
+        # argument > environment > project file (.modgrad.json) > default
+        pf = _project.find()
+        env_url = _env("MODGRAD_URL", "OBS_URL")
+        server = (url or env_url or pf.get("server") or DEFAULT_URL).rstrip("/")
+        file_token = _project.token_for(pf, server)
+        token = token or _env("MODGRAD_TOKEN", "OBS_TOKEN") or file_token
+        project = project or _env("MODGRAD_PROJECT", "WANDB_PROJECT", "OBS_PROJECT") or (pf.get("project") if token and token == file_token else None)
         project = sanitize_id(project) if project else None
         name = name or _env("MODGRAD_NAME", "WANDB_NAME")
         id = id or _env("MODGRAD_RUN_ID", "WANDB_RUN_ID")
@@ -661,9 +668,6 @@ def init(project: Optional[str] = None, entity: Optional[str] = None, config: An
         if config_exclude_keys:
             cfg = {k: v for k, v in cfg.items() if k not in config_exclude_keys}
 
-        env_url = _env("MODGRAD_URL", "OBS_URL")
-        server = (url or env_url or DEFAULT_URL).rstrip("/")
-        token = token or _env("MODGRAD_TOKEN", "OBS_TOKEN")
         # no token: write tokenless when a project was named (dev servers),
         # else use (or create) this machine's anonymous project
         anon = token is None and project is None

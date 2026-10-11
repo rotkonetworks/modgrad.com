@@ -10,6 +10,7 @@
 //   run      {run, entry, unix}           a run appeared
 //   rows     {run, rows: [{step, t, key: value}], unix}
 //   events   {run, events: [{step, t, text}], unix}
+//   samples  {run, samples: [{step, t, key, prompt, completion, ...}], n, unix}   n = run's total (SSE only)
 //   summary  {run, finished, summary, unix}
 //   resync   {run?}                        state may be stale: refetch
 //
@@ -17,14 +18,16 @@
 // fails to open (or errors repeatedly), it falls back to polling: api/index for the run list and
 // api/v1/runs/<id>/history?from= for the runs passed to watch(). Both paths emit the same events.
 import type { Run } from '@/logic/types';
+import type { Sample } from '@/logic/samples';
 
-const KINDS = ['hello', 'run', 'rows', 'events', 'summary', 'resync'] as const;
+const KINDS = ['hello', 'run', 'rows', 'events', 'samples', 'summary', 'resync'] as const;
 export type LiveMode = 'idle' | 'connecting' | 'sse' | 'poll';
 export interface Row { step: number; t?: number; [k: string]: number | undefined }
 export interface HelloEv { runs: { run: string; finished?: boolean; updated_unix?: number | null }[]; unix: number }
 export interface RunEv { run: string; entry?: Run; unix: number }
 export interface RowsEv { run: string; rows: Row[]; unix: number }
 export interface EventsEv { run: string; events: { step: number; t?: number; text: string }[]; unix: number }
+export interface SamplesEv { run: string; samples: Sample[]; n: number; unix: number }
 export interface SummaryEv { run: string; finished: boolean; summary: unknown; unix: number }
 export interface LiveOpts { base?: string; project?: string | null; runs?: string[] | null; pollMs?: number; indexMs?: number; openTimeoutMs?: number; fetch?: typeof fetch; EventSource?: typeof EventSource | null }
 

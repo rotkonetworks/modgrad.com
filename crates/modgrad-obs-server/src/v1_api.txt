@@ -106,6 +106,22 @@ Boards
 
   GET /api/index with a project token (Authorization header) lists that project's runs.
 
+SSH (servers started with --ssh <addr>)
+---------------------------------------
+  Zero install: your SSH key is your account (one anonymous project per key,
+  made on first connect; any key type; no password).
+  python train.py 2>&1 | ssh <host>              stream stdout into a new run (auto name);
+                                                 output is echoed back unchanged, metric
+                                                 lines (as .../text) become rows, the
+                                                 dashboard URL is printed first on stderr.
+                                                 EOF finishes the run with exit_code 0; a
+                                                 dropped connection leaves it unfinished.
+  python train.py 2>&1 | ssh <host> run <name>   the same, run <project>/<name>
+  ssh <host> token                               a project token (obsp_…) for this API,
+                                                 `modgrad init` and Python; anonymous expiry
+  ssh <host> runs | tail <run> | help            this key's runs, latest values, usage
+  Links use the server's --public-url.
+
 MCP (for coding agents)
 -----------------------
   Preferred: run the tools locally against this server; analysis then runs on

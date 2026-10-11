@@ -2,6 +2,8 @@
 //! modgrad-server [--root <obs dir>] [--listen 127.0.0.1:8790] [--static <dir> | --no-static]
 //!            [--dev] [--no-anon] [--anon-expiry-days 30] [--mcp]
 //!            [--h3 <udp addr> (--tls-cert <pem> --tls-key <pem> | --h3-self-signed) [--h3-advertise <port>]]
+//!            [--ssh <tcp addr> [--ssh-idle <secs>] [--ssh-max-conns 256] [--ssh-max-per-key 8]]
+//!            [--public-url <https://obs.example.org>]
 //! modgrad-server token add <project> [--root <obs dir>] [--json]
 //! ```
 //!
@@ -26,6 +28,17 @@
 //! writes the certificate to `<root>/h3-self-signed.pem` for clients'
 //! `--tls-ca`. The TCP listener stays plain HTTP (TLS there is the
 //! reverse proxy's job).
+//!
+//! `--ssh <tcp addr>` (feature `ssh`, on by default) adds the SSH door:
+//! `python train.py 2>&1 | ssh -p <port> <host>` streams a log into a run,
+//! the client's key being its account (see `ssh.rs`). The host key is
+//! `<root>/ssh_host_ed25519`, made on first start. `--ssh-idle` closes a
+//! connection silent that long (default 3600 s).
+//!
+//! `--public-url` is the base of links the server prints and returns
+//! (dashboard URLs, board links); without it HTTP responses use the
+//! request's Host / X-Forwarded-* headers and the SSH door uses
+//! `http://<--listen>`.
 
 use modgrad_obs_server::auth::{Auth, AuthConfig};
 use modgrad_obs_server::{IngestConfig, http};
@@ -94,12 +107,18 @@ async fn main() {
     });
     let mut state = http::AppState::new(ingest, read, static_dir, auth).with_boards(root.join("boards"));
     if has("--mcp") {
-        let mut a = lis.local_addr().expect("bound address");
-        if a.ip().is_unspecified() {
-            a.set_ip(if a.is_ipv4() { std::net::Ipv4Addr::LOCALHOST.into() } else { std::net::Ipv6Addr::LOCALHOST.into() });
-        }
-        state = state.with_mcp(format!("http://{a}"));
+        state = state.with_mcp(loopback_url(&lis));
         eprintln!("modgrad-server: hosted MCP endpoint at /mcp (tool analysis runs on this server)");
+    }
+    let public_url = flag("--public-url").map(|u| u.trim_end_matches('/').to_string());
+    if let Some(u) = &public_url {
+        state = state.with_public_url(u.clone());
+    }
+    #[cfg(feature = "ssh")]
+    ssh_listener(&args, &root, &state, public_url.clone().unwrap_or_else(|| loopback_url(&lis))).await;
+    #[cfg(not(feature = "ssh"))]
+    if has("--ssh") {
+        eprintln!("modgrad-server: built without the ssh feature; --ssh ignored");
     }
     let app = http::router(state);
     #[cfg(feature = "h3")]
@@ -157,4 +176,42 @@ fn h3_listener(args: &[String], root: &std::path::Path, listen: &str) -> Option<
     let port = flag("--h3-advertise").and_then(|p| p.parse().ok()).unwrap_or(bound);
     eprintln!("modgrad-server: HTTP/3 on udp {addr} (advertised as Alt-Svc h3=\":{port}\"; open this UDP port)");
     Some((ep, port))
+}
+
+/// `http://<bound addr>`, with an unspecified IP (0.0.0.0) as loopback.
+fn loopback_url(lis: &tokio::net::TcpListener) -> String {
+    let mut a = lis.local_addr().expect("bound address");
+    if a.ip().is_unspecified() {
+        a.set_ip(if a.is_ipv4() { std::net::Ipv4Addr::LOCALHOST.into() } else { std::net::Ipv6Addr::LOCALHOST.into() });
+    }
+    format!("http://{a}")
+}
+
+/// `--ssh <tcp addr>`: load or make the host key, bind, and serve in the
+/// background. Exits on a bad flag or bind error.
+#[cfg(feature = "ssh")]
+async fn ssh_listener(args: &[String], root: &std::path::Path, state: &http::AppState, public: String) {
+    use modgrad_obs_server::ssh::{SshConfig, fingerprint, host_key, serve};
+    let flag = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1).cloned());
+    let die = |m: String| -> ! {
+        eprintln!("modgrad-server: {m}");
+        std::process::exit(1)
+    };
+    let Some(addr) = flag("--ssh") else { return };
+    let num = |k: &str, d: f64| flag(k).map_or(d, |v| v.parse::<f64>().ok().filter(|x| *x > 0.0).unwrap_or_else(|| die(format!("{k} {v:?}: want a positive number"))));
+    let d = SshConfig::default();
+    let cfg = SshConfig {
+        idle: std::time::Duration::from_secs_f64(num("--ssh-idle", d.idle.as_secs_f64())),
+        max_conns: num("--ssh-max-conns", d.max_conns as f64) as usize,
+        max_per_key: num("--ssh-max-per-key", d.max_per_key as f64) as usize,
+        ..d
+    };
+    std::fs::create_dir_all(root).ok();
+    let key = host_key(root).unwrap_or_else(|e| die(format!("ssh host key: {e}")));
+    let lis = tokio::net::TcpListener::bind(&addr).await.unwrap_or_else(|e| die(format!("bind ssh {addr}: {e}")));
+    eprintln!("modgrad-server: ssh on {addr} (host key {}; links to {public})", fingerprint(key.public_key()));
+    if flag("--public-url").is_none() && lis.local_addr().is_ok_and(|a| !a.ip().is_loopback()) {
+        eprintln!("modgrad-server: warning: ssh is reachable from other hosts but its links point at {public}; pass --public-url <https://your.host>");
+    }
+    tokio::spawn(serve(lis, key, state.clone(), public, cfg));
 }

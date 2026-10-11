@@ -1202,6 +1202,7 @@ mod tests {
 pub mod export;
 pub mod legacy;
 pub mod sink;
+pub mod spark;
 pub use sink::{OpenSink, RunAt, Sink};
 pub mod textlog;
 pub mod mcp;

@@ -13,6 +13,31 @@ Build args: `JOBS` (cargo parallelism, default 6). Runs as uid 10001; data
 lives in the `/data` volume (`/data/runs/<run>/`; boards saved by the MCP
 `make_board` tool in `/data/boards/`, opened as `/#board=<name>`). Image ≈ 97 MB. `--dev` (appended to `podman run … modgrad-obs`) accepts writes without a token.
 
+## SSH door (optional)
+
+`python train.py 2>&1 | ssh -p 2222 obs.example.org` streams a training log
+into a new run with nothing installed: the output is echoed back, metric
+lines become rows, the dashboard URL is printed first. The client's SSH key
+is its account (one anonymous project per key; no signup, no password).
+
+    podman run -p 8790:8790 -p 2222:2222 -v obs-data:/data modgrad-obs \
+        --ssh 0.0.0.0:2222 --public-url https://obs.example.org
+
+- **`--public-url`** is the base of the links SSH prints (and, when set, of
+  links in HTTP responses, instead of the request's Host header). Without it
+  SSH links point at the listen address.
+- Port 22 needs root; the image runs as uid 10001, so it listens on 2222.
+  Map public 22 to it (`-p 22:2222`) if the host's own sshd is elsewhere;
+  then users type plain `ssh obs.example.org`.
+- The host key is `/data/ssh_host_ed25519`, made on first start, so it
+  lives in the volume and survives image rebuilds. Back it up with the data.
+- Limits: `--ssh-idle <secs>` (close a silent connection, default 3600),
+  `--ssh-max-conns` (all connections, default 256), `--ssh-max-per-key`
+  (concurrent sessions per key, default 8). Lines over 64 KiB are echoed
+  but only their tail is parsed.
+- Only fixed verbs run (`run`, `token`, `runs`, `tail`, `help`); no shell,
+  no command execution, no forwarding.
+
 ## HTTP/3 (optional)
 
 `modgrad run` and `modgrad push` can send rows over HTTP/3 (QUIC). The server

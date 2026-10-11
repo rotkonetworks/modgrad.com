@@ -29,7 +29,7 @@ pub async fn post_mcp(AxState(st): AxState<AppState>, h: HeaderMap, body: Bytes)
         Err(e) => return (StatusCode::BAD_REQUEST, axum::Json(json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": format!("parse error: {e}")}}))).into_response(),
     };
     let token = crate::v1::bearer(&h);
-    let public = crate::v1::base_url(&h);
+    let public = st.base_url(&h);
     let reply = tokio::task::spawn_blocking(move || {
         let server = Server::new(Box::new(RemoteStore::new(&internal, token)));
         // URLs in tool output (board links, the store description) name the

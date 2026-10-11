@@ -2,6 +2,9 @@
 #
 #   podman build -f deploy/obs/Containerfile -t modgrad-obs .
 #   podman run -p 8790:8790 -v obs-data:/data modgrad-obs
+#   # the SSH door (python train.py | ssh -p 2222 <host>): see README.md
+#   podman run -p 8790:8790 -p 2222:2222 -v obs-data:/data modgrad-obs \
+#       --ssh 0.0.0.0:2222 --public-url https://obs.example.org
 #
 # The server only stores and serves data; every graph, fit and forecast
 # is computed in the viewer's browser by the bundled wasm modules.
@@ -49,6 +52,7 @@ COPY --from=build /out/bin/ /usr/local/bin/
 COPY --from=web /src/obs/web/dist/ /srv/obs/
 USER obs
 VOLUME /data
-EXPOSE 8790 8790/udp
+# 8790 HTTP, 8790/udp HTTP/3 (--h3), 2222 SSH (--ssh; uid 10001 cannot bind 22)
+EXPOSE 8790 8790/udp 2222
 ENV RUST_LOG=info
 ENTRYPOINT ["/usr/bin/tini", "--", "modgrad-server", "--root", "/data", "--static", "/srv/obs", "--listen", "0.0.0.0:8790"]

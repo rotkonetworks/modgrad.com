@@ -36,13 +36,16 @@ pub struct AppState {
     /// `--mcp`: this server's own loopback base URL, which the hosted MCP
     /// endpoint's tools call; None = no `/mcp` route.
     pub mcp_self: Option<String>,
+    /// `--public-url`: the base of links in responses (and the SSH door's
+    /// output); None = the request's Host / X-Forwarded-* headers.
+    pub public_url: Option<String>,
 }
 
 impl AppState {
     /// Wire the v1 extras around an ingest/read pair (spawns the [`Live`] task).
     pub fn new(ingest: IngestService, read: ReadState, static_dir: Option<PathBuf>, auth: Auth) -> AppState {
         let live = Live::spawn(read.clone());
-        AppState { ingest, read, static_dir, auth, live, boards: None, mcp_self: None }
+        AppState { ingest, read, static_dir, auth, live, boards: None, mcp_self: None, public_url: None }
     }
     /// Store boards under `dir` (`<obs root>/boards`, the same place
     /// `modgrad mcp --dir` writes them).
@@ -55,6 +58,15 @@ impl AppState {
     pub fn with_mcp(mut self, self_url: String) -> AppState {
         self.mcp_self = Some(self_url);
         self
+    }
+    /// Links in responses start with `url` (e.g. `https://obs.example.org`).
+    pub fn with_public_url(mut self, url: String) -> AppState {
+        self.public_url = Some(url.trim_end_matches('/').to_string());
+        self
+    }
+    /// The base of links in a response to a request with headers `h`.
+    pub fn base_url(&self, h: &HeaderMap) -> String {
+        self.public_url.clone().unwrap_or_else(|| crate::v1::base_url(h))
     }
     /// The ingest service behind write authorisation.
     pub fn authed(&self) -> Authed {

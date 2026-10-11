@@ -61,7 +61,7 @@ Data lives in an obs directory (default `./obs`): `obs/runs/<run>/` holds
 Name seeds `<config>_s1`, `<config>_s2`, ...: the tools group them and test
 differences against seed noise.
 
-## The four doors
+## The doors
 
 Every door ends in the same place: a run with metrics you can query and chart.
 
@@ -77,6 +77,8 @@ Every door ends in the same place: a run with metrics you can query and chart.
    `#project=<p>` and `#board=<id>` open a run, a project or a saved board.
    Log files (CSV, JSONL, text logs, TensorBoard, W&B offline) can also be
    dropped onto the page.
+5. SSH, the zero-install alternative (servers started with `--ssh`):
+   `python train.py 2>&1 | ssh <host>`. See "SSH" below.
 
 ## 1. MCP
 
@@ -205,6 +207,27 @@ Content-Type; errors are JSON with a corrected example. A server started with
 The first `log` creates the run. `step` is optional (default: last + 1).
 Nested objects flatten with `/`. Re-sending a row is harmless. With a
 project token, a run id without `/` lands in the token's project.
+
+## SSH (nothing to install)
+
+On a server started with `modgrad-server --ssh <addr>`, a training script's
+output can go straight to a run with only an SSH client:
+
+    python train.py 2>&1 | ssh obs.example.org               # new run, auto-named
+    python train.py 2>&1 | ssh obs.example.org run exp1      # run exp1
+    ssh obs.example.org runs                                 # this key's runs
+    ssh obs.example.org tail exp1                            # latest values
+    ssh obs.example.org token                                # a project token for the other doors
+
+The output is echoed back unchanged and metric lines are parsed as by
+`modgrad run`; the dashboard URL is printed first (stderr). EOF finishes the
+run; a dropped connection leaves it unfinished. The SSH key is the account:
+the same key always lands in the same anonymous project; there is no signup.
+`token` prints an `obsp_` token on stdout and, on stderr, the matching
+`modgrad init --server ... --token ...` and curl lines, so the CLI, Python
+and HTTP doors can write to the same project. Prefer `modgrad init` when
+you can install it: it spools when the server is unreachable and samples
+CPU/GPU; the SSH pipe does neither.
 
 ## Framework snippets
 

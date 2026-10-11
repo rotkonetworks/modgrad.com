@@ -280,28 +280,56 @@ pub fn parse_samples(body: &Value) -> Result<Vec<Record>, ApiError> {
     items.into_iter().map(sample_record).collect()
 }
 
-/// Raw log text -> rows via [`modgrad_obs::textlog::parse_line`]. A line
-/// without a step takes the step of the last line in this body that had
-/// one, else "next". Returns (records, lines, unparsed non-empty lines).
-pub fn parse_text(text: &str) -> (Vec<Record>, usize, Vec<String>) {
-    let mut recs = Vec::new();
-    let mut unparsed = Vec::new();
-    let mut carry: Option<u64> = None;
-    let mut lines = 0;
-    for l in text.lines() {
-        lines += 1;
+/// Line-at-a-time text parsing via [`modgrad_obs::textlog::parse_line`],
+/// for streams (the SSH door) as well as whole bodies ([`parse_text`]).
+/// A line without a step takes the step of the last line that had one,
+/// else "next".
+#[derive(Debug, Default, Clone)]
+pub struct TextParser {
+    carry: Option<u64>,
+}
+
+/// What one line of log text was.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TextLine {
+    Row(Record),
+    /// No metrics (blank lines and step-only lines included).
+    Nothing,
+    /// A non-empty line that is not a metric line.
+    Unparsed,
+}
+
+impl TextParser {
+    pub fn line(&mut self, l: &str) -> TextLine {
         match modgrad_obs::textlog::parse_line(l) {
             Some(r) => {
                 if r.step.is_some() {
-                    carry = r.step;
+                    self.carry = r.step;
                 }
                 if r.values.is_empty() {
-                    continue;
+                    return TextLine::Nothing;
                 }
-                recs.push(Record::Log { step: r.step.or(carry).unwrap_or(AUTO_STEP), t: None, items: r.values.into_iter().map(|(k, v)| (k, Item::Scalar(v))).collect() });
+                TextLine::Row(Record::Log { step: r.step.or(self.carry).unwrap_or(AUTO_STEP), t: None, items: r.values.into_iter().map(|(k, v)| (k, Item::Scalar(v))).collect() })
             }
-            None if !l.trim().is_empty() => unparsed.push(l.to_string()),
-            None => {}
+            None if !l.trim().is_empty() => TextLine::Unparsed,
+            None => TextLine::Nothing,
+        }
+    }
+}
+
+/// Raw log text -> rows (see [`TextParser`]); the step carry starts fresh
+/// for each body. Returns (records, lines, unparsed non-empty lines).
+pub fn parse_text(text: &str) -> (Vec<Record>, usize, Vec<String>) {
+    let mut p = TextParser::default();
+    let mut recs = Vec::new();
+    let mut unparsed = Vec::new();
+    let mut lines = 0;
+    for l in text.lines() {
+        lines += 1;
+        match p.line(l) {
+            TextLine::Row(r) => recs.push(r),
+            TextLine::Unparsed => unparsed.push(l.to_string()),
+            TextLine::Nothing => {}
         }
     }
     (recs, lines, unparsed)
@@ -326,7 +354,7 @@ pub fn run_url(base: &str, run: &str) -> String {
 }
 
 async fn call(st: &AppState, token: &Option<String>, req: IngestRequest) -> Result<AuthedResponse, ApiError> {
-    st.authed().oneshot(AuthedRequest { token: token.clone(), req }).await.map_err(ApiError::from_box)
+    st.authed().oneshot(AuthedRequest { token: token.clone(), cred: None, req }).await.map_err(ApiError::from_box)
 }
 
 /// The id a create gets when no name is given: `run-<UTC stamp>-<4 hex>`.
@@ -346,7 +374,7 @@ pub fn auto_name(unix: f64, suffix: &str) -> String {
     format!("run-{y:04}{m:02}{d:02}-{:02}{:02}{:02}-{suffix}", rem / 3600, rem / 60 % 60, rem % 60)
 }
 
-fn suffix() -> String {
+pub(crate) fn suffix() -> String {
     let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
     format!("{:04x}", (n ^ (n >> 16)) & 0xffff)
 }
@@ -385,14 +413,14 @@ async fn create(AxState(st): AxState<AppState>, h: HeaderMap, body: Bytes) -> Ap
     };
     let req = IngestRequest::CreateRun { name, project, config: o.get("config").cloned().unwrap_or(json!({})), meta: o.get("meta").cloned() };
     let a = call(&st, &bearer(&h), req).await?;
-    let base = base_url(&h);
+    let base = st.base_url(&h);
     let v = written(&base, &a, json!({ "log": format!("{base}/api/v1/runs/{}/log", a.run), "text": format!("{base}/api/v1/runs/{}/text", a.run) }));
     Ok((if a.created { StatusCode::CREATED } else { StatusCode::OK }, axum::Json(v)).into_response())
 }
 
 async fn new_project(AxState(st): AxState<AppState>, h: HeaderMap) -> ApiResult {
     let p = st.auth.new_anon_project().map_err(ApiError::Auth)?;
-    let base = base_url(&h);
+    let base = st.base_url(&h);
     let v = json!({
         "project": p.project,
         "token": p.token,
@@ -421,7 +449,7 @@ async fn post_dispatch(AxState(st): AxState<AppState>, Path(path): Path<String>,
         return Err(ApiError::Teach { status: StatusCode::NOT_FOUND, error: format!("no POST endpoint /api/v1/runs/{path}; the run actions are .../log, .../text, .../samples and .../finish"), example: EX_LOG });
     };
     let token = bearer(&h);
-    let base = base_url(&h);
+    let base = st.base_url(&h);
     let mut req_run = run.to_string();
     let mut last: Option<AuthedResponse> = None;
     let mut created = false;
@@ -606,7 +634,7 @@ async fn put_board(AxState(st): AxState<AppState>, Path(name): Path<String>, h: 
         std::fs::rename(&tmp, &path)
     };
     write().map_err(|e| ApiError::Bad(format!("cannot store board {id}: {e}")))?;
-    let base = base_url(&h);
+    let base = st.base_url(&h);
     Ok(axum::Json(json!({ "board": id, "url": format!("{base}/#board={id}"), "get": format!("{base}/api/v1/boards/{id}") })).into_response())
 }
 

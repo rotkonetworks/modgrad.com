@@ -253,7 +253,8 @@ pub fn assemble_surface(run_x: &[f64], off: &[usize], steps: &[f64], vals: &[f64
 
 /// Orthographic view of points already scaled into the unit box
 /// `[-1, 1]³` (x, y horizontal, z up): rotate by azimuth `az` about z,
-/// then tilt by elevation `el` (degrees; gnuplot's `set view` analogue).
+/// then tilt by elevation `el` (degrees; gnuplot's `set view` analogue;
+/// the viewer sits on the −y side, raised by `el`, so far points rise).
 /// Returns `[sx, sy, depth]` per point, `sy` up, `depth` larger = farther.
 pub fn project(xyz: &[f64], az_deg: f64, el_deg: f64) -> Vec<f64> {
     let (az, el) = (az_deg.to_radians(), el_deg.to_radians());
@@ -262,7 +263,7 @@ pub fn project(xyz: &[f64], az_deg: f64, el_deg: f64) -> Vec<f64> {
     for p in xyz.chunks_exact(3) {
         let (x1, y1, z1) = (p[0] * ca - p[1] * sa, p[0] * sa + p[1] * ca, p[2]);
         out.push(x1);
-        out.push(z1 * ce - y1 * se);
+        out.push(z1 * ce + y1 * se);
         out.push(y1 * ce - z1 * se);
     }
     out
@@ -413,6 +414,9 @@ mod tests {
         // top view: depth = -z
         let p = project(&[0.0, 0.0, 1.0, 0.0, 0.0, -1.0], 0.0, 90.0);
         assert!(p[2] < p[5]);
+        // elevated viewer in front (-y): the far point (y=1) is farther and higher on screen
+        let p = project(&[0.0, 1.0, 0.0, 0.0, -1.0, 0.0], 0.0, 30.0);
+        assert!(p[2] > p[5] && p[1] > p[4]);
         // 3x3 grid, one NaN vertex removes the quads touching it
         let mut depth = vec![0.0; 9];
         depth[0] = f64::NAN;

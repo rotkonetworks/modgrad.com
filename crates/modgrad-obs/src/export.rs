@@ -116,7 +116,8 @@ pub fn export_run(obs: &Path, dir: &Path) -> io::Result<Value> {
     let source = rd.config["meta"]["extra"]["source"].as_str().map(String::from).unwrap_or_else(|| {
         match runs_rel.as_deref().map(|r| r.split('/').collect::<Vec<_>>()) {
             Some(parts) if parts.len() >= 2 => parts[0].to_string(),
-            _ => "local".into(),
+            // a run directly under runs/: label it by its project if any
+            _ => rd.config["meta"]["project"].as_str().unwrap_or("local").to_string(),
         }
     });
     let name = rd.name();

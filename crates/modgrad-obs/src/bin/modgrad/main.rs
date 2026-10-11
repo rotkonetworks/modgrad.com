@@ -49,7 +49,7 @@ const USAGE: &str = "usage:
   modgrad mcp [--dir <obs_dir>] [--base-url URL]   MCP server on stdio for coding agents (local data)
   modgrad mcp --url <server> [--token T]           same tools against a modgrad-server (analysis stays local)
 env: MODGRAD_URL (default http://127.0.0.1:8790), MODGRAD_TOKEN, MODGRAD_PROJECT,
-     MODGRAD_DATA (modgrad mcp data dir), MODGRAD_MCP_URL (modgrad mcp server, same as --url);
+     MODGRAD_DATA (local data dir: mcp, run --offline, tail), MODGRAD_MCP_URL (modgrad mcp server, same as --url);
      the pre-rename OBS_* names still work
 project file: .modgrad.json (from modgrad init) in this or a parent directory;
      flag > env > project file > default";

@@ -39,7 +39,8 @@
 //! 8. A key that occurs twice in one line is qualified by its segment's
 //!    first key (`nll` under `held-out` becomes `held_out_nll`).
 //! 9. Prose guard: a line is accepted only if it has a step, or at least
-//!    two values, or one value written with `=`/`:`, or one value whose
+//!    two values, or one value written with `=`/`:` and not followed by
+//!    more words (`loading dataset: 12000 examples` is prose), or one value whose
 //!    name contains a common metric word (loss, acc, lr, ...). So
 //!    `Loaded 3 files` is rejected while `loss 0.3` is kept.
 
@@ -212,6 +213,8 @@ pub fn parse_line(line: &str) -> Option<TextRow> {
     let mut leading: Option<f64> = None;
     let mut seg_head = String::new();
     let mut seg_named = false;
+    // words left after a named value at a segment end (units, or prose like `12000 examples`)
+    let mut trailing = false;
 
     let end_segment = |words: &mut Vec<String>, leading: &mut Option<f64>, seg_head: &mut String, seg_named: &mut bool, emits: &mut Vec<Emit>| {
         if let Some(v) = leading.take() {
@@ -239,6 +242,7 @@ pub fn parse_line(line: &str) -> Option<TextRow> {
                 joined = false;
             }
             Tok::Sep => {
+                trailing |= leading.is_none() && seg_named && !words.is_empty();
                 end_segment(&mut words, &mut leading, &mut seg_head, &mut seg_named, &mut emits);
                 joined = false;
             }
@@ -287,6 +291,7 @@ pub fn parse_line(line: &str) -> Option<TextRow> {
             }
         }
     }
+    trailing |= leading.is_none() && seg_named && !words.is_empty();
     end_segment(&mut words, &mut leading, &mut seg_head, &mut seg_named, &mut emits);
 
     // rule 8: qualify keys that repeat
@@ -309,7 +314,7 @@ pub fn parse_line(line: &str) -> Option<TextRow> {
     }
 
     let metricish = |k: &str| METRIC_WORDS.iter().any(|m| k.split(['_', '/']).any(|p| p == *m));
-    let accept = step.is_some() || values.len() >= 2 || emits.iter().any(|e| e.joined) || values.iter().any(|(k, _)| metricish(k));
+    let accept = step.is_some() || values.len() >= 2 || (emits.iter().any(|e| e.joined) && !trailing) || values.iter().any(|(k, _)| metricish(k));
     if !accept || (values.is_empty() && step.is_none()) {
         return None;
     }
@@ -432,6 +437,8 @@ mod tests {
             "2026-10-11 12:00:03 starting",
             "using 8 workers",
             "hello world",
+            "loading dataset: 12000 examples",
+            "found: 3 GPUs",
         ] {
             assert_eq!(parse_line(l), None, "{l:?}");
         }

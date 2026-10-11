@@ -21,7 +21,7 @@
 //! stage    := 'ema' w | 'by' field | ('mean±sd'|'mean+-sd'|'mean'|'median'|'min'|'max') 'over' field
 //!           | 'split' field | 'x' axis | 'forecast' ['to' n] [method] | 'log' | 'norm' (z|minmax|first)
 //!           | 'baseline' run ['diff'|'ratio'] | 'align' (intersection|union|exact) | 'show' letters
-//!           | 'heatmap' ['over' 'layer'] ['rownorm'] ['max']
+//!           | 'heatmap' ['over' 'layer'] ['rownorm'] ['max'] | 'stitch'
 //! ```
 //!
 //! Selector entries are lettered `a, b, c, …` in order (skipping names
@@ -55,6 +55,34 @@
 //! (run, family) from the raw values, after `norm` and before aggregation
 //! ([`heatmaps`]). The traces stay in the output (the dashboard draws one
 //! layer's line from them on click).
+//!
+//! # Lineage (`stitch`)
+//!
+//! One model's life is several runs: pre-training, annealing, SFT, RL, and
+//! branches forked from one checkpoint. A run names where it started with
+//! config fields: `parent_run` (a run id; a bare name matches a unique
+//! `<project>/<name>` or a run's `name`), `parent_step` (the parent's step it
+//! started from; default the parent's last step, from the catalog's
+//! `I last_step` or else the last step of the parent's streams loaded for the
+//! panel), optionally `parent_tokens` (the parent's token count there, when
+//! the parent's tokens metric is not logged) and `stage` (free text;
+//! `pretrain`, `midtrain`, `sft`, `rl`, `eval` by convention).
+//!
+//! `stitch` adds every ancestor of each selected stream's run, with the same
+//! metric, and places each run at an offset: `offset(run) = offset(parent) +
+//! parent_step` (`0` for a root). With `x <metric>` (tokens) the offset is
+//! the parent's offset plus the parent's x value at `parent_step`
+//! (interpolated; the last value at or before it past the end); `x time`
+//! likewise with `elapsed_min`. A child is expected to count from 0; one
+//! whose first step (or x value) is already at or past its fork point counts
+//! globally (a resume) and gets only the parent's offset. Branches forked
+//! from one parent share its curve. The trace keeps the run's own steps in
+//! `steps`; only `xs` moves. Ancestors that were not selected are context:
+//! `baseline` drops them. An aggregate takes its first member's offset. A
+//! missing parent is a warning and the run starts at its `parent_step` (or
+//! 0); a cycle is a warning and is cut at its first run in catalog order.
+//! [`Output::stitch`] lists each plotted run's span on the axis for the
+//! chart's stage bands.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -91,7 +119,79 @@ impl RunInfo {
     }
 }
 
+/// Lineage of one run as its config declares it (see "Lineage" above).
+impl RunInfo {
+    fn nonempty(&self, f: &str) -> Option<&str> {
+        self.field(f).map(str::trim).filter(|v| !v.is_empty())
+    }
+    pub fn parent_run(&self) -> Option<&str> {
+        self.nonempty("parent_run")
+    }
+    pub fn parent_step(&self) -> Option<f64> {
+        self.nonempty("parent_step").and_then(parse_num)
+    }
+    pub fn parent_tokens(&self) -> Option<f64> {
+        self.nonempty("parent_tokens").and_then(parse_num)
+    }
+    /// `stage`, else the last segment of the id.
+    pub fn stage_label(&self) -> String {
+        self.nonempty("stage").map(String::from).unwrap_or_else(|| self.id.rsplit('/').next().unwrap_or(&self.id).to_string())
+    }
+    pub fn last_step(&self) -> Option<f64> {
+        self.ident.iter().find(|(k, _)| k == "last_step").and_then(|(_, v)| parse_num(v))
+    }
+}
+
 impl Catalog {
+    /// The run a `parent_run` value names: an exact id, else the one run
+    /// whose id ends in `/<name>`, else the one run with that `name`.
+    pub fn resolve(&self, name: &str) -> Option<usize> {
+        if let Some(i) = self.runs.iter().position(|r| r.id == name) {
+            return Some(i);
+        }
+        let one = |v: Vec<usize>| if v.len() == 1 { Some(v[0]) } else { None };
+        let suffix = format!("/{name}");
+        one(self.runs.iter().enumerate().filter(|(_, r)| r.id.ends_with(&suffix)).map(|(i, _)| i).collect())
+            .or_else(|| one(self.runs.iter().enumerate().filter(|(_, r)| r.ident.iter().any(|(k, v)| k == "name" && v == name)).map(|(i, _)| i).collect()))
+    }
+
+    /// Parent of every run (`None` for roots, missing parents and the run
+    /// where a cycle is cut) and warnings for the latter two.
+    pub fn parents(&self) -> (Vec<Option<usize>>, Vec<String>) {
+        let n = self.runs.len();
+        let mut warn = Vec::new();
+        let mut par: Vec<Option<usize>> = self
+            .runs
+            .iter()
+            .map(|r| {
+                let p = r.parent_run()?;
+                let i = self.resolve(p);
+                if i.is_none() {
+                    warn.push(format!("{}: parent {p} is not here; placed at its parent_step ({})", r.id, r.parent_step().map_or("0".into(), |s| format!("{s}"))));
+                }
+                i
+            })
+            .collect();
+        // cycles: from each run, follow parents; a run seen twice on one walk is on a cycle
+        for start in 0..n {
+            let mut path = vec![start];
+            let mut cur = start;
+            while let Some(p) = par[cur] {
+                if let Some(k) = path.iter().position(|&x| x == p) {
+                    let cyc = &path[k..];
+                    let cut = *cyc.iter().min().unwrap();
+                    let names: Vec<&str> = cyc.iter().chain(core::iter::once(&cyc[0])).map(|&i| self.runs[i].id.as_str()).collect();
+                    warn.push(format!("lineage cycle {}; {} treated as a root", names.join(" -> "), self.runs[cut].id));
+                    par[cut] = None;
+                    break;
+                }
+                path.push(p);
+                cur = p;
+            }
+        }
+        (par, warn)
+    }
+
     pub fn parse(s: &str) -> Catalog {
         let mut runs: Vec<RunInfo> = Vec::new();
         for line in s.split('\n') {
@@ -234,6 +334,9 @@ pub enum Stage {
     /// `rownorm` divides each row by its median; `max` reduces a column bin
     /// by its maximum instead of the mean.
     Heatmap { over: String, rownorm: bool, max: bool },
+    /// Each run placed after its ancestors on one continuous axis (see
+    /// "Lineage" in the module doc).
+    Stitch,
 }
 
 impl Stage {
@@ -265,6 +368,7 @@ impl Stage {
             Stage::Align(m) => format!("align {m}"),
             Stage::Show(l) => format!("show {}", l.join(",")),
             Stage::Heatmap { over, rownorm, max } => format!("heatmap over {over}{}{}", if *rownorm { " rownorm" } else { "" }, if *max { " max" } else { "" }),
+            Stage::Stitch => "stitch".into(),
         }
     }
     fn kind(&self) -> &'static str {
@@ -281,6 +385,7 @@ impl Stage {
             Stage::Align(_) => "align",
             Stage::Show(_) => "show",
             Stage::Heatmap { .. } => "heatmap",
+            Stage::Stitch => "stitch",
         }
     }
 }
@@ -306,7 +411,7 @@ fn qe<T>(start: usize, end: usize, msg: impl Into<String>) -> Result<T, QueryErr
 }
 
 /// Stage keywords, as the parser accepts them.
-pub const STAGES: [&str; 17] = ["ema", "by", "split", "mean±sd", "mean", "median", "min", "max", "x", "forecast", "log", "norm", "baseline", "align", "show", "heatmap", "mean+-sd"];
+pub const STAGES: [&str; 18] = ["ema", "by", "split", "mean±sd", "mean", "median", "min", "max", "x", "forecast", "log", "norm", "baseline", "align", "show", "heatmap", "stitch", "mean+-sd"];
 
 /// Levenshtein distance over chars, case-insensitive.
 fn edit_distance(a: &str, b: &str) -> usize {
@@ -586,7 +691,7 @@ fn parse_stages(src: &str, a: usize, b: usize, out: &mut Vec<Stage>) -> Result<(
         };
         if kw.is_empty() {
             let ch = src[lx.i..].chars().next().map_or(1, |c| c.len_utf8());
-            return qe(lx.i, lx.i + ch, "expected a stage (ema, by, split, mean±sd over, x, forecast, log, norm, baseline, align, show, heatmap)");
+            return qe(lx.i, lx.i + ch, "expected a stage (ema, by, split, mean±sd over, x, forecast, log, norm, baseline, align, show, heatmap, stitch)");
         }
         let need = |lx: &mut Lx, what: &str| -> Result<String, QueryError> {
             let (w, a, _) = lx.word();
@@ -607,6 +712,7 @@ fn parse_stages(src: &str, a: usize, b: usize, out: &mut Vec<Stage>) -> Result<(
             "split" => Stage::Split(need(&mut lx, "a field (metric, run, or a config key)")?),
             "x" => Stage::X(need(&mut lx, "an axis: step, time, or a metric")?),
             "log" => Stage::Log,
+            "stitch" => Stage::Stitch,
             "norm" => {
                 let w = need(&mut lx, "z, minmax or first")?;
                 if !matches!(w.as_str(), "z" | "minmax" | "first") {
@@ -713,7 +819,7 @@ fn parse_stages(src: &str, a: usize, b: usize, out: &mut Vec<Stage>) -> Result<(
                 Stage::Show(l)
             }
             _ => {
-                let list = "ema, by, split, mean±sd/mean/median/min/max over, x, forecast, log, norm, baseline, align, show, heatmap";
+                let list = "ema, by, split, mean±sd/mean/median/min/max over, x, forecast, log, norm, baseline, align, show, heatmap, stitch";
                 return Err(QueryError { start: ka, end: kb, msg: format!("unknown stage '{kw}'; stages: {list}"), suggest: nearest(&kw, STAGES.iter().copied().filter(|s| *s != "mean+-sd"), 3) });
             }
         };
@@ -918,6 +1024,10 @@ pub struct Plan {
     pub x: Vec<Option<usize>>,
     pub x_kind: XKind,
     pub warnings: Vec<String>,
+    /// `stitch`: each run's parent (catalog indices), empty without it.
+    pub parents: Vec<Option<usize>>,
+    /// `stitch`: runs read only as an ancestor of a selected run.
+    pub context: Vec<bool>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -943,6 +1053,16 @@ fn x_metric(r: &RunInfo, want: &str) -> Option<String> {
 /// Which streams a query needs.
 pub fn plan(q: &Query, cat: &Catalog) -> Plan {
     let mut p = Plan { x: vec![None; cat.runs.len()], ..Default::default() };
+    let stitch = q.stages.contains(&Stage::Stitch);
+    if stitch {
+        let (par, warn) = cat.parents();
+        p.parents = par;
+        p.warnings.extend(warn);
+        p.context = vec![false; cat.runs.len()];
+        if p.parents.iter().all(Option::is_none) {
+            p.warnings.push("stitch: no run here names a parent (config parent_run, or set one in the Runs view)".into());
+        }
+    }
     let idx = |p: &mut Plan, run: usize, metric: &str| -> usize {
         if let Some(i) = p.streams.iter().position(|s| s.run == run && s.metric == metric) {
             return i;
@@ -963,6 +1083,29 @@ pub fn plan(q: &Query, cat: &Catalog) -> Plan {
                 }
             }
         }
+        if stitch {
+            // ancestors of every matched run, same metric
+            let picked: Vec<(usize, String)> = v.iter().map(|&si| (p.streams[si].run, p.streams[si].metric.clone())).collect();
+            for (run, metric) in picked {
+                let mut cur = run;
+                while let Some(a) = p.parents[cur] {
+                    if cat.runs[a].metrics.contains(&metric) {
+                        let si = idx(&mut p, a, &metric);
+                        // not matched by the selector itself: context
+                        if !v.contains(&si) {
+                            v.push(si);
+                            p.context[a] = true;
+                        }
+                    } else {
+                        let w = format!("stitch: {} (ancestor of {}) has no {metric}", cat.runs[a].id, cat.runs[run].id);
+                        if !p.warnings.contains(&w) {
+                            p.warnings.push(w);
+                        }
+                    }
+                    cur = a;
+                }
+            }
+        }
         if v.is_empty() {
             p.warnings.push(format!("{l}: nothing matches {}", chips(&Query { entries: vec![(l.clone(), e.clone())], stages: vec![] }).iter().map(|c| c.text.clone()).collect::<Vec<_>>().join(" ")));
         }
@@ -977,6 +1120,16 @@ pub fn plan(q: &Query, cat: &Catalog) -> Plan {
     if p.x_kind != XKind::Step {
         let runs: Vec<usize> = {
             let mut r: Vec<usize> = p.streams.iter().map(|s| s.run).collect();
+            // stitch: the token offset reads every ancestor's x, plotted or not
+            if stitch {
+                for i in 0..r.len() {
+                    let mut cur = r[i];
+                    while let Some(a) = p.parents[cur] {
+                        r.push(a);
+                        cur = a;
+                    }
+                }
+            }
             r.sort();
             r.dedup();
             r
@@ -1028,6 +1181,106 @@ pub struct Output {
     /// "Did you mean" fixes for the query text (set by the caller that has
     /// it, see [`metric_fixes`]).
     pub fixes: Vec<Fix>,
+    /// `stitch`: one span per plotted run, in plotting order.
+    pub stitch: Vec<StitchSpan>,
+}
+
+/// Where one run sits on a stitched axis.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StitchSpan {
+    /// Catalog run index, and its parent's.
+    pub run: usize,
+    pub parent: Option<usize>,
+    /// `stage`, else the last segment of the run id.
+    pub stage: String,
+    /// Extent of the run's points on the x axis (after the offset).
+    pub x0: f64,
+    pub x1: f64,
+    /// Added to the run's own steps (event markers use it).
+    pub step_off: f64,
+    /// Added to the run's own x (equals `step_off` on the step axis).
+    pub x_off: f64,
+}
+
+/// Axis offsets of every run for `stitch` (see "Lineage" in the module doc):
+/// `(step offset, x offset)` per catalog run, computed for `want` and their
+/// ancestors. `span[r]` is the first and last step of run `r`'s loaded
+/// streams; `xval(r, step)` the run's x at a step (`None`: no x stream) and
+/// `xfirst(r)` its first x value.
+#[allow(clippy::too_many_arguments)]
+fn stitch_offsets(
+    cat: &Catalog,
+    parents: &[Option<usize>],
+    want: &[usize],
+    span: &[Option<(f64, f64)>],
+    x_is_step: bool,
+    xval: &dyn Fn(usize, f64) -> Option<f64>,
+    xfirst: &dyn Fn(usize) -> Option<f64>,
+    warn: &mut Vec<String>,
+) -> Vec<Option<(f64, f64)>> {
+    let mut off: Vec<Option<(f64, f64)>> = vec![None; cat.runs.len()];
+    for &w in want {
+        // the chain from w up to its root, then offsets from the root down
+        let mut chain = vec![w];
+        while let Some(p) = parents[*chain.last().unwrap()] {
+            if off[p].is_some() {
+                break;
+            }
+            chain.push(p);
+        }
+        for &r in chain.iter().rev() {
+            if off[r].is_some() {
+                continue;
+            }
+            let ri = &cat.runs[r];
+            let o = match parents[r] {
+                // a root, or a parent that is not in the catalog: its declared start, else 0
+                // a root, or where a cycle was cut (the parent exists)
+                None if ri.parent_run().is_none_or(|p| cat.resolve(p).is_some()) => (0.0, 0.0),
+                // the parent is not here: where the run says it started
+                None => {
+                    let s = ri.parent_step().filter(|&f| !span[r].is_some_and(|s| s.0 >= f)).unwrap_or(0.0);
+                    let x = ri.parent_tokens().filter(|&v| !xfirst(r).is_some_and(|f| f >= v)).unwrap_or(0.0);
+                    (s, if x_is_step { s } else { x })
+                }
+                Some(p) => {
+                    let (ps, px) = off[p].unwrap_or((0.0, 0.0));
+                    let fork = ri.parent_step().or_else(|| cat.runs[p].last_step()).or_else(|| span[p].map(|s| s.1));
+                    let fork = match fork {
+                        Some(f) => f,
+                        None => {
+                            warn.push(format!("stitch: no step of {} is known; {} starts at its start", cat.runs[p].id, ri.id));
+                            0.0
+                        }
+                    };
+                    // a child whose own count already starts at or past the fork resumed the parent's count
+                    let resumed = fork > 0.0 && span[r].is_some_and(|s| s.0 >= fork);
+                    let so = if resumed { ps } else { ps + fork };
+                    let xo = if x_is_step {
+                        so
+                    } else {
+                        let at = ri.parent_tokens().or_else(|| xval(p, fork));
+                        match at {
+                            Some(v) if v.is_finite() => {
+                                if xfirst(r).is_some_and(|f| f >= v && v > 0.0) {
+                                    px
+                                } else {
+                                    px + v
+                                }
+                            }
+                            _ => {
+                                warn.push(format!("stitch: {} has no x value at step {fork}; {} is not shifted on x", cat.runs[p].id, ri.id));
+                                px
+                            }
+                        }
+                    };
+                    (so, xo)
+                }
+            };
+            off[r] = Some(o);
+        }
+    }
+    off
 }
 
 /// Columns per heatmap: the union of steps, block-reduced past this.
@@ -1195,6 +1448,8 @@ pub fn eval(q: &Query, cat: &Catalog, plan: &Plan, data: &[(&[f64], &[f64])], ma
     }
     // baseline
     if let Some((bg, ratio)) = stage(q, |s| if let Stage::Baseline { run, ratio } = s { Some((run.clone(), *ratio)) } else { None }) {
+        // stitch context (ancestors nobody selected) has no counterpart to subtract
+        traces.retain(|t| !plan.context.get(t.runs[0]).copied().unwrap_or(false));
         let is_base = |r: usize| glob(&bg, &cat.runs[r].id) || cat.runs[r].field("name").is_some_and(|n| glob(&bg, n));
         let (base, rest): (Vec<Trace>, Vec<Trace>) = traces.into_iter().partition(|t| is_base(t.runs[0]));
         if base.is_empty() {
@@ -1276,6 +1531,38 @@ pub fn eval(q: &Query, cat: &Catalog, plan: &Plan, data: &[(&[f64], &[f64])], ma
             });
         }
     }
+    // stitch: per-run offsets, from the raw streams (before downsampling)
+    let stitch = q.stages.contains(&Stage::Stitch);
+    let mut offs: Vec<Option<(f64, f64)>> = Vec::new();
+    if stitch {
+        let mut span: Vec<Option<(f64, f64)>> = vec![None; cat.runs.len()];
+        for (i, s) in plan.streams.iter().enumerate() {
+            let (st, _) = get(i);
+            if let (Some(&a), Some(&b)) = (st.first(), st.last()) {
+                span[s.run] = Some(span[s.run].map_or((a, b), |(x, y)| (x.min(a), y.max(b))));
+            }
+        }
+        let scale = if plan.x_kind == XKind::Time { 60.0 } else { 1.0 };
+        let xval = |r: usize, step: f64| -> Option<f64> {
+            let (xs, xv) = get(plan.x[r]?);
+            let v = expr::interp_at(&xs, &xv, step);
+            // past the end (a fork at the parent's last step, logged a little earlier): the last value before it
+            let v = if v.is_finite() { v } else { xs.iter().zip(&xv).rev().find(|(s, v)| **s <= step && v.is_finite()).map_or(f64::NAN, |(_, v)| *v) };
+            Some(v * scale)
+        };
+        let xfirst = |r: usize| -> Option<f64> {
+            let (_, xv) = get(plan.x[r]?);
+            xv.iter().find(|v| v.is_finite()).map(|v| v * scale)
+        };
+        let mut want: Vec<usize> = traces.iter().map(|t| t.runs[0]).collect();
+        want.dedup();
+        offs = stitch_offsets(cat, &plan.parents, &want, &span, plan.x_kind == XKind::Step, &xval, &xfirst, &mut out.warnings);
+        for t in &traces {
+            if t.runs.len() > 1 && t.runs.iter().any(|&r| offs[r] != offs[t.runs[0]]) {
+                out.warnings.push(format!("stitch: {} start at different points; placed at {}'s", t.label, cat.runs[t.runs[0]].id));
+            }
+        }
+    }
     // x
     for t in &mut traces {
         match &plan.x_kind {
@@ -1305,8 +1592,25 @@ pub fn eval(q: &Query, cat: &Catalog, plan: &Plan, data: &[(&[f64], &[f64])], ma
             t.lo = vec![f64::NAN; t.raw.len()];
             t.hi = vec![f64::NAN; t.raw.len()];
         }
+        if let Some(Some((_, xo))) = offs.get(t.runs[0]) {
+            for x in &mut t.xs {
+                *x += xo;
+            }
+        }
     }
     traces.retain(|t| t.xs.iter().zip(&t.raw).any(|(x, y)| x.is_finite() && y.is_finite()));
+    if stitch {
+        for t in &traces {
+            let r = t.runs[0];
+            if out.stitch.iter().any(|s| s.run == r) {
+                continue;
+            }
+            let fin = t.xs.iter().zip(&t.raw).filter(|(x, y)| x.is_finite() && y.is_finite()).map(|(x, _)| *x);
+            let (x0, x1) = fin.fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), x| (a.min(x), b.max(x)));
+            let (so, xo) = offs[r].unwrap_or((0.0, 0.0));
+            out.stitch.push(StitchSpan { run: r, parent: plan.parents[r], stage: cat.runs[r].stage_label(), x0, x1, step_off: so, x_off: xo });
+        }
+    }
     // ema (display only)
     let w = stage(q, |s| if let Stage::Ema(w) = s { parse_num(w) } else { None }).unwrap_or(0.0);
     for t in &mut traces {
@@ -1445,8 +1749,26 @@ pub fn output_json(o: &Output, cat: &Catalog) -> (String, Vec<f64>) {
         None => "null".to_string(),
         Some((to, m)) => format!("{{\"to\":{},\"method\":{}}}", to.map_or("null".into(), |v| format!("{v}")), js_str(m)),
     };
+    let num = |v: f64| if v.is_finite() { format!("{v}") } else { "null".into() };
+    let st: Vec<String> = o
+        .stitch
+        .iter()
+        .map(|s| {
+            format!(
+                "{{\"run\":{},\"parent\":{},\"stage\":{},\"x0\":{},\"x1\":{},\"step_off\":{},\"x_off\":{}}}",
+                js_str(&cat.runs[s.run].id),
+                s.parent.map_or("null".into(), |p| js_str(&cat.runs[p].id)),
+                js_str(&s.stage),
+                num(s.x0),
+                num(s.x1),
+                num(s.step_off),
+                num(s.x_off)
+            )
+        })
+        .collect();
     let meta = format!(
-        "{{\"traces\":[{}],\"heatmaps\":[{}],\"cells\":{},\"warnings\":{},\"fixes\":[{}],\"by\":{},\"by_numeric\":{},\"ylog\":{},\"forecast\":{fc},\"x_label\":{},\"downsampled\":{}}}",
+        "{{\"stitch\":[{}],\"traces\":[{}],\"heatmaps\":[{}],\"cells\":{},\"warnings\":{},\"fixes\":[{}],\"by\":{},\"by_numeric\":{},\"ylog\":{},\"forecast\":{fc},\"x_label\":{},\"downsampled\":{}}}",
+        st.join(","),
         tr.join(","),
         hm.join(","),
         js_list(&o.cells),
@@ -1681,5 +2003,153 @@ R\tlocal/pilot1\nI\tname\tpilot1\nC\tsize\t494053\nM\tloss\n";
         assert_eq!(o.traces[0].xs, vec![0.0, 60.0, 120.0]);
         let (meta, flat) = output_json(&o, &Catalog::parse(CAT));
         assert!(meta.contains("\"x_label\":\"time\"") && flat.len() == 18);
+    }
+
+    // ------------------------------------------------------------ stitch
+
+    /// pretrain -> anneal -> two SFT branches (at different anneal steps) -> two RL seeds off sft-a
+    const LIN: &str = "R\tlc/pt\nI\tname\tpt\nI\tlast_step\t100\nC\tstage\tpretrain\nC\tlr\t0.0003\nM\tloss\nM\ttokens_seen\n\
+R\tlc/an\nC\tstage\tmidtrain\nC\tparent_run\tlc/pt\nM\tloss\nM\ttokens_seen\n\
+R\tlc/sft-a\nC\tstage\tsft\nC\tparent_run\tan\nC\tparent_step\t50\nM\tloss\nM\ttokens_seen\n\
+R\tlc/sft-b\nC\tstage\tsft\nC\tparent_run\tlc/an\nC\tparent_step\t20\nM\tloss\nM\ttokens_seen\n\
+R\tlc/rl_s1\nC\tstage\trl\nC\tparent_run\tlc/sft-a\nC\tseed\t1\nM\tloss\n\
+R\tlc/rl_s2\nC\tstage\trl\nC\tparent_run\tlc/sft-a\nC\tseed\t2\nM\tloss\n";
+
+    fn lin_data(run: &str, metric: &str) -> (Vec<f64>, Vec<f64>) {
+        // (last step, tokens per step, first step); every run counts from 0 unless noted
+        let (n, tps, s0) = match run {
+            "lc/pt" => (100, 1000.0, 0),
+            "lc/an" => (50, 100.0, 0),
+            "lc/sft-a" => (40, 10.0, 0),
+            "lc/sft-b" => (30, 10.0, 0),
+            "lc/rl_s1" | "lc/rl_s2" => (20, 0.0, 0),
+            "x/resumed" => (150, 1000.0, 110),
+            _ => (30, 1.0, 0),
+        };
+        let steps: Vec<f64> = (s0..=n).step_by(10).map(|s| s as f64).collect();
+        let seed = if run.ends_with("_s2") { 0.2 } else { 0.0 };
+        let vals = steps.iter().map(|&s| if metric == "tokens_seen" { s * tps } else { 3.0 - s / 100.0 + seed }).collect();
+        (steps, vals)
+    }
+
+    fn eval_on(cat: &str, src: &str) -> (Output, Catalog, Plan) {
+        let cat = Catalog::parse(cat);
+        let q = parse(src).unwrap();
+        let p = plan(&q, &cat);
+        let owned: Vec<(Vec<f64>, Vec<f64>)> = p.streams.iter().map(|s| lin_data(&cat.runs[s.run].id, &s.metric)).collect();
+        let d: Vec<(&[f64], &[f64])> = owned.iter().map(|(a, b)| (&a[..], &b[..])).collect();
+        (eval(&q, &cat, &p, &d, 0), cat, p)
+    }
+
+    /// (run id, first x) of every trace
+    fn starts(o: &Output, cat: &Catalog) -> Vec<(String, f64)> {
+        o.traces.iter().map(|t| (cat.runs[t.runs[0]].id.clone(), t.xs[0])).collect()
+    }
+
+    #[test]
+    fn stitch_parses_and_round_trips() {
+        let q = parse("loss{run=\"lc/rl_s1\"} | ema .9 | stitch").unwrap();
+        assert_eq!(q.stages, vec![Stage::Ema(".9".into()), Stage::Stitch]);
+        assert_eq!(canonical(&q), "loss{run=\"lc/rl_s1\"} | ema .9 | stitch");
+        assert_eq!(chips(&q).last().unwrap().kind, "stitch");
+        assert_eq!(parse("loss | stich").unwrap_err().suggest, vec!["stitch"]);
+    }
+
+    #[test]
+    fn stitch_chain_of_three() {
+        let (o, cat, p) = eval_on(LIN, "loss{run=\"lc/sft-a\"} | stitch");
+        // ancestors come in with the same metric; each starts where its parent forked
+        let mut s = starts(&o, &cat);
+        s.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        assert_eq!(s, [("lc/pt".into(), 0.0), ("lc/an".into(), 100.0), ("lc/sft-a".into(), 150.0)]);
+        // own steps are kept for hover; only xs moves
+        let t = o.traces.iter().find(|t| cat.runs[t.runs[0]].id == "lc/sft-a").unwrap();
+        assert_eq!((t.steps[0], *t.xs.last().unwrap()), (0.0, 190.0));
+        let stages: Vec<(&str, f64, f64)> = o.stitch.iter().map(|s| (s.stage.as_str(), s.x0, s.x1)).collect();
+        assert!(stages.contains(&("pretrain", 0.0, 100.0)) && stages.contains(&("midtrain", 100.0, 150.0)) && stages.contains(&("sft", 150.0, 190.0)), "{stages:?}");
+        let an = o.stitch.iter().find(|s| s.stage == "midtrain").unwrap();
+        assert_eq!(an.parent, cat.resolve("lc/pt"));
+        // ancestors are context, the selected run is not
+        assert!(p.context[0] && p.context[1] && !p.context[2]);
+        let (meta, _) = output_json(&o, &cat);
+        assert!(meta.contains("\"stitch\":[{\"run\":\""), "{meta}");
+        assert!(meta.contains("\"stage\":\"sft\",\"x0\":150,\"x1\":190,\"step_off\":150,\"x_off\":150"), "{meta}");
+    }
+
+    #[test]
+    fn stitch_branches_share_their_parent() {
+        let (o, cat, _) = eval_on(LIN, "loss{run=~\"lc/sft-*\"} | stitch");
+        let mut s = starts(&o, &cat);
+        s.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        // pre-training and the anneal once; sft-b forked at anneal step 20, sft-a at 50
+        assert_eq!(s, [("lc/pt".into(), 0.0), ("lc/an".into(), 100.0), ("lc/sft-b".into(), 120.0), ("lc/sft-a".into(), 150.0)]);
+        assert_eq!(o.stitch.len(), 4);
+        // the RL seeds default to sft-a's last step (no parent_step, no last_step in the catalog)
+        let (o, cat, _) = eval_on(LIN, "loss{run=~\"lc/rl_*\"} | stitch");
+        assert!(starts(&o, &cat).contains(&("lc/rl_s2".into(), 190.0)));
+    }
+
+    #[test]
+    fn stitch_missing_parent_and_cycles() {
+        let cat = "R\tx/child\nC\tparent_run\tx/gone\nC\tparent_step\t500\nM\tloss\nR\tx/orphan\nC\tparent_run\tgone\nM\tloss\n";
+        let (o, c, _) = eval_on(cat, "loss | stitch");
+        assert_eq!(starts(&o, &c), [("x/child".into(), 500.0), ("x/orphan".into(), 0.0)]);
+        assert!(o.warnings.iter().any(|w| w.contains("x/child: parent x/gone is not here")), "{:?}", o.warnings);
+        // a -> b -> a: cut at a (first in catalog order), which becomes the root
+        let cat = "R\tx/a\nC\tparent_run\tx/b\nM\tloss\nR\tx/b\nC\tparent_run\tx/a\nC\tparent_step\t10\nM\tloss\nR\tx/self\nC\tparent_run\tx/self\nM\tloss\n";
+        let (o, c, _) = eval_on(cat, "loss | stitch");
+        assert_eq!(starts(&o, &c), [("x/a".into(), 0.0), ("x/b".into(), 10.0), ("x/self".into(), 0.0)]);
+        assert!(o.warnings.iter().any(|w| w.contains("lineage cycle x/a -> x/b -> x/a; x/a treated as a root")), "{:?}", o.warnings);
+        assert!(o.warnings.iter().any(|w| w.contains("lineage cycle x/self -> x/self")));
+        // no lineage at all: said once, nothing moves
+        let (o, c, _) = eval_on("R\tq/a\nM\tloss\n", "loss | stitch");
+        assert_eq!(starts(&o, &c), [("q/a".into(), 0.0)]);
+        assert!(o.warnings.iter().any(|w| w.contains("no run here names a parent")));
+    }
+
+    #[test]
+    fn stitch_resumed_child_keeps_its_count() {
+        // x/resumed logs steps 110..150 (it continued the parent's counter): not shifted again
+        let cat = "R\tx/p\nI\tlast_step\t100\nM\tloss\nR\tx/resumed\nC\tparent_run\tx/p\nC\tparent_step\t100\nM\tloss\n";
+        let (o, c, _) = eval_on(cat, "loss | stitch");
+        assert_eq!(starts(&o, &c), [("x/p".into(), 0.0), ("x/resumed".into(), 110.0)]);
+    }
+
+    #[test]
+    fn stitch_on_tokens() {
+        let (o, cat, _) = eval_on(LIN, "loss{run=~\"lc/sft-*\"} | x tokens | stitch");
+        let s = starts(&o, &cat);
+        // tokens restart per run: offset = parent's offset + parent's tokens at the fork step
+        for (run, x) in [("lc/pt", 0.0), ("lc/an", 100_000.0), ("lc/sft-a", 105_000.0), ("lc/sft-b", 102_000.0)] {
+            assert!(s.contains(&(run.into(), x)), "{run}: {s:?}");
+        }
+        let a = o.stitch.iter().find(|s| cat.runs[s.run].id == "lc/sft-a").unwrap();
+        assert_eq!((a.step_off, a.x_off, a.x1), (150.0, 105_000.0, 105_400.0));
+        // an explicit parent_tokens wins over the parent's metric
+        let cat2 = LIN.replace("C\tparent_step\t20\n", "C\tparent_step\t20\nC\tparent_tokens\t7000\n");
+        let (o, c, _) = eval_on(&cat2, "loss{run=\"lc/sft-b\"} | x tokens | stitch");
+        assert!(starts(&o, &c).contains(&("lc/sft-b".into(), 107_000.0)));
+    }
+
+    #[test]
+    fn stitch_with_ema_baseline_and_seeds() {
+        // ema smooths each run's own curve; the axis still moves
+        let (o, cat, _) = eval_on(LIN, "loss{run=\"lc/sft-a\"} | ema .5 | stitch");
+        let t = o.traces.iter().find(|t| cat.runs[t.runs[0]].id == "lc/sft-a").unwrap();
+        assert_eq!((t.xs[0], t.ys[0], t.raw[1]), (150.0, 3.0, 2.9));
+        assert!(t.ys[1] > 2.9 && t.ys[1] < 3.0);
+        // baseline: branch minus branch on steps since the fork; the shared ancestors drop out
+        let (o, cat, _) = eval_on(LIN, "loss{run=~\"lc/sft-*\"} | baseline lc/sft-a | stitch");
+        assert_eq!(starts(&o, &cat), [("lc/sft-b".into(), 120.0)]);
+        assert!(o.traces[0].raw.iter().all(|v| v.abs() < 1e-12));
+        assert_eq!(o.stitch.len(), 1);
+        // mean±sd over seed: the RL seeds are one band, placed after sft-a; the ancestors stay single
+        let (o, cat, _) = eval_on(LIN, "loss{run=~\"lc/rl_*\"} | mean±sd over seed | stitch");
+        let agg: Vec<&Trace> = o.traces.iter().filter(|t| t.runs.len() == 2).collect();
+        assert_eq!(agg.len(), 1);
+        assert!(agg[0].band && agg[0].xs[0] == 190.0 && (agg[0].raw[0] - 3.1).abs() < 1e-12);
+        let mut s = starts(&o, &cat);
+        s.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        assert_eq!(s.iter().map(|x| x.1).collect::<Vec<_>>(), [0.0, 100.0, 150.0, 190.0]);
     }
 }

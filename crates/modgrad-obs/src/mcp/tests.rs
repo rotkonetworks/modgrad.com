@@ -258,6 +258,11 @@ fn board_tool() {
     let t = ok(&s, "make_board", json!({"query": "nll", "runs": "g/small,g/mid"}));
     assert!(t.contains("heldout_nll for 2 runs"), "{t}");
     fail(&s, "make_board", json!({"query": "nope_metric{run=~\"g/*\"}"}));
+    // commas between panels (not inside the selector) split; same metric merges
+    let t = ok(&s, "make_board", json!({"query": "heldout_nll{run=~\"g/small\"}, learning_rate{run=~\"g/small\"}, heldout_nll{run=~\"g/mid\"}"}));
+    assert!(t.contains("2 panels") && t.contains("heldout_nll for 2 runs"), "{t}");
+    let (t, e) = s.call_tool("make_board", &json!({"query": "heldout_nll{run=~\"small/*\"}"}));
+    assert!(e && t.contains("g/small"), "{t}");
 }
 
 #[test]

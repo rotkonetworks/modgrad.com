@@ -308,7 +308,10 @@ def run_agent(task, c, tools, a, ctx):
         body = {"model": a.model, "messages": msgs, "tools": tools, "temperature": a.temperature, "seed": a.seed + a.trial, "max_tokens": a.max_tokens}
         r = requests.post(a.endpoint.rstrip("/") + "/chat/completions", json=body, timeout=a.timeout)
         r.raise_for_status()
-        msg = r.json()["choices"][0]["message"]
+        choice = r.json()["choices"][0]
+        msg = choice["message"]
+        if choice.get("finish_reason") == "length" and not (msg.get("tool_calls") or []):
+            return f"(no answer: the reply hit --max-tokens {a.max_tokens}) " + strip_think(msg.get("content"))[:200], calls, turn
         tcs = msg.get("tool_calls") or []
         msgs.append({"role": "assistant", "content": msg.get("content") or "", **({"tool_calls": tcs} if tcs else {})})
         if not tcs:

@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "modgrad"
+version = "0.1.0"
+description = "Training observability for LLM pre-, mid- and post-training, with a W&B-compatible API (import modgrad as wandb)."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Rotko Networks", email = "hq@rotko.net" }]
+keywords = ["machine-learning", "observability", "experiment-tracking", "wandb", "llm", "training"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=7", "numpy"]
+
+[project.urls]
+Homepage = "https://modgrad.com"
+
+[project.scripts]
+modgrad = "modgrad.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/modgrad"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

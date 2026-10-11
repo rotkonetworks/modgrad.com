@@ -46,7 +46,11 @@ class ModgradLogger(_Base):  # type: ignore[misc,valid-type]
             super().__init__()
         self._project = project
         self._name = name
-        self._id = id
+        # the id is fixed up front: Lightning reads `version` on every rank,
+        # and that must not create a run anywhere but rank zero
+        from modgrad._run import auto_id, sanitize_id
+
+        self._id = sanitize_id(id) if id else (sanitize_id(name) + "-%04x" % __import__("random").getrandbits(16) if name else auto_id())
         self._prefix = prefix
         self._init_kwargs = init_kwargs
         self._run: Optional[modgrad.Run] = None
@@ -55,7 +59,12 @@ class ModgradLogger(_Base):  # type: ignore[misc,valid-type]
     @property
     def experiment(self) -> modgrad.Run:
         if self._run is None:
-            self._run = modgrad.run if modgrad.run is not None else modgrad.init(project=self._project, name=self._name, id=self._id, **self._init_kwargs)
+            if getattr(rank_zero_only, "rank", 0) != 0:
+                self._run = modgrad.init(project=self._project, id=self._id, mode="disabled", reinit="create_new")
+            elif modgrad.run is not None:
+                self._run = modgrad.run
+            else:
+                self._run = modgrad.init(project=self._project, name=self._name, id=self._id, **self._init_kwargs)
         return self._run
 
     @property
@@ -64,7 +73,7 @@ class ModgradLogger(_Base):  # type: ignore[misc,valid-type]
 
     @property
     def version(self) -> str:
-        return self.experiment.id if self._run is not None or self._id is None else self._id
+        return self._run.id if self._run is not None else self._id
 
     @property
     def save_dir(self) -> Optional[str]:

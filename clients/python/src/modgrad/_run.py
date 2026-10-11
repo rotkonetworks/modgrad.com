@@ -342,6 +342,11 @@ class Run:
                 self._sender = Sender(self._spool, interval=interval, batch_rows=batch_rows, retry_max=retry_max,
                                       on_created=self._on_created, auth=_AuthPolicy(server, anon))
                 self._sender.start()
+        if self._spool is not None:
+            # rows from an earlier attempt with this id that never reached the server
+            for (kind, v), _ in list(self._spool.unacked):
+                if kind == "row" and isinstance(v, dict) and isinstance(v.get("step"), int):
+                    self.step = max(self.step, v["step"] + 1)
         object.__setattr__(self.config, "_run", self)
         object.__setattr__(self.summary, "_run", self)
 
@@ -597,11 +602,18 @@ sys.excepthook = _excepthook
 def _resume_step(server: str, run_full: str, token: Optional[str]) -> int:
     """One past the last step the server has for `run_full` (0 if none)."""
     try:
+        if "/" not in run_full and token:
+            # a project token places the run; the (idempotent) create names it
+            r = _net.post(server, "/api/v1/runs", {"name": run_full}, token, timeout=3)
+            if r.ok and isinstance(r.json(), dict) and r.json().get("run"):
+                run_full = r.json()["run"]
         project = run_full.split("/")[0] if "/" in run_full else None
         status, idx = _net.get(server, "/api/index" + (f"?project={project}" if project else ""), token, timeout=3)
         if status == 200 and isinstance(idx, dict):
+            tail = "/" + run_full
             for e in idx.get("runs", []):
-                if e.get("id") == run_full:
+                # with a project token and no project name, match <any project>/<id>
+                if e.get("id") == run_full or ("/" not in run_full and str(e.get("id", "")).endswith(tail)):
                     ls = e.get("last_step")
                     return int(ls) + 1 if ls is not None else 0
     except Exception as e:  # noqa: BLE001
@@ -666,7 +678,7 @@ def init(project: Optional[str] = None, entity: Optional[str] = None, config: An
 
         start_step = 0
         if resume and id and mode == "online":
-            run_full = f"{send_project}/{run_id}" if send_project else run_id
+            run_full = f"{project}/{run_id}" if project else run_id
             if anon:
                 cached = _auth._load("anon.json").get(server) or {}
                 if cached.get("project"):

@@ -292,3 +292,34 @@ def test_misc_surface(server):
     r2 = modgrad.init(project="core", name="re2", reinit="finish_previous")
     assert r1 is not r2 and r1._finished and modgrad.run is r2
     modgrad.finish()
+
+
+def test_resume_with_project_token(server, monkeypatch):
+    from modgrad import _net
+
+    token = _net.post(server.url, "/api/v1/projects").json()["token"]
+    monkeypatch.setenv("MODGRAD_TOKEN", token)
+    modgrad.init(id="tok-resume")
+    modgrad.log({"x": 0.0})
+    modgrad.log({"x": 1.0})
+    assert modgrad.run.flush(10)
+    path = modgrad.run.path  # the server-assigned <project>/<id>, known once created
+    modgrad.finish()
+    assert path.startswith("anon-")
+    r = modgrad.init(id="tok-resume", resume=True)
+    assert r.step == 2
+    modgrad.log({"x": 2.0})
+    modgrad.finish()
+    assert server.history(path)["steps"] == [0, 1, 2]
+
+
+def test_restart_with_unsent_spool_continues_steps(monkeypatch):
+    monkeypatch.setenv("MODGRAD_URL", f"http://127.0.0.1:{free_port()}")
+    monkeypatch.setenv("MODGRAD_FINISH_TIMEOUT", "0.5")
+    modgrad.init(project="down", id="same")
+    for i in range(3):
+        modgrad.log({"x": float(i)})
+    modgrad.finish(quiet=True)
+    r = modgrad.init(project="down", id="same")
+    assert r.step == 3 and r._spool.pending() >= 3
+    modgrad.finish(quiet=True)

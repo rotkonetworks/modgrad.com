@@ -11,8 +11,8 @@ wandb.log({"loss": 0.52})
 wandb.finish()
 ```
 
-The package is pure Python with no required dependencies (it uses stdlib `urllib`), and it
-supports Python 3.8 and later.
+The package is pure Python with no required dependencies (it uses stdlib `urllib`). Its
+syntax targets Python 3.8 and later; it has been tested only on Python 3.14.
 
 ## Install (from the repo)
 
@@ -69,8 +69,9 @@ obs push <dir>                            # the Rust CLI: sends rows and events 
 
 The spool root is `$XDG_CACHE_HOME/modgrad-obs/spool` (by default
 `~/.cache/modgrad-obs/spool`), which is also where `obs run` spools. You can override it
-with `MODGRAD_DIR` or `init(dir=...)`. A run spools to `<root>/<project>__<id>/` and gets
-these files:
+with `MODGRAD_DIR` or `init(dir=...)`. A run with a project name and no token spools to
+`<root>/<project>__<id>/`. A run with a token, or in an anonymous project, spools to
+`<root>/<id>/`. The directory holds these files:
 
 | file          | content                                                                              |
 |---------------|--------------------------------------------------------------------------------------|
@@ -155,6 +156,10 @@ Where a row lists several variables, the first one that is set wins.
   nothing, because files are not uploaded yet.
 - `Audio`, `Video`, `Html` and `Object3D` are skipped with a one-time warning.
 - `wandb.Api` (the read API) and `wandb.sweep` are not implemented.
+- HF's `report_to="wandb"` is not intercepted: pass `report_to="none"` and add the
+  callback (see below).
+- `run.path` and `run.url` are only final once the server has created the run, which
+  happens in the background. Call `run.flush()` first if you need them right after `init`.
 - Additions not in W&B: `event(text)`, `run.flush(timeout)` (blocks until the server has
   acknowledged everything), `Tensor`, and `watch_grads`.
 

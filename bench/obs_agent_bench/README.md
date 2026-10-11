@@ -39,3 +39,14 @@ tool output:
 ```
 python3 bench/obs_agent_bench/mcp_client.py --obs target/debug/obs --dir obs summarize '{"run": "bkk07/small"}'
 ```
+
+## Results
+
+| date       | model / mode                      | pass  | tool calls | tool errors | wall  |
+|------------|-----------------------------------|-------|------------|-------------|-------|
+| 2026-10-11 | `--scripted`                      | 14/14 | 16         | 1 (by design: typo) | <1 s |
+| 2026-10-11 | qwen3:30b-a3b, `/no_think`, T=0.2, seed 0, Ollama 0.35.1, RX 7600M XT 8 GB | 14/14 | 19 | 1 (typo, recovered next turn) | 883 s |
+
+These results are from one seed and one run each. qwen3-30b-a3b scores at
+the ceiling, so smaller models or harder multi-step tasks are needed before
+this bench can tell tool-design changes apart.

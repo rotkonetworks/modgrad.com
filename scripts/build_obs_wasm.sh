@@ -7,7 +7,7 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 OUT_DIR="${OUT_DIR:-$REPO/obs/pkg}"
 export RUSTFLAGS=''
-(cd "$REPO" && cargo rustc -q -p modgrad-obs-analysis --release --target wasm32-unknown-unknown --features wasm --crate-type cdylib -j 4)
+(cd "$REPO" && cargo rustc -q -p modgrad-obs-analysis --release --target wasm32-unknown-unknown --features wasm --crate-type cdylib -j "${JOBS:-3}")
 WASM_IN="$REPO/target/wasm32-unknown-unknown/release/modgrad_obs_analysis.wasm"
 mkdir -p "$OUT_DIR"
 wasm-bindgen --target web --no-typescript --out-dir "$OUT_DIR" --out-name modgrad_obs_analysis "$WASM_IN"

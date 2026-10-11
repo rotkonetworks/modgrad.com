@@ -252,3 +252,118 @@ pub fn forecast(steps: &[f64], vals: &[f64], pool_off: &[u32], pool_steps: &[f64
     opt.allow_pool = allow_pool;
     crate::forecast::forecast(steps, vals, &pool, &opt).map(|inner| ForecastOut { inner })
 }
+
+/// `[mean, min, max, rms]` of one array record.
+#[wasm_bindgen]
+pub fn array_stats(data: &[f32]) -> Vec<f64> {
+    crate::array_stats(data).to_vec()
+}
+
+// ------------------------------------------------------------------ graph builder
+
+/// Per-panel normalisation: `"z"`, `"minmax"`, `"first"`, else identity
+/// (see [`crate::expr::normalize`]).
+#[wasm_bindgen]
+pub fn normalize(vals: &[f64], mode: &str) -> Vec<f64> {
+    crate::expr::normalize(vals, mode)
+}
+
+/// Two series on one step grid (`"intersection"`, `"union"`, `"exact"`),
+/// e.g. to plot metric B against metric A joined on step.
+#[wasm_bindgen]
+pub struct Aligned {
+    steps: Vec<f64>,
+    a: Vec<f64>,
+    b: Vec<f64>,
+}
+
+#[wasm_bindgen]
+impl Aligned {
+    pub fn steps(&self) -> Vec<f64> {
+        self.steps.clone()
+    }
+    pub fn a(&self) -> Vec<f64> {
+        self.a.clone()
+    }
+    pub fn b(&self) -> Vec<f64> {
+        self.b.clone()
+    }
+}
+
+#[wasm_bindgen]
+pub fn align2(a_steps: &[f64], a_vals: &[f64], b_steps: &[f64], b_vals: &[f64], mode: &str) -> Aligned {
+    let (steps, mut v) = crate::expr::align(&[(a_steps, a_vals), (b_steps, b_vals)], crate::expr::Align::parse(mode));
+    let b = v.pop().unwrap_or_default();
+    let a = v.pop().unwrap_or_default();
+    Aligned { steps, a, b }
+}
+
+/// Result of [`expr_refs`] / [`eval_expr`]. On error `ok()` is false and
+/// `error()`, `err_start()`, `err_end()` (byte offsets into the
+/// expression) describe it.
+#[wasm_bindgen]
+pub struct ExprOut {
+    steps: Vec<f64>,
+    values: Vec<f64>,
+    refs: String,
+    error: Option<crate::expr::ExprError>,
+}
+
+#[wasm_bindgen]
+impl ExprOut {
+    pub fn ok(&self) -> bool {
+        self.error.is_none()
+    }
+    pub fn steps(&self) -> Vec<f64> {
+        self.steps.clone()
+    }
+    pub fn values(&self) -> Vec<f64> {
+        self.values.clone()
+    }
+    /// Referenced names, newline-joined.
+    pub fn refs(&self) -> String {
+        self.refs.clone()
+    }
+    pub fn error(&self) -> String {
+        self.error.as_ref().map(|e| e.msg.clone()).unwrap_or_default()
+    }
+    pub fn err_start(&self) -> usize {
+        self.error.as_ref().map_or(0, |e| e.start)
+    }
+    pub fn err_end(&self) -> usize {
+        self.error.as_ref().map_or(0, |e| e.end)
+    }
+}
+
+fn split_names(names: &str) -> Vec<&str> {
+    names.split('\n').filter(|s| !s.is_empty()).collect()
+}
+
+/// Parse only: which of the newline-joined `names` does `expr` use?
+#[wasm_bindgen]
+pub fn expr_refs(expr: &str, names: &str) -> ExprOut {
+    match crate::expr::refs(expr, &split_names(names)) {
+        Ok(r) => ExprOut { steps: Vec::new(), values: Vec::new(), refs: r.join("\n"), error: None },
+        Err(e) => ExprOut { steps: Vec::new(), values: Vec::new(), refs: String::new(), error: Some(e) },
+    }
+}
+
+/// Evaluate `expr` over the series named by the newline-joined `names`;
+/// series `i` is `steps/vals[off[i]..off[i+1]]`.
+#[wasm_bindgen]
+pub fn eval_expr(expr: &str, names: &str, off: &[u32], steps: &[f64], vals: &[f64], mode: &str) -> ExprOut {
+    let names = split_names(names);
+    let data: Vec<(&[f64], &[f64])> = off
+        .windows(2)
+        .map(|w| (w[0] as usize, w[1] as usize))
+        .map(|(a, b)| if a <= b && b <= steps.len() && b <= vals.len() { (&steps[a..b], &vals[a..b]) } else { (&steps[..0], &vals[..0]) })
+        .collect();
+    if data.len() != names.len() {
+        let msg = format!("internal: {} names but {} series", names.len(), data.len());
+        return ExprOut { steps: Vec::new(), values: Vec::new(), refs: String::new(), error: Some(crate::expr::ExprError { start: 0, end: 0, msg }) };
+    }
+    match crate::expr::eval(expr, &names, &data, crate::expr::Align::parse(mode)) {
+        Ok((s, v)) => ExprOut { steps: s, values: v, refs: String::new(), error: None },
+        Err(e) => ExprOut { steps: Vec::new(), values: Vec::new(), refs: String::new(), error: Some(e) },
+    }
+}

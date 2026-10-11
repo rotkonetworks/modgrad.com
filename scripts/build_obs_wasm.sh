@@ -7,9 +7,16 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 OUT_DIR="${OUT_DIR:-$REPO/obs/pkg}"
 export RUSTFLAGS=''
-(cd "$REPO" && cargo rustc -q -p modgrad-obs-analysis --release --target wasm32-unknown-unknown --features wasm --crate-type cdylib -j 4)
+(cd "$REPO" && cargo rustc -q -p modgrad-obs-analysis --release --target wasm32-unknown-unknown --features wasm --crate-type cdylib -j 3)
 WASM_IN="$REPO/target/wasm32-unknown-unknown/release/modgrad_obs_analysis.wasm"
 mkdir -p "$OUT_DIR"
 wasm-bindgen --target web --no-typescript --out-dir "$OUT_DIR" --out-name modgrad_obs_analysis "$WASM_IN"
 if command -v wasm-opt >/dev/null 2>&1; then wasm-opt -O3 "$OUT_DIR/modgrad_obs_analysis_bg.wasm" -o "$OUT_DIR/modgrad_obs_analysis_bg.wasm"; fi
+# Drag-and-drop ingest (CSV/JSONL/text/TensorBoard/W&B parsers), loaded only
+# by obs/drop-worker.js. A separate module: modgrad-obs (whose importers it
+# reuses) depends on modgrad-obs-analysis, so the two cannot be one crate.
+(cd "$REPO" && cargo rustc -q -p modgrad-obs-ingest --release --target wasm32-unknown-unknown --features wasm --crate-type cdylib -j 3)
+WASM_IN="$REPO/target/wasm32-unknown-unknown/release/modgrad_obs_ingest.wasm"
+wasm-bindgen --target web --no-typescript --out-dir "$OUT_DIR" --out-name modgrad_obs_ingest "$WASM_IN"
+if command -v wasm-opt >/dev/null 2>&1; then wasm-opt -O3 "$OUT_DIR/modgrad_obs_ingest_bg.wasm" -o "$OUT_DIR/modgrad_obs_ingest_bg.wasm"; fi
 ls -la "$OUT_DIR"

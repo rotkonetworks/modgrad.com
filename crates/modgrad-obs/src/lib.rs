@@ -29,6 +29,7 @@
 //! base64, and the sibling no_std crate modgrad-obs-analysis (kernels).
 //!
 
+
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde::Serialize;
@@ -602,6 +603,13 @@ impl Run {
         self.write_summary(None)
     }
 
+    /// Persist the current summary to `summary.json` now (atomic rename)
+    /// without marking the run finished. For short-lived writers (the MCP
+    /// `log` tool) that append a few rows and exit.
+    pub fn flush_summary(&self) -> io::Result<()> {
+        self.write_summary(None)
+    }
+
     /// Current in-memory summary.
     pub fn summary_map(&self) -> &Map<String, Value> {
         &self.summary
@@ -1062,3 +1070,4 @@ pub mod legacy;
 pub mod sink;
 pub use sink::{OpenSink, RunAt, Sink};
 pub mod textlog;
+pub mod mcp;

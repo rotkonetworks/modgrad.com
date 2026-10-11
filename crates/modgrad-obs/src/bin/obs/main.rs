@@ -37,6 +37,7 @@ const USAGE: &str = "usage:
   obs legacy <log.txt> <out_run_dir> [--name N] [--source S]
   obs export <obs_dir>
   obs show <run_dir>
+  obs mcp [--dir <obs_dir>] [--base-url URL]   MCP server on stdio for coding agents
 env: OBS_URL (default http://127.0.0.1:8790), OBS_TOKEN, OBS_PROJECT";
 
 fn env(k: &str) -> Option<String> {
@@ -167,6 +168,23 @@ fn main() {
             println!("name {}  last step {:?}  rows {}  arrays {}  events {}  skipped {}", rd.name(), rd.last_step(), rd.metrics.len(), rd.arrays.len(), rd.events.len(), rd.skipped);
             println!("metrics: {}", rd.metric_keys().join(", "));
             println!("arrays:  {}", rd.array_keys().join(", "));
+        }
+        Some("mcp") => {
+            // tools: log, ingest_log, list_runs, read_metric, summarize, compare, make_board.
+            // --dir is the obs root holding runs/ (default $OBS_DIR, else ./obs); --url selects
+            // remote mode (not implemented yet).
+            use modgrad_obs::mcp::{Server, serve_stdio, store};
+            let st: Box<dyn store::Store> = match flag(&args, "--url") {
+                Some(url) => Box::new(store::RemoteStore { url, token: flag(&args, "--token") }),
+                None => {
+                    let dir = flag(&args, "--dir").or_else(|| env("OBS_DIR")).unwrap_or_else(|| "obs".into());
+                    Box::new(store::LocalStore::open(Path::new(&dir), flag(&args, "--base-url")))
+                }
+            };
+            if let Err(e) = serve_stdio(&Server::new(st)) {
+                eprintln!("obs mcp: {e}");
+                std::process::exit(1);
+            }
         }
         _ => usage(),
     }

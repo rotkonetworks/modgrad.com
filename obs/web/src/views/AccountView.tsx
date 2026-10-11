@@ -215,9 +215,9 @@ function Sessions() {
         <thead><tr><th>browser</th><th>signed in</th><th>last seen</th><th /></tr></thead>
         <tbody><For each={me()!.sessions}>{(s) => (
           <tr>
-            <td class="lab" title={s.ua}><Show when={s.current}><span class="tag cur">this device</span> </Show>{s.ua || 'unknown'}</td>
+            <td class="lab" title={s.ua}><Show when={s.current}><span class="tag cur">this device</span> </Show>{uaShort(s.ua)}</td>
             <td data-h="signed in"><When unix={s.created} /></td><td data-h="last seen"><When unix={s.last_seen} /></td>
-            <td class="act"><ConfirmButton label={s.current ? 'sign out' : 'revoke'} confirm={s.current ? 'sign out here' : 'revoke it'} what={s.current ? 'this session' : 'session ' + s.ua.slice(0, 40)}
+            <td class="act"><ConfirmButton label={s.current ? 'sign out' : 'revoke'} confirm={s.current ? 'sign out here' : 'revoke it'} what={s.current ? 'this session' : 'session ' + uaShort(s.ua)}
               run={() => a.run(async () => { if (s.current) { await signOut(); return; } await api.revokeSession(s.id); await refreshMe(); showToast('session revoked'); })} /></td>
           </tr>
         )}</For></tbody>
@@ -245,4 +245,14 @@ function DeleteAccount() {
       </div>
     </>
   );
+}
+
+/** "Firefox 140 on Linux" from a User-Agent; the full string stays in the cell's title */
+export function uaShort(ua: string): string {
+  if (!ua) return 'unknown';
+  const os = /Android/.test(ua) ? 'Android' : /iPhone|iPad/.test(ua) ? 'iOS' : /Mac OS X/.test(ua) ? 'macOS' : /Windows/.test(ua) ? 'Windows' : /CrOS/.test(ua) ? 'ChromeOS' : /Linux/.test(ua) ? 'Linux' : '';
+  const m = /(Edg|OPR|Firefox|Chrome|Version)\/(\d+)/.exec(ua.replace(/Chrome\/\d+[^ ]* (?=.*(Edg|OPR)\/)/, ''));
+  const names: Record<string, string> = { Edg: 'Edge', OPR: 'Opera', Version: 'Safari' };
+  const b = m ? (names[m[1]] ?? m[1]) + ' ' + m[2] : /^curl|python|Go-http|modgrad/i.test(ua) ? ua.split(/[ /]/)[0] : '';
+  return [b, os && 'on ' + os].filter(Boolean).join(' ') || ua.slice(0, 40);
 }

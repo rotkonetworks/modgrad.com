@@ -39,6 +39,8 @@ const [consumeError, setConsumeError] = createSignal('');
 export { methods, available, me, meError, consuming, consumeError };
 /** the signed-in account id (from /me, or from /auth/methods before /me has loaded) */
 export const accountId = (): string | null => me()?.account.id ?? methods()?.account?.id ?? null;
+/** what the header shows: the account's email (or first credential), else its id */
+export const accountLabel = (): string | null => methods()?.account?.label || me()?.creds.find((c) => c.kind === 'email')?.label || accountId();
 
 onSignedOut(() => {
   setMe(null); setMethods((m) => (m ? { ...m, account: null } : m));

@@ -356,7 +356,7 @@ table.evals tr:hover td { background: var(--hl); }
 .bpanel .panel.lheat .ptitle { display: block; font-weight: 400; color: var(--muted); }
 
 /* ------------------------------------------------------------ portal: sign-in and account */
-button.acctbtn { font: 12px var(--mono); }
+button.acctbtn { font: 12px var(--mono); white-space: nowrap; max-width: 22ch; overflow: hidden; text-overflow: ellipsis; }
 button.acctbtn.on { border-color: var(--frame); background: var(--hl); }
 .portal { max-width: 920px; }
 .portal h2 { margin-top: 18px; }

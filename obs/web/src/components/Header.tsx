@@ -8,7 +8,7 @@ import { TABS, openMenu, openPopover, setPaletteOpen, type Tab, type MenuItem } 
 import { resetDefault, exportBoard, inspector, setInspector } from '@/stores/board';
 import { openImport, SettingsPop } from '@/views/BoardView';
 import { anomaliesOpen, setAnomaliesOpen } from '@/components/Anomalies';
-import { accountId, available, goAccount, goLogin, portalView, signOut } from '@/stores/account';
+import { accountId, accountLabel, available, goAccount, goLogin, portalView, signOut } from '@/stores/account';
 
 export const currentTab = (): Tab => { const v = hash().view; return (TABS.some(([t]) => t === v) ? v : 'board') as Tab; };
 
@@ -78,7 +78,7 @@ function AccountButton() {
         <button type="button" classList={{ acctbtn: true, on: portalView() === 'login' }} title="sign in with email, passkey, zafu or an SSH key" aria-label="sign in" onClick={goLogin}>sign in</button>
       }>{(id) => (
         <button type="button" classList={{ acctbtn: true, on: portalView() === 'account' }} title={'signed in as ' + id() + ': account page, sign out'} aria-label="account menu" aria-haspopup="menu" onClick={(e) => menu(e.currentTarget)}>
-          account <span class="mono">{short(id())}</span>
+          <span class="mono">{accountLabel() ?? short(id())}</span>
         </button>
       )}</Show>
     </Show>

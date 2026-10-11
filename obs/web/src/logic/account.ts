@@ -7,7 +7,7 @@ import { detectZafu, zafuSign, type ZafuHandle } from '@/logic/zafu';
 
 // ------------------------------------------------------------------ wire types
 export type CredKind = 'ssh' | 'email' | 'zafu' | 'passkey' | (string & {});
-export interface AccountSummary { id: string; created: number }
+export interface AccountSummary { id: string; created: number; /** the email, else the first credential's label */ label?: string | null }
 export interface Methods { email: boolean; zafu: boolean; passkey: boolean; ssh: { command: string } | null; account: AccountSummary | null }
 export interface Cred { kind: CredKind; id: string; label: string; added: number; last_used: number | null }
 export interface Project { name: string; visibility: 'private' | 'public'; runs: number; last_unix: number | null; anon: boolean; expires?: number | null }

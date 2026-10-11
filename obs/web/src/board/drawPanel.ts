@@ -43,7 +43,14 @@ export function drawPanel(c: DrawCtx): DrawOut {
   if (!res.ok) { h('div', { class: 'bempty' }, host, 'query error (see above)'); return out; }
   const meta = res.meta, traces = res.traces;
   if (res.heatmaps.length) return drawHeatmaps(c, res);
-  if (!traces.length) { h('div', { class: 'bempty' }, host, 'nothing matches this query yet; it updates as runs arrive'); for (const w of meta.warnings) h('div', { class: 'bnote' }, foot, w); return out; }
+  if (!traces.length) {
+    // with warnings the reason is known (e.g. no run logs the x-axis metric): say it in the panel, not under it
+    if (!meta.warnings.length) { h('div', { class: 'bempty' }, host, 'nothing matches this query yet; it updates as runs arrive'); return out; }
+    const box = h('div', { class: 'bempty' }, host, `nothing to draw: ${meta.warnings.join('; ')}`);
+    const xs = getStage(p.q, 'x');
+    if (xs) { h('br', {}, box); btn(box, 'plot against step instead', `plot against step instead (removes "${xs}")`, () => setStage(findPanel(p.id)!, 'x', null, 'x axis: step')); }
+    return out;
+  }
   const isStep = meta.x_label === 'step';
   const fc = meta.forecast && isStep ? meta.forecast : null;
   const el = host.closest('.bpanel') as HTMLElement | null;

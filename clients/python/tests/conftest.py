@@ -97,6 +97,8 @@ def modgrad_env(tmp_path, monkeypatch, request):
         if k.startswith(("WANDB_", "MODGRAD_", "OBS_")):
             monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("MODGRAD_DIR", str(tmp_path / "spool"))
+    # local and offline runs default to ./obs: keep them out of the checkout
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("MODGRAD_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("MODGRAD_RETRY_MAX", "0.5")
     monkeypatch.setenv("MODGRAD_FINISH_TIMEOUT", "15")
@@ -111,7 +113,12 @@ def modgrad_env(tmp_path, monkeypatch, request):
     _run._exit_code[0] = 0
 
 
+SRC = Path(__file__).resolve().parents[1] / "src"
+
+
 def subprocess_env(**extra: str) -> dict:
     env = {k: v for k, v in os.environ.items()}
+    # tests run in tmp_path, so a relative PYTHONPATH=src would not resolve
+    env["PYTHONPATH"] = os.pathsep.join([str(SRC)] + [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p])
     env.update(extra)
     return env

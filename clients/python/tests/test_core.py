@@ -91,14 +91,28 @@ def test_text_only_row_and_rejected_item_do_not_wedge(server):
     assert server.history(path)["columns"]["x"] == [2.0]
 
 
-def test_offline_then_obs_push(tmp_path, server, monkeypatch):
-    monkeypatch.setenv("MODGRAD_MODE", "offline")
-    run = modgrad.init(project="offl", name="later", config={"lr": 1})
+def _unsent_spool(monkeypatch, server, project, name, **kw):
+    """A run whose server never answered: its spool, re-pointed at `server`."""
+    monkeypatch.setenv("MODGRAD_URL", f"http://127.0.0.1:{free_port()}")
+    monkeypatch.setenv("MODGRAD_FINISH_TIMEOUT", "0.5")
+    run = modgrad.init(project=project, name=name, **kw)
+    return run
+
+
+def _repoint(d, server):
+    meta = json.loads((d / "meta.json").read_text())
+    meta["server"] = server.url
+    (d / "meta.json").write_text(json.dumps(meta))
+    return meta
+
+
+def test_unsent_spool_then_obs_push(tmp_path, server, monkeypatch):
+    run = _unsent_spool(monkeypatch, server, "offl", "later", config={"lr": 1})
     for i in range(5):
         modgrad.log({"loss": float(i)})
     d = Path(run.dir)
-    modgrad.finish()
-    meta = json.loads((d / "meta.json").read_text())
+    modgrad.finish(quiet=True)
+    meta = _repoint(d, server)
     assert meta["finish"] == {"exit_code": 0} and meta["name"] == run.id and meta["project"] == "offl"
     assert "offl/" + run.id not in server.runs("offl")
     if not OBS_BIN.exists():
@@ -112,13 +126,15 @@ def test_offline_then_obs_push(tmp_path, server, monkeypatch):
     assert not d.exists()
 
 
-def test_offline_then_python_sync(tmp_path, server, monkeypatch):
-    run = modgrad.init(project="offl", name="pysync", config={"lr": 1}, mode="offline")
+def test_unsent_spool_then_python_sync(tmp_path, server, monkeypatch):
+    run = _unsent_spool(monkeypatch, server, "offl", "pysync", config={"lr": 1})
     modgrad.log({"loss": 1.0})
     modgrad.summary["best"] = 1.0
     d = Path(run.dir)
-    modgrad.finish()
-    out = subprocess.run([sys.executable, "-m", "modgrad", "sync", str(d)], capture_output=True, text=True, timeout=60, env=subprocess_env())
+    modgrad.finish(quiet=True)
+    _repoint(d, server)
+    out = subprocess.run([sys.executable, "-m", "modgrad", "sync", str(d)], capture_output=True, text=True, timeout=60,
+                         env=subprocess_env(MODGRAD_URL=server.url))
     assert out.returncode == 0, out.stderr
     e = server.runs("offl")["offl/" + run.id]
     assert e["finished"] and server.config("offl/" + run.id) == {"lr": 1} and e["summary"]["best"] == 1.0

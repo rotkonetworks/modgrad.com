@@ -10,6 +10,7 @@
 //! * [`Authed`] — write tokens in front of the ingest stack.
 //! * [`Live`] — the change feed behind the SSE endpoints.
 //! * `h3` (feature `h3`) — the same router over HTTP/3 (QUIC).
+//! * `ssh` (feature `ssh`) — `python train.py | ssh <server>`: the key is the account.
 //!
 //! The server stores and selects; all analysis runs in the browser (wasm).
 
@@ -22,6 +23,8 @@ pub mod ingest;
 pub mod live;
 pub mod mcp_http;
 pub mod read;
+#[cfg(feature = "ssh")]
+pub mod ssh;
 pub mod state;
 pub mod v1;
 pub mod wire;

@@ -2,7 +2,7 @@
 // step keeps its samples fresh) and cached. Server: api/v1/runs/<id>/samples; static export:
 // <run path>/samples.json; both have the shape {samples, steps, keys, n}.
 import type { SamplesData } from '@/logic/samples';
-import { S, runVersion } from '@/stores/runs';
+import { S, runVersion, getJSON } from '@/stores/runs';
 import { dataURL } from '@/lib/base';
 
 const cache = new Map<string, { v: number; p: Promise<SamplesData> }>();
@@ -23,7 +23,9 @@ export function samplesOf(runId: string): Promise<SamplesData> {
   const run = S.byId.get(runId);
   const p = !url || !run || !run.n_samples
     ? Promise.resolve(EMPTY)
-    : fetch(dataURL(url), { cache: 'no-store' }).then((r) => (r.ok ? (r.json() as Promise<SamplesData>) : EMPTY)).catch(() => EMPTY);
+    : S.api
+      ? fetch(dataURL(url), { cache: 'no-store' }).then((r) => (r.ok ? (r.json() as Promise<SamplesData>) : EMPTY)).catch(() => EMPTY)
+      : getJSON<SamplesData>(url).catch(() => EMPTY); // static export / bundle.json snapshot
   cache.set(runId, { v, p });
   return p;
 }

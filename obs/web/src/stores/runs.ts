@@ -240,6 +240,7 @@ export async function loadIndex(idxURL: string): Promise<void> {
 }
 export function genMeta(): string {
   runsVersion();
+  if (!S.index && !S.runs.length) return 'loading runs…'; // not "static mode, 0 runs" before the index answers
   const n = new Set(S.runs.map((r) => r.source)).size;
   const when = S.index ? new Date(S.index.generated_unix * 1000).toISOString().slice(0, 16).replace('T', ' ') + ' UTC' : '';
   return `${S.api ? 'server mode' : 'static mode'}, ${S.runs.length} run${S.runs.length === 1 ? '' : 's'} from ${n} source${n === 1 ? '' : 's'}${when ? ', index built ' + when : ''}`;

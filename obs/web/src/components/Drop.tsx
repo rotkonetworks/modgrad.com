@@ -1,5 +1,7 @@
 import { createSignal, For, onCleanup, onMount, Show } from 'solid-js';
 import { report, dismissReport, ingest } from '@/stores/drop';
+import { addRunsToBoard } from '@/stores/board';
+import { setHash } from '@/lib/hash';
 import { filesFromDrop } from '@/logic/drop';
 
 const mb = (n: number) => (n >= 1 << 20 ? (n / (1 << 20)).toFixed(1) + ' MB' : n >= 1024 ? (n / 1024).toFixed(1) + ' kB' : n + ' B');
@@ -37,6 +39,13 @@ export function DropReport() {
           <tbody>
             <For each={report.batches}>{(b) => (
               <>
+                <Show when={b.runIds.length}>
+                  <tr><td colSpan={8}>
+                    <button type="button" title={`panels for ${b.runIds.join(', ')}, appended to the board (undoable)`} aria-label={`add ${b.runIds.length} dropped run${b.runIds.length === 1 ? '' : 's'} to the board`}
+                      onClick={() => { const id = addRunsToBoard([...b.runIds]); if (id) { setHash({ view: null, panel: null }); requestAnimationFrame(() => document.querySelector(`.bpanel[data-pid="${id}"]`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })); } }}>
+                      add to board</button> <span class="notes">{b.runIds.length} run{b.runIds.length === 1 ? '' : 's'}: {b.runIds.join(', ')}</span>
+                  </td></tr>
+                </Show>
                 <For each={b.groups}>{(g) => (
                   <Show when={!g.error} fallback={<tr><td>{g.name}</td><td /><td colSpan={5} class="bad">failed</td><td class="notes bad">{g.error}</td></tr>}>
                     <Show when={g.files} fallback={

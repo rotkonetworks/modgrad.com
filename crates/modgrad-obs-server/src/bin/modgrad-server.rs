@@ -44,10 +44,51 @@ use modgrad_obs_server::auth::{Auth, AuthConfig};
 use modgrad_obs_server::{IngestConfig, http};
 use std::path::PathBuf;
 
+const USAGE: &str = "usage:
+  modgrad-server [--root <obs dir>] [--listen 127.0.0.1:8790] [--static <dir> | --no-static]
+             [--dev] [--no-anon] [--anon-expiry-days 30] [--mcp]
+             [--h3 <udp addr> (--tls-cert <pem> --tls-key <pem> | --h3-self-signed) [--h3-advertise <port>]]
+             [--ssh <tcp addr> [--ssh-idle <secs>] [--ssh-max-conns 256] [--ssh-max-per-key 8]]
+             [--public-url <https://obs.example.org>]
+  modgrad-server token add <project> [--root <obs dir>] [--json]
+--dev accepts writes without a token (local use only). Logging: RUST_LOG=info.";
+/// flags that take a value, and flags that do not
+const VALUED: &[&str] = &[
+    "--root", "--listen", "--static", "--anon-expiry-days", "--h3", "--tls-cert", "--tls-key", "--h3-advertise",
+    "--ssh", "--ssh-idle", "--ssh-max-conns", "--ssh-max-per-key", "--public-url",
+];
+const SWITCHES: &[&str] = &["--no-static", "--dev", "--no-anon", "--mcp", "--h3-self-signed", "--json"];
+
+/// `--help` prints the usage; an unknown flag or a missing value is an error, not something to
+/// ignore while starting a server on the default port
+fn check_args(args: &[String]) {
+    if args.iter().skip(1).any(|a| a == "-h" || a == "--help" || a == "help") {
+        println!("{USAGE}");
+        std::process::exit(0);
+    }
+    let mut i = if args.get(1).map(String::as_str) == Some("token") { 4 } else { 1 };
+    while i < args.len() {
+        let a = args[i].as_str();
+        if VALUED.contains(&a) {
+            if args.get(i + 1).is_none_or(|v| v.starts_with("--")) {
+                eprintln!("modgrad-server: {a} needs a value\n{USAGE}");
+                std::process::exit(2);
+            }
+            i += 2;
+        } else if SWITCHES.contains(&a) {
+            i += 1;
+        } else {
+            eprintln!("modgrad-server: unknown argument {a:?}\n{USAGE}");
+            std::process::exit(2);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
     let args: Vec<String> = std::env::args().collect();
+    check_args(&args);
     let flag = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1).cloned());
     let has = |k: &str| args.iter().any(|a| a == k);
     let root = PathBuf::from(flag("--root").unwrap_or_else(|| "obs".into()));

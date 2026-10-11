@@ -89,6 +89,8 @@ nav.tabs a.on { color: var(--ink); border-color: var(--frame); background: var(-
 .panel svg.zoom { touch-action: pan-y; }
 .panel svg:focus { outline: none; }
 .panel .sub { font: 11px var(--mono); color: var(--muted); text-align: center; }
+.panel .sub.hint { visibility: hidden; }
+.panel:hover .sub.hint, .panel:focus-within .sub.hint, .bfocus .panel .sub.hint { visibility: visible; }
 table.legend { border-collapse: collapse; width: 100%; font: 11px var(--mono); margin-top: 2px; }
 table.legend td, table.legend th { padding: 0 4px; text-align: right; white-space: nowrap; }
 table.legend th { font-weight: 600; color: var(--muted); }
@@ -135,6 +137,7 @@ details.run .dh { font-weight: 600; margin-top: 6px; }
 .brow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .brow label { display: inline-flex; gap: 3px; align-items: center; }
 .brow button, .brow select, .bfoot button { font: 10px var(--mono); padding: 0 4px; line-height: 15px; }
+.brow.picked { margin-top: 4px; padding: 2px 4px; background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
 .blist { overflow-y: auto; flex: 1 1 auto; min-height: 120px; }
 .bgrp > .bgh { display: flex; background: var(--hl); border-bottom: 1px solid var(--rule); }
 .bgrp > .bgh button.tog { flex: 1; text-align: left; border: 0; background: none; font: 11px var(--mono); padding: 2px 6px; display: flex; gap: 6px; min-width: 0; }
@@ -227,7 +230,8 @@ details.run .dh { font-weight: 600; margin-top: 6px; }
 .bfocus .fbody .binsp { position: static; max-height: 100%; width: 300px; flex: none; }
 .bfocus .fmain { flex: 1; min-width: 0; overflow-y: auto; border: 1px dashed transparent; }
 .bfocus .bpanel { max-width: none; }
-.bfocus .bpanel .panel { max-width: min(100%, calc((100vh - 230px) * 540 / 210)); margin: 0 auto; }
+.bfocus .bpanel .panel { max-width: none; margin: 0 auto; } /* drawn at the focus view's size (drawPanel), not scaled up */
+.bfocus .bpanel table.legend td.name, .bfocus .bpanel table.legend td.name button { max-width: min(60vw, 720px); }
 .bfocus .bpanel .bcells .panel { max-width: none; }
 body.bfocused { overflow: hidden; }
 

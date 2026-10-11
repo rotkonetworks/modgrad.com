@@ -41,7 +41,8 @@
 //! metric, aligned; the baseline itself is dropped) → `norm` (per run) →
 //! aggregation (runs whose config agrees on every field except the
 //! `over` field are one group; a field none of them has is ignored, so
-//! replicate runs without a seed field still group) → x mapping (x is a
+//! replicate runs without a seed field still group; a run with no other
+//! config field stays alone) → x mapping (x is a
 //! metric of the same run joined on step via [`crate::expr::align`];
 //! `time` is `elapsed_min × 60`; an unknown name falls back to the first
 //! metric containing it, so `x tokens` finds `tokens_seen`; aggregates use
@@ -1149,6 +1150,11 @@ pub fn eval(q: &Query, cat: &Catalog, plan: &Plan, data: &[(&[f64], &[f64])], ma
             let r = &cat.runs[t.runs[0]];
             let mut key: Vec<String> = r.config.iter().filter(|(k, _)| *k != over).map(|(k, v)| format!("{k}={v}")).collect();
             key.sort();
+            // a run with no config besides the field (a dropped CSV, a bare `modgrad run`) has
+            // nothing that says it repeats another run: it stays its own group
+            if key.is_empty() {
+                key.push(format!("\u{3}run{}", t.runs[0]));
+            }
             let k = format!("{}\u{1}{}\u{1}{}", t.letter, t.metric, key.join("\u{2}"));
             match groups.iter_mut().find(|g| g.0 == k) {
                 Some(g) => g.1.push(t),
@@ -1483,6 +1489,20 @@ R\tlocal/pilot1\nI\tname\tpilot1\nC\tsize\t494053\nM\tloss\n";
         assert!((g.hi[0] - (6.0 + sd)).abs() < 1e-12 && (g.lo[2] - (4.0 - sd)).abs() < 1e-12);
         let m = o.traces.iter().find(|t| t.runs.len() == 1).unwrap();
         assert!(!m.band && m.lo[0].is_nan());
+    }
+
+    #[test]
+    fn runs_without_config_are_not_replicates() {
+        // two dropped files with no config agree on every field vacuously; they are not seeds of one run
+        let cat = Catalog::parse("R\tlocal:a.csv\nM\tloss\nR\tlocal:b.csv\nM\tloss\nR\tx/s1\nC\tlr\t1\nC\tseed\t1\nM\tloss\nR\tx/s2\nC\tlr\t1\nC\tseed\t2\nM\tloss\n");
+        let q = parse("loss | mean±sd over seed").unwrap();
+        let p = plan(&q, &cat);
+        let owned: Vec<(Vec<f64>, Vec<f64>)> = p.streams.iter().map(|_| (vec![0.0, 1.0], vec![1.0, 2.0])).collect();
+        let d: Vec<(&[f64], &[f64])> = owned.iter().map(|(a, b)| (&a[..], &b[..])).collect();
+        let o = eval(&q, &cat, &p, &d, 0);
+        let mut ns: Vec<usize> = o.traces.iter().map(|t| t.runs.len()).collect();
+        ns.sort();
+        assert_eq!(ns, [1, 1, 2]);
     }
 
     #[test]

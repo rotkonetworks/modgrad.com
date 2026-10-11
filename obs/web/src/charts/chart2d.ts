@@ -38,6 +38,8 @@ export interface Chart2DOpts {
   ghostNotes?: [string | null, string][] | null; yrange?: [number, number] | null;
   decorateLegend?: (t: HTMLTableElement | null, series: Series[]) => void;
   onview?: (v: View | null) => void; overlay?: (api: OverlayApi) => void; onclick?: (ev: PointerEvent) => void;
+  /** drawing size in CSS px (default 540 x 210); pass the box's real width so text stays ~10 px on screen */
+  width?: number; height?: number;
 }
 export interface Chart2D {
   panel: HTMLDivElement;
@@ -91,7 +93,7 @@ let activeDrags = 0;
 export const chartBusy = (): boolean => activeDrags > 0;
 export function chart2d(parent: Element, o: Chart2DOpts): HTMLDivElement & { chart?: Chart2D } {
   const hasY2 = o.series.some((s) => s.y2) && o.series.some((s) => !s.y2);
-  const W = 540, H = 210, L = 58, R = hasY2 ? 52 : 14, T = 10, B = 28;
+  const W = Math.max(280, Math.round(o.width || 540)), H = Math.round(o.height || Math.max(170, (W * 210) / 540)), L = 58, R = hasY2 ? 52 : 14, T = 10, B = 28;
   const pw = W - L - R, ph = H - T - B;
   const panel = h('div', { class: 'panel' }, parent) as HTMLDivElement & { chart?: Chart2D };
   h('div', { class: 'ptitle' }, panel, o.title);
@@ -191,7 +193,7 @@ export function chart2d(parent: Element, o: Chart2DOpts): HTMLDivElement & { cha
       for (const sg of segs(s)) {
         if (sg.length === 1) { svgEl('rect', { x: sg[0][0] - 2.5, y: sg[0][1] - 2.5, width: 5, height: 5, style: `fill:var(${s.color})` }, plot); continue; }
         const d = 'M' + sg.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join('L') + `L${sg[sg.length - 1][0].toFixed(1)},${T + ph}L${sg[0][0].toFixed(1)},${T + ph}Z`;
-        svgEl('path', { 'data-si': s.si, d, style: `fill:var(${s.color});stroke:none` }, plot);
+        svgEl('path', { 'data-si': s.si, d, style: `fill:var(${s.color});fill-opacity:0.12;stroke:none` }, plot); // a faint wash; the line is drawn below
       }
     }
     for (const s of ghosts.filter((s) => !s.hidden)) { // band, then dashed mean line
@@ -206,13 +208,13 @@ export function chart2d(parent: Element, o: Chart2DOpts): HTMLDivElement & { cha
         svgEl('path', { d: 'M' + sg.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join('L'), style: `fill:none;stroke:var(${s.color});stroke-width:1.2;stroke-opacity:0.55;stroke-dasharray:4 3` }, plot);
       }
     }
-    for (const s of shown.filter((s) => !s.area)) {
+    for (const s of shown) {
       for (const sg of segs(s)) {
         if (sg.length === 1) { svgEl('rect', { 'data-si': s.si, x: sg[0][0] - 2.5, y: sg[0][1] - 2.5, width: 5, height: 5, style: `fill:none;stroke:var(${s.color});stroke-width:1` }, plot); continue; }
         svgEl('path', { 'data-si': s.si, d: 'M' + sg.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join('L'), style: `fill:none;stroke:var(${s.color});stroke-width:1` }, plot);
       }
     }
-    if (dots) for (const s of shown) for (const sg of segs(s)) for (const p of sg) svgEl('rect', { x: p[0] - 1.5, y: p[1] - 1.5, width: 3, height: 3, style: `fill:var(--bg);stroke:var(${s.area ? '--frame' : s.color});stroke-width:1` }, plot);
+    if (dots) for (const s of shown) for (const sg of segs(s)) for (const p of sg) svgEl('rect', { x: p[0] - 1.5, y: p[1] - 1.5, width: 3, height: 3, style: `fill:var(--bg);stroke:var(${s.color});stroke-width:1` }, plot);
     if (o.marker) for (const m of o.marker) svgEl('line', { x1: X(tx(m)), x2: X(tx(m)), y1: T, y2: T + ph, style: 'stroke:var(--accent);stroke-width:1;stroke-dasharray:3 2' }, plot);
     svgEl('rect', { x: L + 0.5, y: T + 0.5, width: pw - 1, height: ph, style: 'fill:none;stroke:var(--frame);stroke-width:1', 'shape-rendering': 'crispEdges' }, next);
     if (layer) layer.replaceWith(next); else svg.insertBefore(next, svg.firstChild);
@@ -221,7 +223,7 @@ export function chart2d(parent: Element, o: Chart2DOpts): HTMLDivElement & { cha
     // legend: statistics over the visible window
     const rows = series.map((s) => {
       const vis: number[] = []; for (let i = 0; i < s.S.length; i++) if (inX(s.X[i])) vis.push(s.S[i]);
-      return { name: s.name + (s.y2 ? '  (right axis)' : ''), color: s.color, area: s.area, stats: Array.from(A.legend_stats(nums(vis))) };
+      return { name: s.name + (s.y2 ? '  (right axis)' : ''), color: s.color, stats: Array.from(A.legend_stats(nums(vis))) };
     });
     const nl = legendTable(h('div', {}), rows, o.legendHead).parentNode as HTMLElement;
     if (o.ghostNotes && o.ghostNotes.length) {
@@ -238,6 +240,7 @@ export function chart2d(parent: Element, o: Chart2DOpts): HTMLDivElement & { cha
     sub.textContent = view
       ? `showing ${xf(+x0.toPrecision(3))} to ${xf(+x1.toPrecision(3))}${view.y0 !== undefined ? `, y ${yf(+y0.toPrecision(3))} to ${yf(+y1.toPrecision(3))}` : ''}; double-click or Esc to reset`
       : 'drag to zoom, alt-drag box, shift-drag pan, click then wheel to zoom';
+    sub.classList.toggle('hint', !view); // the gesture hint shows on the chart in use, not under every chart
   }
 
   const me: Chart2D = {

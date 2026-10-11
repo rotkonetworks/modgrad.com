@@ -66,6 +66,8 @@ function save(): void {
   if (shared()) return;
   lsSet(M.key, M.autoBoard ? JSON.stringify({ version: Bd.BOARD_VERSION, auto: true, panels: M.board.panels }, null, 1) : Bd.serialize(M.board));
 }
+/** the board is still the untouched default (it follows the data) */
+export const boardIsAuto = (): boolean => M.autoBoard && !shared();
 export const findPanel = (id: string | null | undefined): Panel | undefined => (id ? M.board.panels.find((p) => p.id === id) : undefined);
 export const parseQ = Bd.parse;
 export function titleOf(p: { title: string; q: string }): string {
@@ -110,15 +112,31 @@ export function autoPreset(): Board | null {
   // a single-run page builds from that run only (empty until it arrives, then it follows)
   const inProject = (r: Run) => !!t.project && r.id.startsWith(t.project + '/');
   const runs = t.run ? S.runs.filter((r) => r.id === t.run) : t.project ? S.runs.filter(inProject) : sel.length ? sel : S.runs;
-  // a metric logged once per run (a fixed baseline, a final score) is no curve: keep it off the default board
-  const counts = new Map([...metricCounts(runs)].filter(([m]) => runs.some((r) => (r.metrics?.[m]?.n ?? 0) >= 2)));
   // demo runs stay out of the default board without pinning it to today's run list
   let filter = S.runs.some(synthetic) && !runs.some(synthetic) ? '{synthetic!=true}' : '';
   if (t.run) filter = `{run=${Bd.quote(t.run)}}`;
   else if (t.project) filter = `{run=~${Bd.quote(t.project + '/*')}}`;
+  return autoFor(runs, filter);
+}
+/** the convention board over these runs, each entry carrying `filter` */
+function autoFor(runs: Run[], filter: string): Board | null {
+  // a metric logged once per run (a fixed baseline, a final score) is no curve: keep it off the default board
+  const counts = new Map([...metricCounts(runs)].filter(([m]) => runs.some((r) => (r.metrics?.[m]?.n ?? 0) >= 2)));
   const tok = [...counts.keys()].find((m) => /tokens?_seen|^tokens$|num_tokens|consumed_tokens/.test(m));
   const families = layerFamilies([...counts.keys()], 2);
-  return Bd.autoBoard(counts, { replicates: hasReplicates(runs), hasTokens: tok || null, filter, families, heatmapQuery, samples: runs.some((r) => (r.n_samples || 0) > 0), samplesMetric: SAMPLES_METRIC });
+  const runsOf = (m: string) => runs.filter((r) => r.metrics?.[m]).map((r) => r.id);
+  return Bd.autoBoard(counts, { replicates: hasReplicates(runs), hasTokens: tok || null, filter, families, heatmapQuery, samples: runs.some((r) => (r.n_samples || 0) > 0), samplesMetric: SAMPLES_METRIC, runsOf });
+}
+/** panels for just these runs (dropped files), appended to the board: undoable; returns the first new panel's id */
+export function addRunsToBoard(ids: string[]): string | null {
+  const runs = ids.map((id) => S.byId.get(id)).filter((r): r is Run => !!r);
+  if (!runs.length) return null;
+  const sel = Bd.runsMatcher(runs.map((r) => r.id));
+  const b = autoFor(runs, sel) || Bd.presetHistory({ runIds: runs.map((r) => r.id), metrics: Bd.rankMetrics([...metricCounts(runs).keys()], 4) });
+  if (!b.panels.length) { showToast('these runs have no metric to graph'); return null; }
+  const what = `add ${runs.length} run${runs.length === 1 ? '' : 's'} to the board`;
+  if (!commit(what, () => { M.board.panels.push(...b.panels); setSelPanel(b.panels[0].id); }, { toast: `${what}: ${b.panels.length} panel${b.panels.length === 1 ? '' : 's'}` })) return null;
+  return b.panels[0].id;
 }
 export const defaultBoard = (): Board => autoPreset() || historyPreset();
 export function applyPreset(name: string): void {

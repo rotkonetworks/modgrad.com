@@ -20,11 +20,25 @@ import { getStage, quote } from '@/logic/board';
 import { addToNew } from '@/stores/board';
 
 export const MAX_POINTS = 1500;
+/** chart width for a box: its CSS width rounded down to 60 px, so the SVG scales by at most ~1.2
+ *  (text stays 10-12 px from a 400 px phone to a full-screen focus view) and a resize redraws
+ *  only when the step changes */
+export const chartWidth = (px: number): number => (px > 0 ? Math.max(300, Math.floor(px / 60) * 60) : 540);
 export interface DrawOut { badge: { text: string; skill: boolean; title: string } | null }
-export interface DrawCtx { panel: Panel; host: HTMLElement; foot: HTMLElement; res: QueryResult; events: Map<string, RunEvent[]>; inFocus: boolean; focusOpen: boolean; dataKey: string; title: string }
+export interface DrawCtx { panel: Panel; host: HTMLElement; foot: HTMLElement; res: QueryResult; events: Map<string, RunEvent[]>; inFocus: boolean; focusOpen: boolean; dataKey: string; title: string; redraw?: () => void }
 
 /** stable across data updates (labels carry counts like n=3) */
 const traceKey = (t: Trace) => `${t.letter}|${t.metric}|${t.runs[0]}`;
+/** a cheap fingerprint of the points a forecast reads (length, ends, two weighted sums) */
+function dataSig(t: { xs: ArrayLike<number>; raw: ArrayLike<number> }): string {
+  let s1 = 0, s2 = 0; const n = t.raw.length;
+  for (let i = 0; i < n; i++) { const v = t.raw[i]; if (Number.isFinite(v)) { s1 += v; s2 += v * ((i % 97) + 1); } }
+  return `${n}:${t.xs[0]}:${t.xs[t.xs.length - 1]}:${s1}:${s2}`;
+}
+const lastX = (t: { xs: ArrayLike<number> }): number => { for (let i = t.xs.length - 1; i >= 0; i--) if (Number.isFinite(t.xs[i])) return t.xs[i]; return -Infinity; };
+const FC_LIVE_MS = 2000;
+const fcLast = new Map<string, { f: Forecast; at: number; n: number }>();
+const fcTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const niceRound = (v: number) => { const e = Math.pow(10, Math.floor(Math.log10(v)) - 1); return Math.round(v / e) * e; };
 
 export function drawPanel(c: DrawCtx): DrawOut {
@@ -34,7 +48,14 @@ export function drawPanel(c: DrawCtx): DrawOut {
   if (!res.ok) { h('div', { class: 'bempty' }, host, 'query error (see above)'); return out; }
   const meta = res.meta, traces = res.traces;
   if (res.heatmaps.length) return drawHeatmaps(c, res);
-  if (!traces.length) { h('div', { class: 'bempty' }, host, 'nothing matches this query yet; it updates as runs arrive'); for (const w of meta.warnings) h('div', { class: 'bnote' }, foot, w); return out; }
+  if (!traces.length) {
+    // with warnings the reason is known (e.g. no run logs the x-axis metric): say it in the panel, not under it
+    if (!meta.warnings.length) { h('div', { class: 'bempty' }, host, 'nothing matches this query yet; it updates as runs arrive'); return out; }
+    const box = h('div', { class: 'bempty' }, host, `nothing to draw: ${meta.warnings.join('; ')}`);
+    const xs = getStage(p.q, 'x');
+    if (xs) { h('br', {}, box); btn(box, 'plot against step instead', `plot against step instead (removes "${xs}")`, () => setStage(findPanel(p.id)!, 'x', null, 'x axis: step')); }
+    return out;
+  }
   const isStep = meta.x_label === 'step';
   const fc = meta.forecast && isStep ? meta.forecast : null;
   const el = host.closest('.bpanel') as HTMLElement | null;
@@ -62,9 +83,29 @@ export function drawPanel(c: DrawCtx): DrawOut {
       const fr = p.view.fc.frozen && p.view.fc.frozen[traceKey(t)];
       if (!p.view.fc.live && fr) f = fr;
       else {
-        const ck = JSON.stringify([p.q, t.label, to, fc.method, p.view.fc.window, p.view.fc.band, p.view.fc.pool, c.dataKey]);
+        // keyed on what the fit reads (this trace's and the pooled traces' data), not on the query
+        // text: a display stage (log y, ema, colour, another series) must not refit (~0.3-0.8 s each)
+        // (the default horizon moves with the data, so only a horizon the viewer set is identity)
+        const id = JSON.stringify([p.id, traceKey(t), fc.to || null, fc.method, p.view.fc.window, p.view.fc.band, p.view.fc.pool]);
+        const ck = JSON.stringify([id, to, dataSig(t), pool.map(dataSig)]);
         f = fcCache.get(ck);
-        if (!f) { f = Dt.forecastTrace(t, to, { method: fc.method, window: p.view.fc.window, band: p.view.fc.band, pool }); if (fcCache.size > 400) fcCache.clear(); fcCache.set(ck, f); }
+        if (!f) {
+          // while rows are being appended (a live run, or a live run in the pool) a trace refits at
+          // most every FC_LIVE_MS; in between the last fit is drawn and one redraw is queued, so
+          // the final rows always get a fit
+          const prev = fcLast.get(id), now = Date.now();
+          // rows were appended: the newest x moved on (the length is pinned once block-averaged to
+          // MAX_POINTS, and a value-only change such as norm z must refit at once)
+          const n = Math.max(lastX(t), ...pool.map(lastX));
+          if (prev && c.redraw && n > prev.n && now - prev.at < FC_LIVE_MS) {
+            f = prev.f;
+            if (!fcTimers.has(p.id)) fcTimers.set(p.id, setTimeout(() => { fcTimers.delete(p.id); c.redraw!(); }, FC_LIVE_MS - (now - prev.at) + 20));
+          } else {
+            f = Dt.forecastTrace(t, to, { method: fc.method, window: p.view.fc.window, band: p.view.fc.band, pool });
+            if (fcCache.size > 400) fcCache.clear();
+            fcCache.set(ck, f); fcLast.set(id, { f, at: now, n });
+          }
+        }
       }
       fcs.set(t.label, f);
       const hk = p.id + '\u0001' + traceKey(t), hist = fcHist.get(hk);
@@ -106,19 +147,23 @@ export function drawPanel(c: DrawCtx): DrawOut {
     const ct = traces.map((t, i) => ({ t, i })).filter(({ t }) => (t.cell || '') === cell);
     const cbox = split ? h('div', { class: 'bcell' }, wrap) : wrap;
     if (split) h('div', { class: 'ctitle' }, cbox, cell || '(none)');
-    const series = ct.map(({ t, i }, k) => {
+    const series = ct.map(({ t, i }) => {
       const f = fcs.get(t.label);
       return {
         name: shortName(t, ct.map((x) => x.t)) + (meta.by ? `  [${meta.by}=${t.color}]` : ''), trace: t, color: colour(i),
-        area: k === 0 && !meta.by && !anyBand && nTr <= 6 && !split, xs: t.xs, ys: t.ys, raw: t.raw,
+        // a wash under the line only when it is the one visible series: under an overlay it hides the others
+        area: nTr === 1 && !hiddenTrace(p, t) && !meta.by && !anyBand && !split, xs: t.xs, ys: t.ys, raw: t.raw,
         band: t.band ? { lo: t.lo, hi: t.hi } : null, hidden: hiddenTrace(p, t), y2: p.view.y2 === t.label,
         ghost: f && f.none === undefined ? { xs: f.xs, ys: f.ys, lo: f.lo, hi: f.hi } : null,
         fresh: t.runs.some((r) => now - (fresh.get(p.id + '\u0001' + r) || 0) < 20000),
       };
     });
     if (!series.length) continue;
+    const W = chartWidth(cbox.clientWidth);
+    // the focus view fills the window's height (one chart); the board keeps the 540:210 shape
+    const H = c.inFocus && !split ? Math.max(210, Math.min(Math.round(W * 0.6), innerHeight - 300)) : undefined;
     chart2d(cbox, {
-      title: c.title + (cell ? ' / ' + cell : ''), series, ylog: meta.ylog, yrange: lockY ? yrange : null,
+      title: c.title + (cell ? ' / ' + cell : ''), series, ylog: meta.ylog, yrange: lockY ? yrange : null, width: W, height: H,
       xlabel: meta.x_label, xfmt: meta.x_label === 'time' ? fmtTime : fmtTick, group,
       legendHead: series.length > 6 ? `${series.length} series` : '',
       decorateLegend: (tbl, ss) => decorateLegend(p.id, tbl, ss, cbox),

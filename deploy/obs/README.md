@@ -11,4 +11,4 @@ graphs, fits and forecasts are computed in the viewer's browser.
 
 Build args: `JOBS` (cargo parallelism, default 6). Runs as uid 10001; data
 lives in the `/data` volume (`/data/runs/<run>/`; boards saved by the MCP
-`make_board` tool in `/data/boards/`, opened as `/#board=<name>`). Image ≈ 94 MB.
+`make_board` tool in `/data/boards/`, opened as `/#board=<name>`). Image ≈ 97 MB. `--dev` (appended to `podman run … modgrad-obs`) accepts writes without a token.

@@ -98,7 +98,7 @@ def sh(cmd, **kw):
     return subprocess.run(cmd, check=True, capture_output=True, text=True, **kw)
 
 
-def build_env(envdir, obs_bin, server_bin):
+def build_env(envdir, obs_bin, server_bin, client_dir):
     """Binaries, the client wheel and the ground truth, once per --data dir."""
     os.makedirs(os.path.join(envdir, "bin"), exist_ok=True)
     for b in (obs_bin, server_bin):
@@ -110,7 +110,7 @@ def build_env(envdir, obs_bin, server_bin):
         sh([sys.executable, "-m", "pip", "install", "-q", "--target", hatch, "hatchling"])
     src = os.path.join(envdir, "client-src")  # build from a copy: no build/ litter in the checkout
     shutil.rmtree(src, ignore_errors=True)
-    shutil.copytree(os.path.join(ROOT, "clients", "python"), src, ignore=shutil.ignore_patterns("tests", "__pycache__", "*.egg-info", "build", "dist"))
+    shutil.copytree(client_dir, src, ignore=shutil.ignore_patterns("tests", "__pycache__", "*.egg-info", "build", "dist"))
     sh([sys.executable, "-m", "pip", "wheel", "-q", "--no-deps", "--no-build-isolation", "-w", wheels, src],
        env=dict(os.environ, PYTHONPATH=hatch))
     golden = {}
@@ -590,7 +590,8 @@ def main():
     ap.add_argument("--obs", default=os.path.join(ROOT, "target", "release", "modgrad"))
     ap.add_argument("--obs-server", default=os.path.join(ROOT, "target", "release", "modgrad-server"))
     ap.add_argument("--data", default=os.environ.get("OBS_BENCH_DIR", os.path.join(os.environ.get("TMPDIR", "/tmp"), "obs-agent-bench")))
-    ap.add_argument("--llms", default=os.path.join(ROOT, "obs", "llms.txt"))
+    ap.add_argument("--llms", default=os.path.join(ROOT, "obs", "llms.txt"), help="the docs given to the agent (read once, at start)")
+    ap.add_argument("--client", default=os.path.join(ROOT, "clients", "python"), help="Python client source to build the wheel from")
     ap.add_argument("--scripted", action="store_true")
     ap.add_argument("--negative", action="store_true", help="with --scripted: also run broken solutions that must fail")
     ap.add_argument("--sandbox-selftest", action="store_true")
@@ -611,10 +612,16 @@ def main():
     os.makedirs(a.data, exist_ok=True)
     data = os.path.abspath(a.data)
     envdir = os.path.join(data, "_env")
-    golden = build_env(envdir, a.obs, a.obs_server)
+    golden = build_env(envdir, a.obs, a.obs_server, a.client)
     if a.sandbox_selftest:
         sys.exit(0 if selftest(envdir) else 1)
     llms = open(a.llms).read()
+    import hashlib
+
+    def sha(p):
+        return hashlib.sha256(open(p, "rb").read()).hexdigest()[:12]
+    prov = {"llms": sha(a.llms), "modgrad": sha(a.obs), "modgrad_server": sha(a.obs_server),
+            "wheel": sha(glob.glob(os.path.join(envdir, "wheels", "*.whl"))[0])}
     label = ("scripted" if a.scripted else re.sub(r"[^\w.-]", "_", a.model) + ("-think" if a.think else "")) + "-onboard" + (f"-{a.tag}" if a.tag else "") + (f"-t{a.trial}" if a.trial else "")
     out_path = a.out or os.path.join(data, f"{label}.jsonl")
     out = open(out_path, "w")
@@ -651,7 +658,7 @@ def main():
         ok = all(v[0] for v in res.values())
         rec = {"task": tid, "suite": "onboard", "pass": ok, "why": {k: list(v) for k, v in res.items()}, "answer": answer, "prompt": prompt,
                "turns": turns, "tool_calls": len(calls), "tool_errors": sum(1 for c in calls if c["is_error"]), "seconds": round(dt, 1),
-               "max_prompt_tokens": maxp, "calls": calls, "model": None if a.scripted else a.model, "trial": a.trial, "negative": neg}
+               "max_prompt_tokens": maxp, "inputs": prov, "calls": calls, "model": None if a.scripted else a.model, "trial": a.trial, "negative": neg}
         out.write(json.dumps(rec) + "\n")
         out.flush()
         rows.append(rec)

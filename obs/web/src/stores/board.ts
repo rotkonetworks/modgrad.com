@@ -110,7 +110,8 @@ export function autoPreset(): Board | null {
   // a single-run page builds from that run only (empty until it arrives, then it follows)
   const inProject = (r: Run) => !!t.project && r.id.startsWith(t.project + '/');
   const runs = t.run ? S.runs.filter((r) => r.id === t.run) : t.project ? S.runs.filter(inProject) : sel.length ? sel : S.runs;
-  const counts = metricCounts(runs);
+  // a metric logged once per run (a fixed baseline, a final score) is no curve: keep it off the default board
+  const counts = new Map([...metricCounts(runs)].filter(([m]) => runs.some((r) => (r.metrics?.[m]?.n ?? 0) >= 2)));
   // demo runs stay out of the default board without pinning it to today's run list
   let filter = S.runs.some(synthetic) && !runs.some(synthetic) ? '{synthetic!=true}' : '';
   if (t.run) filter = `{run=${Bd.quote(t.run)}}`;

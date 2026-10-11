@@ -7,31 +7,32 @@
 
 :root,
 [data-theme="light"] {
-  --bg: #fcfcfb; --panel: #fcfcfb; --ink: #111; --muted: #5a5a58; --frame: #000; --grid: #b4b4b0;
-  --rule: #d8d8d4; --hl: #f0f0ec; --wire: #303030; --miss: #9a9a96;
-  --accent: #d1341a; --accent-soft: rgba(209, 52, 26, 0.10);
-  --c1: #00a000; --c2: #1a1ad0; --c3: #c05800; --c4: #a000a0; --c5: #707000; --c6: #0088b8;
-  --seq-lo: #eef2f8; --seq-hi: #0b2f6b; --div-neg: #c05800; --div-mid: #e4e4e0; --div-pos: #1a1ad0;
+  /* washi paper and sumi ink; shu (vermilion) is the only signal colour; data in indigo-led traditional dyes */
+  --bg: #f6f1e7; --panel: #f9f5ec; --ink: #1d1b18; --muted: #6b655a; --frame: #2a2722; --grid: #c9c0ae;
+  --rule: #ddd4c2; --hl: #ece5d6; --wire: #3a352e; --miss: #a39a88;
+  --accent: #cf3a24; --accent-soft: rgba(207, 58, 36, 0.10);
+  --c1: #1e50a2; --c2: #3b7a3a; --c3: #b0771a; --c4: #745399; --c5: #00797a; --c6: #6a5d21;
+  --seq-lo: #f1ece0; --seq-hi: #1e3f72; --div-neg: #b0771a; --div-mid: #e6dfd0; --div-pos: #1e50a2;
   --mono: ui-monospace, "DejaVu Sans Mono", "Menlo", "Consolas", monospace;
   --sans: system-ui, -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #1a1a19; --panel: #1a1a19; --ink: #e6e6e3; --muted: #a2a29e; --frame: #d4d4d0; --grid: #4c4c49;
-    --rule: #3a3a38; --hl: #262625; --wire: #c8c8c4; --miss: #77776f;
-    --accent: #ff6a45; --accent-soft: rgba(255, 106, 69, 0.14);
-    --c1: #2fb02f; --c2: #7080f0; --c3: #d07428; --c4: #c860c8; --c5: #989028; --c6: #2098c8;
-    --seq-lo: #1e2633; --seq-hi: #a8ccff; --div-neg: #d07428; --div-mid: #3a3a38; --div-pos: #7080f0;
+    --bg: #171512; --panel: #1b1915; --ink: #ebe5d8; --muted: #a59d8d; --frame: #d8d0c0; --grid: #45403a;
+    --rule: #34302a; --hl: #24211c; --wire: #cfc7b6; --miss: #7c7466;
+    --accent: #ff6b4a; --accent-soft: rgba(255, 107, 74, 0.14);
+    --c1: #6f9be0; --c2: #74b072; --c3: #d9a24a; --c4: #a98bd0; --c5: #3fb2b0; --c6: #b5a65a;
+    --seq-lo: #22262e; --seq-hi: #a9c4ef; --div-neg: #d9a24a; --div-mid: #34302a; --div-pos: #6f9be0;
     color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
-  --bg: #1a1a19; --panel: #1a1a19; --ink: #e6e6e3; --muted: #a2a29e; --frame: #d4d4d0; --grid: #4c4c49;
-  --rule: #3a3a38; --hl: #262625; --wire: #c8c8c4; --miss: #77776f;
-  --accent: #ff6a45; --accent-soft: rgba(255, 106, 69, 0.14);
-  --c1: #2fb02f; --c2: #7080f0; --c3: #d07428; --c4: #c860c8; --c5: #989028; --c6: #2098c8;
-  --seq-lo: #1e2633; --seq-hi: #a8ccff; --div-neg: #d07428; --div-mid: #3a3a38; --div-pos: #7080f0;
+  --bg: #171512; --panel: #1b1915; --ink: #ebe5d8; --muted: #a59d8d; --frame: #d8d0c0; --grid: #45403a;
+  --rule: #34302a; --hl: #24211c; --wire: #cfc7b6; --miss: #7c7466;
+  --accent: #ff6b4a; --accent-soft: rgba(255, 107, 74, 0.14);
+  --c1: #6f9be0; --c2: #74b072; --c3: #d9a24a; --c4: #a98bd0; --c5: #3fb2b0; --c6: #b5a65a;
+  --seq-lo: #22262e; --seq-hi: #a9c4ef; --div-neg: #d9a24a; --div-mid: #34302a; --div-pos: #6f9be0;
   color-scheme: dark;
 }
 
@@ -155,7 +156,7 @@ details.run .dh { font-weight: 600; margin-top: 6px; }
 .btool .msg { font: 11px var(--mono); color: var(--muted); }
 .btool button.on, .bpanel button.on, .binsp button.on, .bpop button.on { background: var(--hl); border-color: var(--frame); color: var(--ink); font-weight: 600; }
 .shared { border: 1px solid var(--accent); padding: 4px 8px; margin: 0 0 8px; font: 11px var(--mono); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-.bcanvas { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr)); gap: 14px; align-items: start; min-height: 140px; padding: 4px; border: 1px dashed transparent; }
+.bcanvas { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr)); gap: 22px 18px; align-items: start; min-height: 140px; padding: 4px; border: 1px dashed transparent; }
 .bcanvas.dz-new, .bnew.dz-new, .fmain.dz-new { border-color: var(--accent); background: var(--accent-soft); }
 .bpanel { width: 100%; max-width: 540px; border: 1px solid transparent; position: relative; outline: none; background: var(--bg); min-width: 0; }
 .bpanel.wide { grid-column: 1 / -1; max-width: none; }

@@ -4,7 +4,7 @@
 
 use super::analysis::{self, Dir};
 use super::store::{Rows, Store, valid_run_name};
-use super::text::{Resolved, closest, fmt, fmt_age, fmt_signed, glob, norm_key, num, resolve_metric, squash, table};
+use super::text::{Resolved, closest_shared, fmt, fmt_age, fmt_signed, glob, norm_key, num, resolve_metric, squash, table};
 use crate::RunData;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -101,7 +101,7 @@ pub fn resolve_run(store: &dyn Store, q: &str) -> Result<String, String> {
             return r;
         }
     }
-    let sug = closest(q, &names, 5);
+    let sug = closest_shared(q, &names, 5);
     Err(format!("No run named {q:?}. Closest: {}. Call list_runs() to see all runs, then e.g. summarize(run=\"{}\").", sug.join(", "), sug.first().copied().unwrap_or("NAME")))
 }
 
@@ -1170,6 +1170,20 @@ struct Panel {
     runs: Vec<String>,
 }
 
+/// Runs (at most the first 200) that have a metric `q` resolves to.
+fn runs_with_metric(store: &dyn Store, all: &[String], q: &str) -> Vec<String> {
+    let q = strip_quotes(q);
+    if q.is_empty() {
+        return Vec::new();
+    }
+    all.iter()
+        .take(200)
+        .filter(|r| store.load(r).is_ok_and(|d| matches!(resolve_metric(q, &d.metric_keys()), Resolved::One { .. } | Resolved::Many(_))))
+        .take(12)
+        .cloned()
+        .collect()
+}
+
 /// `metric{run=~"a|b*"}`, `metric{run="x"}`, `metric run=~a|b`, or `metric`.
 fn parse_panel(store: &dyn Store, q: &str) -> Result<Panel, String> {
     let q = q.trim();
@@ -1195,7 +1209,17 @@ fn parse_panel(store: &dyn Store, q: &str) -> Result<Panel, String> {
             let mut v = Vec::new();
             for alt in val.split('|').map(strip_quotes).filter(|x| !x.is_empty()) {
                 let alt = alt.replace(".*", "*").replace(".+", "*");
-                for r in resolve_runs(store, &alt)? {
+                let found = resolve_runs(store, &alt).map_err(|e| match runs_with_metric(store, &all, mpart) {
+                    have if have.is_empty() => e,
+                    have => format!(
+                        "{e}\nRuns that log a metric matching {:?}: {}. Retry with those names, e.g. make_board(query='{}{{run=~\"{}\"}}').",
+                        strip_quotes(mpart),
+                        have.join(", "),
+                        strip_quotes(mpart),
+                        have.iter().take(4).cloned().collect::<Vec<_>>().join("|")
+                    ),
+                })?;
+                for r in found {
                     if !v.contains(&r) {
                         v.push(r);
                     }

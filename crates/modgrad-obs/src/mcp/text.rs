@@ -59,6 +59,16 @@ pub fn edit_distance(a: &str, b: &str) -> usize {
 
 /// The `n` candidates closest to `q` (substring hits first, then edit
 /// distance on the squashed forms).
+/// Like [`closest`], but names sharing a word of 3+ letters with the query
+/// come first: "ppo_run1" suggests rl/ppo_lr1 before cls/run3.
+pub fn closest_shared<'a>(q: &str, cands: &'a [String], n: usize) -> Vec<&'a str> {
+    let words: Vec<String> = q.split(|c: char| !c.is_ascii_alphabetic()).filter(|w| w.len() >= 3).map(|w| w.to_lowercase()).collect();
+    let by_dist = closest(q, cands, cands.len());
+    let mut scored: Vec<(usize, usize, &str)> = by_dist.iter().enumerate().map(|(rank, c)| (usize::MAX - words.iter().filter(|w| c.to_lowercase().contains(w.as_str())).count(), rank, *c)).collect();
+    scored.sort();
+    scored.into_iter().take(n).map(|(_, _, c)| c).collect()
+}
+
 pub fn closest<'a>(q: &str, cands: &'a [String], n: usize) -> Vec<&'a str> {
     let qs = squash(q);
     let mut scored: Vec<(usize, &str)> = cands

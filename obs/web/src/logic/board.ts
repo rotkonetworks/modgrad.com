@@ -85,6 +85,35 @@ export function parse(q: string): Parsed {
   r.free();
   return out;
 }
+/** matcher texts carried by every selector entry of every query (the board's default filter,
+ *  e.g. `synthetic!=true` or `run=~"proj/*"`); [] when a query has no selector or fails to parse */
+export function sharedMatchers(qs: string[]): string[] {
+  let common: string[] | null = null;
+  for (const q of qs) {
+    const p = parse(q);
+    if (!p.ok) return [];
+    const per = new Map<number, Set<string>>();
+    for (const c of p.chips) {
+      if (c.kind === 'metric' && c.entry !== null) per.set(c.entry, per.get(c.entry) || new Set());
+      if (c.kind === 'matcher' && c.entry !== null) (per.get(c.entry) || per.set(c.entry, new Set()).get(c.entry)!).add(c.text);
+    }
+    for (const ms of per.values()) common = (common ?? [...ms]).filter((t) => ms.has(t));
+    if (common && !common.length) return [];
+  }
+  return common || [];
+}
+/** replace matcher `old` in every entry of `q` (`text` empty removes it) */
+export function replaceMatcherAll(q: string, old: string, text: string): string {
+  if (text.trim() === old) return q;
+  for (;;) {
+    const p = parse(q); if (!p.ok) return q;
+    const i = p.chips.findIndex((c) => c.kind === 'matcher' && c.text === old);
+    if (i < 0) return q;
+    const next = replaceChip(q, i, text);
+    if (next === q) return q;
+    q = next;
+  }
+}
 export function replaceChip(q: string, idx: number, text: string): string {
   const r = A.query_replace_chip(q, idx, text);
   const out = r.ok() ? r.canonical() : null;

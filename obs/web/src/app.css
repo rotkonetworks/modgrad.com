@@ -173,6 +173,10 @@ details.run .dh { font-weight: 600; margin-top: 6px; }
 .chipw button { border: 0; font: 10px var(--mono); padding: 0 4px; line-height: 15px; background: var(--bg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .chipw button.x { border-left: 1px solid var(--rule); color: var(--muted); flex: none; }
 .chipw.k-metric { border-color: var(--frame); }
+.chipw.k-shared { border-style: dotted; }
+.bfilt { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; font: 10px var(--mono); color: var(--muted); padding: 0 2px 4px; }
+.bfilt-item { display: inline-flex; gap: 3px; align-items: center; }
+.bfilt code { font: 10px var(--mono); color: var(--ink); }
 .chipw.k-metric button.c { font-weight: 600; }
 .chipw.k-forecast, .chipw.k-agg, .chipw.k-by, .chipw.k-split { border-style: dashed; }
 .chipw input { font: 10px var(--mono); width: 16em; max-width: 60vw; border: 0; }

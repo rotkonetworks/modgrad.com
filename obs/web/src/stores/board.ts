@@ -5,7 +5,7 @@
 // Persistence: localStorage 'obs-builder-board-v2' (per data target: '…:run=<id>', '…:project=<p>'),
 // settings under 'obs-builder-settings-v1'. A shared board (#board=<name>) is shown unsaved until
 // "save as my board".
-import { createSignal } from 'solid-js';
+import { createMemo, createRoot, createSignal } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
 import * as Bd from '@/logic/board';
 import { fieldsOf, hasReplicates, metricCounts, layerFamilies, heatmapQuery, SAMPLES_METRIC, type Stream } from '@/logic/data';
@@ -45,6 +45,12 @@ export { undoTop };
 const [shared, setShared] = createSignal<{ name: string; title: string; source: string } | null>(null);
 export { shared };
 
+/** the default filter every panel carries (matchers on every selector entry of every panel, with
+ *  two or more panels): shown once above the board instead of as a chip on each entry */
+export const boardFilters = createRoot(() => createMemo(() => (board.panels.length >= 2 ? Bd.sharedMatchers(board.panels.map((p) => p.q)) : []), [], { equals: (a, b) => a.join('\n') === b.join('\n') }));
+export function removeBoardFilter(text: string): void {
+  commit(`remove filter ${text} from every panel`, () => { for (const p of M.board.panels) p.q = Bd.replaceMatcherAll(p.q, text, ''); }, { toast: `removed ${text} from every panel` });
+}
 /** focus view: the panel named in the hash, if it exists */
 export const focusId = (): string | null => { const id = hash().panel; return id && board.panels.some((p) => p.id === id) ? id : null; };
 

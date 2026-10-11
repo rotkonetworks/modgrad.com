@@ -9,7 +9,7 @@ import { catalog, catalogVersion, runVersion, eventsOf } from '@/stores/runs';
 import {
   findPanel, titleOf, parseQ, selPanel, setSelPanel, editing, toggleEditing, settings, results, seen, fresh, commit,
   setStage, setQuery, renamePanel, toggleFollow, deletePanel, duplicatePanel, movePanel, mergePanel, showAll, openFocus,
-  panelRuns, setInspector, focusId, board,
+  panelRuns, setInspector, focusId, board, boardFilters,
 } from '@/stores/board';
 import { openMenu, openPopover } from '@/stores/ui';
 import { drawPanel, chartWidth, MAX_POINTS, type DrawOut } from '@/board/drawPanel';
@@ -19,7 +19,7 @@ import { loader } from '@/board/loader';
 import ForecastControls from '@/components/ForecastControls';
 import ErrLine from '@/components/ErrLine';
 
-const CHIP_LABEL = (c: Chip): string => {
+export const CHIP_LABEL = (c: Chip): string => {
   if (c.kind === 'matcher') { const m = c.text.match(/^run(=~|=|!=|!~)"?(.*?)"?$/); if (m) return `${m[1].startsWith('!') ? 'not ' : ''}runs: ${m[2]}`; return c.text.replace(/"/g, ''); }
   if (c.kind === 'metric') return c.text === '*' ? 'all metrics' : c.text === SAMPLES_METRIC ? 'text samples' : c.text;
   return c.text;
@@ -32,6 +32,11 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
   const model = () => findPanel(id);
   const title = () => titleOf(props.panel);
   const parsed = createMemo(() => parseQ(props.panel.q));
+  // a matcher on every entry of this panel is shown once (after the entries); one on every panel
+  // of the board is shown above the board. Display only: the query text is unchanged.
+  const shared = createMemo(() => { const pq = parsed(); return pq.ok && pq.chips.filter((c) => c.kind === 'metric').length >= 2 ? Bd.sharedMatchers([props.panel.q]) : []; });
+  const hiddenChip = (c: Chip) => c.kind === 'matcher' && (boardFilters().includes(c.text) || shared().includes(c.text));
+  const [sharedEdit, setSharedEdit] = createSignal<string | null>(null);
   const [badge, setBadge] = createSignal<DrawOut['badge']>(null);
   const [chipEdit, setChipEdit] = createSignal<number | null>(null);
   const [qErr, setQErr] = createSignal<{ src: string | null; msg: string; a: number; b: number; suggest?: string[] } | null>(null);
@@ -193,6 +198,7 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
       </div>
       <div class="bchips">
         <For each={(() => { const pq = parsed(); return pq.ok ? pq.chips : []; })()}>{(c, i) => (
+          <Show when={!hiddenChip(c)}>
           <span class={'chipw k-' + c.kind}>
             <Show when={chipEdit() === i()} fallback={
               <button type="button" class="c" title={`edit "${c.text}"`} aria-label={`edit ${c.text}`} onClick={() => setChipEdit(i())}>
@@ -202,6 +208,19 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
               <ChipEditor text={c.text} onApply={(v) => applyChip(i(), c, v)} onCancel={() => setChipEdit(null)} />
             </Show>
             <button type="button" class="x" title={`remove "${c.text}"`} aria-label={`remove ${c.text}`} onClick={() => { const p = model(); if (p) commit(`remove ${c.text}`, () => { p.q = Bd.replaceChip(p.q, i(), ''); }); }}>x</button>
+          </span>
+          </Show>
+        )}</For>
+        <For each={shared().filter((t) => !boardFilters().includes(t))}>{(t) => (
+          <span class="chipw k-matcher k-shared">
+            <Show when={sharedEdit() === t} fallback={
+              <button type="button" class="c" title={`on every series of this panel: ${t}; click to edit it everywhere`} aria-label={`edit ${t} on every series`} onClick={() => setSharedEdit(t)}>
+                {'all: ' + CHIP_LABEL({ kind: 'matcher', text: t, entry: null })}
+              </button>
+            }>
+              <ChipEditor text={t} onApply={(v) => { setSharedEdit(null); const p = model(); if (p) commit(`edit ${t} on every series`, () => { p.q = Bd.replaceMatcherAll(p.q, t, v); }); }} onCancel={() => setSharedEdit(null)} />
+            </Show>
+            <button type="button" class="x" title={`remove "${t}" from every series of this panel`} aria-label={`remove ${t} from every series`} onClick={() => { const p = model(); if (p) commit(`remove ${t}`, () => { p.q = Bd.replaceMatcherAll(p.q, t, ''); }); }}>x</button>
           </span>
         )}</For>
         <button type="button" class="mini" title="add a stage: smoothing, colour by, split, seeds, x axis, forecast, ..." aria-label="add a stage" onClick={(e) => stageMenu(e.currentTarget)}>+</button>

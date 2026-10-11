@@ -1,10 +1,10 @@
 import { For, Show } from 'solid-js';
 import {
   board, undo, undoTop, applyPreset, resetDefault, exportBoard, importBoard, inspector, setInspector, focusId, titleOf, settings, setSetting,
-  shared, saveSharedAsMine,
+  shared, saveSharedAsMine, boardFilters, removeBoardFilter,
 } from '@/stores/board';
 import { openPopover, setPaletteOpen, railOpen, setRailOpen } from '@/stores/ui';
-import Panel from '@/components/Panel';
+import Panel, { CHIP_LABEL } from '@/components/Panel';
 import Rail from '@/components/Rail';
 import Inspector from '@/components/Inspector';
 import Anomalies, { anomaliesOpen, setAnomaliesOpen } from '@/components/Anomalies';
@@ -55,6 +55,23 @@ export function BoardToolbar() {
   );
 }
 
+/** the filter every panel's query carries, once (quiet), instead of a chip on every entry */
+export function BoardFilterLine() {
+  return (
+    <Show when={boardFilters().length}>
+      <div class="bfilt" role="note">
+        <span title="every series on this board carries this filter in its query (shown here once instead of on each panel; the panel text editor shows it in full)">every panel:</span>
+        <For each={boardFilters()}>{(t) => (
+          <span class="bfilt-item">
+            <code title={t}>{CHIP_LABEL({ kind: 'matcher', text: t, entry: null })}</code>
+            <button type="button" class="mini" title={`remove "${t}" from every panel's query (undoable)`} aria-label={`remove filter ${t} from every panel`} onClick={() => removeBoardFilter(t)}>remove</button>
+          </span>
+        )}</For>
+      </div>
+    </Show>
+  );
+}
+
 export function SharedBanner() {
   return (
     <Show when={shared()}>{(s) => (
@@ -73,6 +90,7 @@ export default function BoardView() {
       <div class="bmain">
         <SharedBanner />
         <BoardToolbar />
+        <BoardFilterLine />
         <Anomalies />
         <div class="bcanvas" data-canvas="board" aria-label="board">
           <For each={board.panels}>{(p) => (

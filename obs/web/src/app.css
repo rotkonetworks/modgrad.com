@@ -155,7 +155,7 @@ details.run .dh { font-weight: 600; margin-top: 6px; }
 .btool .msg { font: 11px var(--mono); color: var(--muted); }
 .btool button.on, .bpanel button.on, .binsp button.on, .bpop button.on { background: var(--hl); border-color: var(--frame); color: var(--ink); font-weight: 600; }
 .shared { border: 1px solid var(--accent); padding: 4px 8px; margin: 0 0 8px; font: 11px var(--mono); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-.bcanvas { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 540px), 540px)); gap: 14px; align-items: start; min-height: 140px; padding: 4px; border: 1px dashed transparent; }
+.bcanvas { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr)); gap: 14px; align-items: start; min-height: 140px; padding: 4px; border: 1px dashed transparent; }
 .bcanvas.dz-new, .bnew.dz-new, .fmain.dz-new { border-color: var(--accent); background: var(--accent-soft); }
 .bpanel { width: 100%; max-width: 540px; border: 1px solid transparent; position: relative; outline: none; background: var(--bg); min-width: 0; }
 .bpanel.wide { grid-column: 1 / -1; max-width: none; }
@@ -271,3 +271,6 @@ body.bdragging, body.bdragging * { cursor: grabbing !important; }
   input[type=range] { width: 120px; }
   .droptools .hint { display: none; }
 }
+
+/* board panels share the row: as many ~420px+ columns as fit, each stretching */
+.bcanvas .panel { max-width: none; }

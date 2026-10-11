@@ -49,10 +49,24 @@ export function dismissErrors(): void { setErrs([]); }
 
 // ------------------------------------------------------------ fetch cache
 const cache = new Map<string, Promise<unknown>>();
+// Snapshot mode: a `bundle.json` next to the data ({path: json}) carries every static file in one
+// request, so a shared snapshot is a single data file. Absent bundle → per-file fetches as usual.
+let bundle: Promise<Record<string, unknown> | null> | null = null;
+function loadBundle(): Promise<Record<string, unknown> | null> {
+  bundle ??= fetch(dataURL('bundle.json'), { cache: 'no-store' })
+    .then((r) => (r.ok ? (r.json() as Promise<Record<string, unknown>>) : null))
+    .catch(() => null);
+  return bundle;
+}
+function fetchJSON(path: string): Promise<unknown> {
+  const direct = () => fetch(dataURL(path), { cache: 'no-store' }).then((r) => { if (!r.ok) throw new Error(path + ': HTTP ' + r.status); return r.json(); });
+  if (path.startsWith('api/')) return direct();
+  return loadBundle().then((b) => (b && path in b ? b[path] : direct()));
+}
 export function getJSON<T>(path: string): Promise<T> {
   let p = cache.get(path);
   if (!p) {
-    p = fetch(dataURL(path), { cache: 'no-store' }).then((r) => { if (!r.ok) throw new Error(path + ': HTTP ' + r.status); return r.json(); });
+    p = fetchJSON(path);
     p.catch(() => cache.delete(path));
     cache.set(path, p);
   }

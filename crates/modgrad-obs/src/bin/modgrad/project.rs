@@ -154,9 +154,10 @@ pub struct Script {
     pub wandb: bool,
 }
 
-/// Training scripts at the top of `dir`: `*.py` named like `train*`, or with
-/// a `__main__` block that calls `.backward(` or builds a `Trainer(`. Names
-/// with "train" first, at most 3.
+/// Training scripts at the top of `dir`: `*.py` whose name starts with
+/// `train` or `finetune`, or with a `__main__` block that calls `.backward(`
+/// or builds a `Trainer(` (a library like `minitrainer.py` has neither).
+/// Those names first, at most 3.
 pub fn find_scripts(dir: &Path) -> Vec<Script> {
     let mut v: Vec<(bool, String, bool)> = Vec::new();
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
@@ -165,7 +166,8 @@ pub fn find_scripts(dir: &Path) -> Vec<Script> {
             continue;
         }
         let Ok(src) = std::fs::read_to_string(e.path()) else { continue };
-        let named = name.to_lowercase().contains("train");
+        let lower = name.to_lowercase();
+        let named = lower.starts_with("train") || lower.starts_with("finetune");
         let main = src.contains("__main__") && (src.contains(".backward(") || src.contains("Trainer("));
         if !named && !main {
             continue;
@@ -512,12 +514,12 @@ mod tests {
         let d = tmp("scripts");
         std::fs::write(d.join("train_grpo.py"), "for i in range(3):\n    print(f'step {i} reward 1')\n").unwrap();
         std::fs::write(d.join("finetune.py"), "import wandb\nif __name__ == '__main__':\n    loss.backward()\n").unwrap();
-        std::fs::write(d.join("trainer_lib.py"), "class Trainer: pass\n").unwrap();
+        std::fs::write(d.join("minitrainer.py"), "class Trainer:\n    def train(self):\n        loss.backward()\n").unwrap();
         std::fs::write(d.join("utils.py"), "x = 1\n").unwrap();
         let r = init(&d, &InitOpts { exe: "modgrad".into(), ..Default::default() }).unwrap();
         let files: Vec<&str> = r.scripts.iter().map(|s| s.file.as_str()).collect();
-        assert_eq!(files, ["train_grpo.py", "trainer_lib.py", "finetune.py"]);
-        assert!(r.scripts[2].wandb && !r.scripts[0].wandb);
+        assert_eq!(files, ["finetune.py", "train_grpo.py"]);
+        assert!(r.scripts[0].wandb && !r.scripts[1].wandb);
         let text = render(&r);
         assert!(text.contains("modgrad run --name train_grpo -- python train_grpo.py"), "{text}");
         assert!(text.contains("finetune.py uses wandb: change `import wandb` to `import modgrad as wandb`"), "{text}");

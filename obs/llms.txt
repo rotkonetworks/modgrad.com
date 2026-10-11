@@ -8,9 +8,10 @@
 
 ## Setting up a repo: done means a run the user can open
 
-When a user asks you to set up modgrad, log their training or give them a
-dashboard link, the job is finished only when their training has run once
-through modgrad and you have told them how to open it:
+When a user asks you to add modgrad to a repo (set it up, track or log
+their training, show them a dashboard), the job is finished only when their
+training has run once through modgrad and you have told them how to open
+it:
 
 1. `modgrad init` in the repo (`modgrad init --server <url>` if they named a
    server). It lists the training scripts it found and the exact command

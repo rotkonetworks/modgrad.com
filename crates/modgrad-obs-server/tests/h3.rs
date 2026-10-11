@@ -66,8 +66,8 @@ fn rows_pushed_over_h3_land_and_read_back() {
     let r = net::request("GET", &format!("{base}/api/index"), None, None, "application/json", Duration::from_secs(5)).unwrap();
     assert_eq!(r.alt_svc.as_deref().and_then(net::alt_svc_h3_port), Some(18950), "{:?}", r.alt_svc);
 
-    // first push goes over TCP and decides; --h3 forces the attempt on an http:// URL
-    let post = |path: &str, body: &Value, token: Option<&str>| net::push_request("POST", &format!("{base}{path}"), token, Some(body.to_string().as_bytes()), "application/json", Duration::from_secs(10), true);
+    // first push goes over TCP and decides; Force (--h3) tries it on an http:// URL
+    let post = |path: &str, body: &Value, token: Option<&str>| net::push_request("POST", &format!("{base}{path}"), token, Some(body.to_string().as_bytes()), "application/json", Duration::from_secs(10), net::H3::Force);
     let (r, notice) = post("/api/v1/runs", &json!({"name": "h3/a"}), None);
     let r = r.unwrap();
     assert!(r.ok());
@@ -89,7 +89,7 @@ fn rows_pushed_over_h3_land_and_read_back() {
     }
 
     // read back over HTTP/3 and over TCP
-    let (r, _) = net::push_request("GET", &format!("{base}/api/v1/runs/h3/a/history?keys=loss"), None, None, "application/json", Duration::from_secs(10), true);
+    let (r, _) = net::push_request("GET", &format!("{base}/api/v1/runs/h3/a/history?keys=loss"), None, None, "application/json", Duration::from_secs(10), net::H3::Force);
     let h = r.unwrap().json();
     assert_eq!(h["steps"].as_array().unwrap().len(), 5000);
     assert_eq!(h["columns"]["loss"][4999], json!(1.0 / 5000.0));
@@ -106,12 +106,12 @@ fn bodies_over_the_cap_are_refused() {
     let root = tmp("cap");
     serve(root.clone(), 18951);
     let base = "http://127.0.0.1:18951";
-    let (r, n) = net::push_request("POST", &format!("{base}/api/v1/runs"), None, Some(br#"{"name":"cap"}"#), "application/json", Duration::from_secs(10), true);
+    let (r, n) = net::push_request("POST", &format!("{base}/api/v1/runs"), None, Some(br#"{"name":"cap"}"#), "application/json", Duration::from_secs(10), net::H3::Force);
     assert!(r.unwrap().ok());
     assert_eq!(n.unwrap().transport, "h3");
     let big = vec![b' '; h3::MAX_BODY + 1];
     let t0 = Instant::now();
-    let (r, _) = net::push_request("POST", &format!("{base}/api/v1/runs/cap/log"), None, Some(&big), "application/json", Duration::from_secs(20), true);
+    let (r, _) = net::push_request("POST", &format!("{base}/api/v1/runs/cap/log"), None, Some(&big), "application/json", Duration::from_secs(20), net::H3::Force);
     assert_eq!(r.unwrap().status, 413);
     assert!(t0.elapsed() < Duration::from_secs(20));
     let _ = std::fs::remove_dir_all(&root);

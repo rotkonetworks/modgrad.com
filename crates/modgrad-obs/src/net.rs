@@ -5,7 +5,7 @@
 //! [`push_request`] (what `modgrad run` / `push` send rows with) can also
 //! use HTTP/3 (feature `h3`): after the first TCP answer it tries QUIC when
 //! the URL is https and the server sent `Alt-Svc: h3=":<port>"`, or always
-//! when asked to (`--h3`). The UDP handshake gets [`H3_HANDSHAKE`]; if it
+//! when asked to (`--h3`), never with [`H3::Off`] (`--no-h3`). The UDP handshake gets [`H3_HANDSHAKE`]; if it
 //! fails, or the connection dies later, that server stays on TCP for the
 //! rest of the process. Every request is safe to resend either way (the
 //! API is idempotent), so a request lost with the QUIC connection is
@@ -183,6 +183,18 @@ pub fn set_tls_ca(pem: PathBuf) {
     let _ = TLS_CA.set(pem);
 }
 
+/// When [`push_request`] tries HTTP/3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum H3 {
+    /// For an https URL whose server sent `Alt-Svc: h3`.
+    #[default]
+    Auto,
+    /// Always, even for an http:// URL or without `Alt-Svc` (`--h3`).
+    Force,
+    /// Never (`--no-h3`, `MODGRAD_H3=0`).
+    Off,
+}
+
 /// How long the UDP handshake may take before a server is marked TCP-only.
 pub const H3_HANDSHAKE: Duration = Duration::from_millis(1500);
 
@@ -223,8 +235,12 @@ pub fn alt_svc_h3_port(v: &str) -> Option<u16> {
 
 /// Try HTTP/3? On an https URL whose server advertised it, or when forced.
 /// (A plain http:// URL is a choice of no TLS; it only goes to QUIC on request.)
-fn want_h3(scheme: &str, advertised: Option<u16>, force: bool) -> bool {
-    force || (scheme == "https" && advertised.is_some())
+fn want_h3(scheme: &str, advertised: Option<u16>, mode: H3) -> bool {
+    match mode {
+        H3::Force => true,
+        H3::Off => false,
+        H3::Auto => scheme == "https" && advertised.is_some(),
+    }
 }
 
 fn tcp_name(scheme: &str) -> &'static str {
@@ -232,11 +248,11 @@ fn tcp_name(scheme: &str) -> &'static str {
 }
 
 /// [`request`] for pushing rows: over HTTP/3 once a server is known to
-/// speak it (see the module docs), else TCP. `force_h3` tries HTTP/3 even
-/// for an `http://` URL or without `Alt-Svc` (on the advertised port, else
-/// the URL's port). The returned [`Notice`] is set the one time the
+/// speak it (see the module docs), else TCP. [`H3::Force`] tries HTTP/3
+/// even for an `http://` URL or without `Alt-Svc` (on the advertised port,
+/// else the URL's port). The returned [`Notice`] is set the one time the
 /// transport for a server is decided or changes.
-pub fn push_request(method: &str, url: &str, token: Option<&str>, body: Option<&[u8]>, ctype: &str, timeout: Duration, force_h3: bool) -> (io::Result<Resp>, Option<Notice>) {
+pub fn push_request(method: &str, url: &str, token: Option<&str>, body: Option<&[u8]>, ctype: &str, timeout: Duration, mode: H3) -> (io::Result<Resp>, Option<Notice>) {
     let (scheme, hostport, _) = match split_url(url) {
         Ok(x) => x,
         Err(e) => return (Err(e), None),
@@ -267,7 +283,7 @@ pub fn push_request(method: &str, url: &str, token: Option<&str>, body: Option<&
     }
     // first answer from this server: decide the transport for the rest of the process
     let advertised = resp.alt_svc.as_deref().and_then(alt_svc_h3_port);
-    let wanted = want_h3(scheme, advertised, force_h3);
+    let wanted = want_h3(scheme, advertised, mode);
     #[cfg(feature = "h3")]
     if wanted {
         let host = hostport.rsplit_once(':').filter(|(_, p)| p.parse::<u16>().is_ok() && !hostport.ends_with(']')).map_or(hostport, |(h, _)| h);
@@ -321,7 +337,7 @@ mod tests {
         assert_eq!(alt_svc_h3_port(r#"h3="obs.example.org:8443""#), Some(8443));
         assert_eq!(alt_svc_h3_port("clear"), None);
         assert_eq!(alt_svc_h3_port(r#"h2=":443""#), None);
-        assert!(want_h3("https", Some(443), false) && want_h3("http", None, true));
-        assert!(!want_h3("https", None, false) && !want_h3("http", Some(443), false));
+        assert!(want_h3("https", Some(443), H3::Auto) && want_h3("http", None, H3::Force));
+        assert!(!want_h3("https", None, H3::Auto) && !want_h3("http", Some(443), H3::Auto) && !want_h3("https", Some(443), H3::Off));
     }
 }

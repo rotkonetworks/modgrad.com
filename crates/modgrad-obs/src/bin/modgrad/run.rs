@@ -38,8 +38,8 @@ pub struct Opts {
     pub gpu: bool,
     pub json: bool,
     pub spool_root: PathBuf,
-    /// Try HTTP/3 even without `Alt-Svc` / for an `http://` URL.
-    pub h3: bool,
+    /// When to try HTTP/3 (`--h3`, `--no-h3`).
+    pub h3: net::H3,
     pub cmd: Vec<String>,
 }
 
@@ -155,8 +155,8 @@ pub struct Remote {
     pub fatal: Option<String>,
     json: bool,
     warned: bool,
-    /// Try HTTP/3 even if the server does not advertise it (`--h3`).
-    pub h3: bool,
+    /// When to try HTTP/3 (`--h3`, `--no-h3`).
+    pub h3: net::H3,
 }
 
 const MAX_POST_ITEMS: usize = 1000;
@@ -192,7 +192,7 @@ impl Remote {
             fatal: None,
             json: json_mode,
             warned: false,
-            h3: false,
+            h3: net::H3::Auto,
         };
         // a previous attempt's unsent tail (same run name) goes first
         r.load_unacked()?;
@@ -698,7 +698,7 @@ pub fn run(o: Opts) -> i32 {
 }
 
 /// `modgrad push <spool dir>`: resend what a previous `modgrad run` left behind.
-pub fn push(dir: &Path, json_mode: bool, h3: bool) -> i32 {
+pub fn push(dir: &Path, json_mode: bool, h3: net::H3) -> i32 {
     let (mut r, finish) = match Remote::reopen(dir, json_mode) {
         Ok(x) => x,
         Err(e) => {

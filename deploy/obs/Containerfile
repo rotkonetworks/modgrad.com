@@ -1,0 +1,43 @@
+# modgrad-obs: the observability server + dashboard in one image.
+#
+#   podman build -f deploy/obs/Containerfile -t modgrad-obs .
+#   podman run -p 8790:8790 -v obs-data:/data modgrad-obs
+#
+# The server only stores and serves data; every graph, fit and forecast
+# is computed in the viewer's browser by the bundled wasm module.
+
+# ---- build: server + CLI (native), analysis module (wasm32)
+FROM docker.io/library/rust:1-bookworm AS build
+RUN rustup target add wasm32-unknown-unknown \
+ && cargo install --locked wasm-bindgen-cli --version 0.2.126
+WORKDIR /src
+# modest parallelism: build hosts may be thermally limited
+ARG JOBS=6
+ENV CARGO_BUILD_JOBS=${JOBS}
+# Only the obs crates: a standalone workspace keeps the image independent of
+# the rest of the SDK (GPU backends, model crates, sibling checkouts).
+COPY Cargo.lock ./
+COPY crates/modgrad-obs crates/modgrad-obs
+COPY crates/modgrad-obs-analysis crates/modgrad-obs-analysis
+COPY crates/modgrad-obs-server crates/modgrad-obs-server
+COPY crates/modgrad-obs-wandb crates/modgrad-obs-wandb
+RUN printf '[workspace]\nresolver = "2"\nmembers = ["crates/modgrad-obs", "crates/modgrad-obs-analysis", "crates/modgrad-obs-server", "crates/modgrad-obs-wandb"]\n\n[profile.release]\nlto = "thin"\ncodegen-units = 4\n' > Cargo.toml
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release -p modgrad-obs-server -p modgrad-obs -p modgrad-obs-wandb \
+ && mkdir -p /out/bin && cp target/release/obs-server target/release/obs target/release/obs-wandb /out/bin/ \
+ && RUSTFLAGS='' cargo rustc --release -p modgrad-obs-analysis --target wasm32-unknown-unknown --features wasm --crate-type cdylib \
+ && wasm-bindgen --target web --no-typescript --out-dir /out/static/pkg --out-name modgrad_obs_analysis target/wasm32-unknown-unknown/release/modgrad_obs_analysis.wasm
+COPY obs/ /out/static/
+
+# ---- runtime
+FROM docker.io/library/debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini && rm -rf /var/lib/apt/lists/* \
+ && useradd --system --uid 10001 --home /data obs && mkdir -p /data && chown obs /data
+COPY --from=build /out/bin/ /usr/local/bin/
+COPY --from=build /out/static/ /srv/obs/
+USER obs
+VOLUME /data
+EXPOSE 8790
+ENV RUST_LOG=info
+ENTRYPOINT ["/usr/bin/tini", "--", "obs-server", "--root", "/data", "--static", "/srv/obs", "--listen", "0.0.0.0:8790"]

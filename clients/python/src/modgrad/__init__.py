@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from ._run import DEFAULT_URL, AlertLevel, Config, Error, Run, Summary, init
+from ._run import DEFAULT_URL, AlertLevel, Config, Error, Run, Summary, init, parse_parent
 from ._types import Artifact, Audio, Histogram, Html, Image, Object3D, Table, Tensor, Video
 
 __version__ = "0.1.0"
@@ -127,5 +127,5 @@ class Settings(dict):
 __all__ = [
     "init", "log", "finish", "run", "config", "summary", "define_metric", "alert", "AlertLevel", "event", "watch", "unwatch",
     "watch_grads", "save", "login", "Histogram", "Table", "Tensor", "Image", "Audio", "Video", "Html", "Object3D", "Artifact",
-    "Run", "Config", "Summary", "Settings", "Error", "DEFAULT_URL",
+    "Run", "Config", "Summary", "Settings", "Error", "DEFAULT_URL", "parse_parent",
 ]

@@ -741,6 +741,23 @@ def _open_local(root: Path, project: Optional[str], id: Optional[str], name: Opt
     return LocalRun.create(d, full, cfg, meta), full, 0
 
 
+def parse_parent(spec: str) -> Dict[str, Any]:
+    """`run`, `run@step` or W&B's `run?_step=step` -> {"parent_run", "parent_step"?}."""
+    run, step = spec, None
+    if "?_step=" in spec:
+        run, step = spec.split("?_step=", 1)
+    elif "@" in spec:
+        run, step = spec.rsplit("@", 1)
+    out: Dict[str, Any] = {"parent_run": run.strip()}
+    if step is not None and step.strip():
+        try:
+            v = float(step)
+        except ValueError:
+            raise Error(f"fork_from: {step!r} is not a step (use <run>?_step=<n> or <run>@<n>)") from None
+        out["parent_step"] = int(v) if v.is_integer() else v
+    return out
+
+
 def init(project: Optional[str] = None, entity: Optional[str] = None, config: Any = None, name: Optional[str] = None, id: Optional[str] = None,
          resume: Union[bool, str, None] = None, dir: Optional[str] = None, mode: Optional[str] = None, tags: Optional[Sequence[str]] = None,
          notes: Optional[str] = None, group: Optional[str] = None, job_type: Optional[str] = None, reinit: Union[bool, str, None] = None,
@@ -748,7 +765,9 @@ def init(project: Optional[str] = None, entity: Optional[str] = None, config: An
          url: Optional[str] = None, token: Optional[str] = None, data: Optional[str] = None, settings: Any = None, **ignored: Any) -> Run:
     """Start a run (W&B `wandb.init`). Extra modgrad arguments: `url`, `token`,
     and `data` (write a native run directory under this obs directory
-    instead of sending to a server). Unknown W&B arguments are accepted and
+    instead of sending to a server). W&B's `fork_from` records the parent
+    run and step as config `parent_run` / `parent_step` (the run itself
+    starts fresh at step 0). Other unknown W&B arguments are accepted and
     ignored."""
     import modgrad
 
@@ -799,6 +818,10 @@ def init(project: Optional[str] = None, entity: Optional[str] = None, config: An
             cfg = {k: v for k, v in cfg.items() if k in config_include_keys}
         if config_exclude_keys:
             cfg = {k: v for k, v in cfg.items() if k not in config_exclude_keys}
+        # lineage: W&B's fork_from="<run>?_step=<n>" (or "<run>@<n>") becomes the config keys
+        # parent_run / parent_step, which the dashboard's `| stitch` reads; keys in config win
+        if ignored.get("fork_from"):
+            cfg = {**parse_parent(str(ignored["fork_from"])), **cfg}
 
         # no token: write tokenless when a project was named (dev servers),
         # else use (or create) this machine's anonymous project

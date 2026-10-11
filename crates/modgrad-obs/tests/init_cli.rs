@@ -49,6 +49,13 @@ fn local_init_then_run_and_tail_without_flags() {
     assert!(o.status.success(), "{}", text(&o));
     let v: Value = serde_json::from_slice(&o.stdout).unwrap();
     assert_eq!(v["keys"]["loss"]["last"], json!(0.25), "{v}");
+    // lineage: --parent <run>[@step] and --stage become config keys
+    let o = modgrad(&sub, &["run", "--name", "exp2", "--parent", "exp1@2", "--stage", "sft", "--no-gpu", "--", "sh", "-c", "echo 'step 1 loss 0.2'"]);
+    assert!(o.status.success(), "{}", text(&o));
+    let cfg: Value = serde_json::from_slice(&std::fs::read(d.join("obs/runs/exp2/config.json")).unwrap()).unwrap();
+    assert_eq!(cfg["config"], json!({"parent_run": "exp1", "parent_step": 2, "stage": "sft"}), "{cfg}");
+    let o = modgrad(&sub, &["run", "--name", "exp3", "--parent", "exp1@two", "--", "true"]);
+    assert!(o.status.code() == Some(2) && text(&o).contains("'two' is not a step"), "{}", text(&o));
     let o = modgrad(&sub, &["tail", "nope"]);
     assert!(!o.status.success() && text(&o).contains("no run nope"), "{}", text(&o));
     // re-running init changes nothing

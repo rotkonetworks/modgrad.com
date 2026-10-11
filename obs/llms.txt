@@ -193,6 +193,7 @@ do not give a confident number.
     modgrad run --offline --name exp1 -- python train.py      # writes ./obs/runs/exp1
     modgrad run --name exp1 -- python train.py                # streams to $MODGRAD_URL (default http://127.0.0.1:8790)
     modgrad run --server https://obs.example.org --token obsp_... --project team --name exp1 -- torchrun ...
+    modgrad run --name sft1 --parent base@3000 --stage sft -- python sft.py   # see "Lineage"
 
 Lines it understands (one metric line per print is enough):
 
@@ -349,6 +350,39 @@ PyTorch Lightning:
 
 Rust (modgrad SDK): `modgrad_obs::Run::create(...)` and `run.log_scalars(step, &[("loss", x)])`
 write the same directory format with no server.
+
+## Lineage: one model, several runs
+
+Pre-training, annealing, SFT and RL are separate runs; branches fork from
+one checkpoint. Record where each run started in its config:
+
+    parent_run      id of the run it continues or forks from (a bare name
+                    matches <project>/<name> when that is unique)
+    parent_step     the parent's step it started from (omitted: the parent's last step)
+    parent_tokens   the parent's token count there (only if the parent does
+                    not log tokens_seen)
+    stage           pretrain | midtrain | sft | rl | eval (free text; labels the chart)
+
+Each run counts its own steps and tokens_seen from 0. A run whose steps
+already continue past parent_step (a resumed counter) is left as it is.
+
+    modgrad run --name sft-a --parent anneal@800 --stage sft -- python sft.py
+    wandb.init(id="sft-a", config={"stage": "sft"}, fork_from="anneal?_step=800")   # import modgrad as wandb
+    curl -X POST $OBS/api/v1/runs/sft-a/log -d '{"config": {"parent_run": "anneal", "parent_step": 800, "stage": "sft"}}'
+
+In a panel query, `| stitch` adds each run's ancestors (same metric) and
+puts every run after its parent: offset = parent's offset + parent_step;
+with `| x tokens`, + the parent's tokens_seen at that step. Branches share
+the parent's curve; the chart shades each stage. Examples:
+
+    loss{run="rl"} | stitch                         the whole life of the RL run
+    loss{run=~"sft-a|sft-b"} | x tokens | stitch    two SFT branches off one anneal
+    loss{run=~"sft-a|sft-b"} | baseline sft-a | stitch
+
+Runs logged without these keys (old runs, dropped files) can be linked in
+the dashboard's Runs view ("set parent", or drag one run onto another); that
+lineage is stored in the board, exported with it, and never sent to a server.
+The Runs view's "whole lineage" button opens the stitched loss of a run.
 
 ## Viewing
 

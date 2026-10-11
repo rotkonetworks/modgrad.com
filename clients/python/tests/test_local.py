@@ -191,6 +191,22 @@ def test_offline_mode_writes_locally(tmp_path, monkeypatch, capsys):
     assert json.loads(obs("tail", r.dir, "--json"))["keys"]["loss"]["last"] == 1.0
 
 
+def test_fork_from_records_the_parent(tmp_path):
+    local_project(tmp_path)
+    r = modgrad.init(id="sft", config={"lr": 2e-5, "stage": "sft"}, fork_from="pretrain?_step=3000")
+    modgrad.log({"loss": 1.0})
+    modgrad.finish()
+    cfg = json.loads((Path(r.dir) / "config.json").read_text())["config"]
+    assert cfg["parent_run"] == "pretrain" and cfg["parent_step"] == 3000 and cfg["stage"] == "sft"
+    # config wins over fork_from; "<run>@<step>" works too, and no step means the parent's last
+    assert modgrad.parse_parent("a/b@12.5") == {"parent_run": "a/b", "parent_step": 12.5}
+    assert modgrad.parse_parent("a") == {"parent_run": "a"}
+    r = modgrad.init(id="rl", config={"parent_step": 7}, fork_from="sft@9")
+    modgrad.finish()
+    cfg = json.loads((Path(r.dir) / "config.json").read_text())["config"]
+    assert cfg["parent_run"] == "sft" and cfg["parent_step"] == 7
+
+
 def test_resume_continues_after_the_last_step_arrays_count(tmp_path):
     local_project(tmp_path)
     modgrad.init(id="res", config={"lr": 1})

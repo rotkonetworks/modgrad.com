@@ -308,3 +308,23 @@ def test_lightning_logger_local(tmp_path):
     lg.finish()
     assert [r["train_loss"] for r in lines(d / "metrics.jsonl")] == [1.0, 0.5, pytest.approx(1 / 3)]
     assert json.loads((d / "summary.json").read_text())["finished"] is True
+
+
+def test_a_client_under_modgrad_run_logs_into_its_run(tmp_path, monkeypatch):
+    """`modgrad run` around a script that itself uses the client: one run (the
+    wrapper's), not a second run nested inside the wrapper's directory."""
+    monkeypatch.chdir(tmp_path)
+    data = local_project(tmp_path)
+    (tmp_path / "train.py").write_text(textwrap.dedent("""
+        import modgrad as wandb
+        run = wandb.init(project="spirals", config={"lr": 0.01})
+        for step in range(10, 60, 10):
+            wandb.log({"train/loss": 1.0 / step}, step=step)
+        run.finish()
+    """))
+    obs("run", "--name", "spirals", "--sys-interval", "0", "--", sys.executable, "train.py", cwd=tmp_path)
+    d = data / "runs" / "spirals"
+    assert [p.name for p in d.iterdir() if p.is_dir()] == []
+    loss = [r["train/loss"] for r in lines(d / "metrics.jsonl") if "train/loss" in r]
+    assert loss == [1.0 / s for s in range(10, 60, 10)]
+    assert '"lr"' in (d / "config.json").read_text()

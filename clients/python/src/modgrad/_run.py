@@ -766,8 +766,17 @@ def init(project: Optional[str] = None, entity: Optional[str] = None, config: An
         if mode not in ("online", "offline", "disabled"):
             raise Error(f"mode must be online, offline or disabled, got {mode!r}")
 
+        # under `modgrad run` (which sets MODGRAD_WRAPPED_RUN and its data
+        # dir or server): log into that run, not a second one beside it
+        wrapped = _env("MODGRAD_WRAPPED_RUN") if mode != "disabled" and not id and not url and not data else None
+        if wrapped:
+            from ._sender import say
+
+            say(f"running under `modgrad run`: logging into its run {wrapped}")
+            id, project, resume = wrapped, None, None
+
         # argument > environment > project file (.modgrad.json) > default
-        project_arg = project or _env("MODGRAD_PROJECT", "WANDB_PROJECT", "OBS_PROJECT")
+        project_arg = project or (None if wrapped else _env("MODGRAD_PROJECT", "WANDB_PROJECT", "OBS_PROJECT"))
         pf = _project.find()
         lroot = local_root(url, data, pf, mode) if mode != "disabled" else None
         env_url = _env("MODGRAD_URL", "OBS_URL")
@@ -784,7 +793,7 @@ def init(project: Optional[str] = None, entity: Optional[str] = None, config: An
         group = group or _env("WANDB_RUN_GROUP")
         job_type = job_type or _env("WANDB_JOB_TYPE")
 
-        run_id = sanitize_id(id) if id else (sanitize_id(name) + "-%04x" % random.getrandbits(16) if name else auto_id())
+        run_id = _local_name(id) if wrapped else sanitize_id(id) if id else (sanitize_id(name) + "-%04x" % random.getrandbits(16) if name else auto_id())
         cfg = _to_dict(config)
         if config_include_keys:
             cfg = {k: v for k, v in cfg.items() if k in config_include_keys}

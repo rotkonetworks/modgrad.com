@@ -495,6 +495,9 @@ pub fn run(o: Opts) -> i32 {
     // the sink: a local run directory, or the server through the spool
     let mut local = None;
     let mut remote = None;
+    // what the child sees: a Python client in it logs into this run instead of making a second one
+    let mut wrapped: Vec<(&str, String)>;
+    let mut view_hint = None;
     if o.offline {
         let full = match &o.project {
             Some(p) if !name.contains('/') => format!("{p}/{name}"),
@@ -507,6 +510,9 @@ pub fn run(o: Opts) -> i32 {
             Ok(run) => {
                 let dir = run.dir().to_path_buf();
                 say(o.json, json!({"event": "start", "mode": "offline", "run": full, "dir": dir}), format!("offline run {full} -> {} (view: modgrad-server --root {})", dir.display(), o.out.display()));
+                let out = std::path::absolute(&o.out).unwrap_or_else(|_| o.out.clone());
+                wrapped = vec![("MODGRAD_WRAPPED_RUN", full.clone()), ("MODGRAD_DATA", out.display().to_string())];
+                view_hint = Some(format!("view: `modgrad-server --root {}` (serves until Ctrl-C), then open http://127.0.0.1:8790/#run={}", o.out.display(), full.replace('/', "%2F")));
                 local = Some(Local { run, dir });
             }
             Err(e) => {
@@ -527,6 +533,14 @@ pub fn run(o: Opts) -> i32 {
                     }
                     _ => say(o.json, json!({"event": "start", "mode": "spooling", "run": name, "server": r.server, "spool": r.dir}), format!("run {name}: waiting for {}", r.server)),
                 }
+                // the server prefixes the token's project to `name`, for the client as for us
+                wrapped = vec![("MODGRAD_WRAPPED_RUN", name.clone()), ("MODGRAD_URL", r.server.clone())];
+                if let Some(t) = &o.token {
+                    wrapped.push(("MODGRAD_TOKEN", t.clone()));
+                }
+                if let Some(p) = &o.project {
+                    wrapped.push(("MODGRAD_PROJECT", p.clone()));
+                }
                 remote = Some(r);
             }
             Err(e) => {
@@ -541,6 +555,9 @@ pub fn run(o: Opts) -> i32 {
     if std::env::var_os("PYTHONUNBUFFERED").is_none() {
         // a piped stdout makes Python block-buffer; metrics would arrive in bursts
         cmd.env("PYTHONUNBUFFERED", "1");
+    }
+    for (k, v) in &wrapped {
+        cmd.env(k, v);
     }
     let t0 = Instant::now();
     let mut child = match cmd.spawn() {
@@ -694,6 +711,9 @@ pub fn run(o: Opts) -> i32 {
     drop(stx);
     let (ok, where_) = sender.join().unwrap_or((false, None));
     say(o.json, json!({"event": "end", "exit_code": code, "signal": signal, "wall_s": wall, "metric_rows": rows, "synced": ok, "dashboard": where_}), format!("{text} after {wall:.1}s, {rows} metric rows{}", where_.map(|w| format!(" -> {w}")).unwrap_or_default()));
+    if let Some(v) = view_hint.filter(|_| !o.json) {
+        eprintln!("modgrad: {v}");
+    }
     code
 }
 

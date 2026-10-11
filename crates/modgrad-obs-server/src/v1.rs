@@ -435,7 +435,7 @@ async fn new_project(AxState(st): AxState<AppState>, h: HeaderMap) -> ApiResult 
 
 async fn claim(AxState(st): AxState<AppState>, Path(c): Path<String>) -> ApiResult {
     let project = st.auth.claim_project(&c).ok_or(ApiError::NotFound)?;
-    Ok(axum::Json(json!({ "project": project, "claimed": false, "how": "attaching an SSH key or email to a project is not implemented yet; keep this URL to claim it later" })).into_response())
+    Ok(axum::Json(json!({ "project": project, "claimed": st.auth.owned(&project).is_some(), "how": "sign in (any method) and POST /api/v1/me/claim {\"project\", \"token\"} with this claim token or the project token" })).into_response())
 }
 
 /// Split `<run>/<action>` (run ids contain `/`).
@@ -541,17 +541,21 @@ impl Filter {
     }
 }
 
-fn sse(st: &AppState, filter: Filter) -> Response {
+/// Also drops runs of private projects the viewer cannot read, checked per
+/// message (a project may turn private while a stream is open).
+fn sse(st: &AppState, filter: Filter, viewer: crate::account::Viewer) -> Response {
     use tokio::sync::broadcast::error::RecvError;
     let mut rx = st.live.subscribe(); // before hello, so nothing falls in between
+    let auth = st.auth.clone();
+    let filter = move |r: &str| filter.keeps(r) && auth.readable(crate::account::project_of(r), &viewer).ok();
     let f2 = filter.clone();
-    let hello = st.live.hello(&move |r: &str| f2.keeps(r));
+    let hello = st.live.hello(&move |r: &str| f2(r));
     let stream = async_stream::stream! {
         yield Ok::<Event, std::convert::Infallible>(Event::default().event("hello").data(hello.to_string()));
         loop {
             match rx.recv().await {
                 Ok(m) => {
-                    if filter.keeps(&m.run) {
+                    if filter(&m.run) {
                         yield Ok(Event::default().event(m.kind.name()).data(m.data.to_string()));
                     }
                 }
@@ -566,15 +570,16 @@ fn sse(st: &AppState, filter: Filter) -> Response {
     r
 }
 
-async fn stream_all(AxState(st): AxState<AppState>, Query(q): Query<HashMap<String, String>>) -> Response {
+async fn stream_all(AxState(st): AxState<AppState>, Query(q): Query<HashMap<String, String>>, h: HeaderMap) -> ApiResult {
     let f = if let Some(r) = q.get("runs") {
         Filter::Runs(r.split(',').filter(|s| !s.is_empty()).map(String::from).collect())
     } else if let Some(p) = q.get("project") {
+        st.guard(&h, p)?;
         Filter::Project(p.clone())
     } else {
         Filter::Public
     };
-    sse(&st, f)
+    Ok(sse(&st, f, crate::portal::viewer(&st, &h)))
 }
 
 async fn get_dispatch(st: AxState<AppState>, Path(path): Path<String>, q: Query<HashMap<String, String>>, h: HeaderMap) -> ApiResult {
@@ -584,12 +589,19 @@ async fn get_dispatch(st: AxState<AppState>, Path(path): Path<String>, q: Query<
     };
     let run = Path(run.to_string());
     match action {
-        "stream" => Ok(sse(&st.0, Filter::Runs(vec![run.0]))),
+        "stream" => {
+            st.0.guard(&h, &run.0)?;
+            let v = crate::portal::viewer(&st.0, &h);
+            Ok(sse(&st.0, Filter::Runs(vec![run.0]), v))
+        }
         "history" => hh::history(st, run, q, h).await,
-        "config" => hh::config(st, run).await,
-        "summary" => hh::summary(st, run).await,
-        "samples" => samples(&st.0, run.0, &q.0).await,
-        _ => hh::events(st, run).await,
+        "config" => hh::config(st, run, h).await,
+        "summary" => hh::summary(st, run, h).await,
+        "samples" => {
+            st.0.guard(&h, &run.0)?;
+            samples(&st.0, run.0, &q.0).await
+        }
+        _ => hh::events(st, run, h).await,
     }
 }
 
@@ -639,10 +651,13 @@ async fn put_board(AxState(st): AxState<AppState>, Path(name): Path<String>, h: 
 }
 
 /// `GET /api/v1/boards/<name | project/name>`: the stored board JSON.
-async fn get_board(AxState(st): AxState<AppState>, Path(id): Path<String>) -> ApiResult {
+async fn get_board(AxState(st): AxState<AppState>, Path(id): Path<String>, h: HeaderMap) -> ApiResult {
     let Some(dir) = st.boards.clone() else { return Err(ApiError::NotFound) };
     if id.split('/').count() > 2 || !crate::state::valid_run_name(&id) {
         return Err(ApiError::NotFound);
+    }
+    if id.contains('/') {
+        st.guard(&h, &id)?;
     }
     let b = std::fs::read(dir.join(format!("{id}.json"))).map_err(|_| ApiError::NotFound)?;
     let v: Value = serde_json::from_slice(&b).map_err(|_| ApiError::NotFound)?;

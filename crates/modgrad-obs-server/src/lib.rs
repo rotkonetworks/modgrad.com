@@ -22,12 +22,15 @@ pub mod h3;
 pub mod http;
 pub mod ingest;
 pub mod live;
+pub mod mail;
 pub mod mcp_http;
+pub mod portal;
 pub mod read;
 #[cfg(feature = "ssh")]
 pub mod ssh;
 pub mod state;
 pub mod v1;
+pub mod webauthn;
 pub mod wire;
 
 pub use auth::{Auth, AuthError, Authed, AuthedRequest, AuthedResponse};

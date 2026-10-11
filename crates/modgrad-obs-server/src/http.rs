@@ -39,13 +39,15 @@ pub struct AppState {
     /// `--public-url`: the base of links in responses (and the SSH door's
     /// output); None = the request's Host / X-Forwarded-* headers.
     pub public_url: Option<String>,
+    /// Sign-in: the mailer, email rate limits, the SSH login command.
+    pub portal: crate::portal::Portal,
 }
 
 impl AppState {
     /// Wire the v1 extras around an ingest/read pair (spawns the [`Live`] task).
     pub fn new(ingest: IngestService, read: ReadState, static_dir: Option<PathBuf>, auth: Auth) -> AppState {
         let live = Live::spawn(read.clone());
-        AppState { ingest, read, static_dir, auth, live, boards: None, mcp_self: None, public_url: None }
+        AppState { ingest, read, static_dir, auth, live, boards: None, mcp_self: None, public_url: None, portal: Default::default() }
     }
     /// Store boards under `dir` (`<obs root>/boards`, the same place
     /// `modgrad mcp --dir` writes them).
@@ -63,6 +65,25 @@ impl AppState {
     pub fn with_public_url(mut self, url: String) -> AppState {
         self.public_url = Some(url.trim_end_matches('/').to_string());
         self
+    }
+    /// Send sign-in emails through `m` (default: [`crate::mail::LogMailer`]).
+    pub fn with_mailer(mut self, m: std::sync::Arc<dyn crate::mail::Mailer>) -> AppState {
+        self.portal.mailer = m;
+        self
+    }
+    /// The SSH sign-in command the sign-in page shows (`ssh <host> login`).
+    pub fn with_ssh_login(mut self, command: String) -> AppState {
+        self.portal.ssh_login = Some(command);
+        self
+    }
+    /// Refuse (401/403) a read of a private project the request does not cover.
+    pub fn guard(&self, h: &HeaderMap, run_or_project: &str) -> Result<(), ApiError> {
+        use crate::account::Access;
+        let project = crate::account::project_of(run_or_project);
+        match crate::portal::access(self, h, project) {
+            Access::Open | Access::Allowed => Ok(()),
+            a => Err(ApiError::Private { project: project.to_string(), signed_out: a == Access::SignedOut }),
+        }
     }
     /// The base of links in a response to a request with headers `h`.
     pub fn base_url(&self, h: &HeaderMap) -> String {
@@ -83,6 +104,8 @@ pub enum ApiError {
     Read(ReadError),
     Bad(String),
     NotFound,
+    /// A private project; `signed_out` = the request brought no session or token.
+    Private { project: String, signed_out: bool },
 }
 
 impl IntoResponse for ApiError {
@@ -93,7 +116,10 @@ impl IntoResponse for ApiError {
         use crate::error::StateError as S;
         use crate::v1::{EX_CREATE, EX_LOG, EX_TOKEN};
         const EX_READ: &str = r#"curl "$OBS/api/index"   # lists runs; then GET /api/runs/<id with / as %2F>/metrics/<key>"#;
+        const EX_PRIVATE: &str = r#"curl "$OBS/api/v1/runs/my-project/my-run/history" -H "Authorization: Bearer $MODGRAD_TOKEN""#;
         let (code, msg, example) = match &self {
+            ApiError::Private { project, signed_out: true } => (StatusCode::UNAUTHORIZED, format!("project {project:?} is private: sign in as its owner, or send a token for it (Authorization: Bearer obsp_…)"), EX_PRIVATE),
+            ApiError::Private { project, signed_out: false } => (StatusCode::FORBIDDEN, format!("project {project:?} is private and this session or token does not cover it"), EX_PRIVATE),
             ApiError::Teach { status, error, example } => (*status, error.clone(), *example),
             ApiError::Bad(m) => (StatusCode::BAD_REQUEST, m.clone(), EX_LOG),
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not found".into(), EX_READ),
@@ -110,7 +136,10 @@ impl IntoResponse for ApiError {
             ApiError::Ingest(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string(), EX_LOG),
         };
         let help = "GET /api/v1 for the API reference ($OBS is the server URL, $MODGRAD_TOKEN your token)";
-        let body = json!({ "error": msg, "example": example, "help": help, "message": format!("{msg}\nExample: {example}\nHelp: {help}") });
+        let mut body = json!({ "error": msg, "example": example, "help": help, "message": format!("{msg}\nExample: {example}\nHelp: {help}") });
+        if let ApiError::Private { signed_out, .. } = &self {
+            body["code"] = json!(if *signed_out { "signed_out" } else { "forbidden" });
+        }
         let mut r = (code, axum::Json(body)).into_response();
         if code == StatusCode::UNAUTHORIZED {
             r.headers_mut().insert(header::WWW_AUTHENTICATE, header::HeaderValue::from_static("Bearer"));
@@ -274,12 +303,18 @@ pub(crate) async fn index(AxState(st): AxState<AppState>, Query(q): Query<HashMa
         Ok(crate::auth::Cred::Project(p)) => Some(p),
         _ => None,
     });
+    if let Some(p) = &project {
+        st.guard(&h, p)?;
+    }
+    // private projects only for their owner or a token for them
+    let viewer = crate::portal::viewer(&st, &h);
     let keep = |e: &Value| {
         let id = e["id"].as_str().unwrap_or("");
-        match &project {
+        let listed = match &project {
             Some(p) => id.strip_prefix(p.as_str()).is_some_and(|r| r.starts_with('/')),
             None => !id.starts_with(crate::auth::ANON_PREFIX),
-        }
+        };
+        listed && st.auth.readable(crate::account::project_of(id), &viewer).ok()
     };
     let filter = q.get("filter").cloned().or_else(|| project.as_ref().map(|p| format!("{p}/")));
     match read(&st, ReadRequest::ListRuns { filter }).await? {
@@ -290,21 +325,24 @@ pub(crate) async fn index(AxState(st): AxState<AppState>, Query(q): Query<HashMa
     }
 }
 
-pub(crate) async fn config(AxState(st): AxState<AppState>, Path(run): Path<String>) -> ApiResult {
+pub(crate) async fn config(AxState(st): AxState<AppState>, Path(run): Path<String>, h: HeaderMap) -> ApiResult {
+    st.guard(&h, &run)?;
     match read(&st, ReadRequest::Config(run)).await? {
         ReadResponse::Config(v) => ok_json(v),
         _ => Err(ApiError::NotFound),
     }
 }
 
-pub(crate) async fn summary(AxState(st): AxState<AppState>, Path(run): Path<String>) -> ApiResult {
+pub(crate) async fn summary(AxState(st): AxState<AppState>, Path(run): Path<String>, h: HeaderMap) -> ApiResult {
+    st.guard(&h, &run)?;
     match read(&st, ReadRequest::Summary(run)).await? {
         ReadResponse::Summary(v) => ok_json(v.unwrap_or(Value::Null)),
         _ => Err(ApiError::NotFound),
     }
 }
 
-pub(crate) async fn events(AxState(st): AxState<AppState>, Path(run): Path<String>) -> ApiResult {
+pub(crate) async fn events(AxState(st): AxState<AppState>, Path(run): Path<String>, h: HeaderMap) -> ApiResult {
+    st.guard(&h, &run)?;
     match read(&st, ReadRequest::Events(run)).await? {
         ReadResponse::Events(v) => ok_json(json!(v)),
         _ => Err(ApiError::NotFound),
@@ -318,6 +356,7 @@ fn range_of(q: &HashMap<String, String>) -> std::ops::Range<u64> {
 
 /// `?keys=a,b&from=&to=&stride=`; JSON `{steps,t,columns:{k:[…]}}` or frames.
 pub(crate) async fn history(AxState(st): AxState<AppState>, Path(run): Path<String>, Query(q): Query<HashMap<String, String>>, h: HeaderMap) -> ApiResult {
+    st.guard(&h, &run)?;
     let keys: Vec<String> = q.get("keys").map(|k| k.split(',').filter(|s| !s.is_empty()).map(String::from).collect()).unwrap_or_default();
     let stride = q.get("stride").and_then(|s| s.parse().ok()).unwrap_or(1);
     let ReadResponse::History(b) = read(&st, ReadRequest::History { run: run.clone(), keys, range: range_of(&q), stride }).await? else { return Err(ApiError::NotFound) };
@@ -338,7 +377,8 @@ pub(crate) async fn history(AxState(st): AxState<AppState>, Path(run): Path<Stri
 
 /// Same schema as the static `metrics/<key>.json`. `?max_points=N` picks
 /// every k-th row (selection, not averaging) so at most ~N come back.
-pub(crate) async fn metric(AxState(st): AxState<AppState>, Path((run, key)): Path<(String, String)>, Query(q): Query<HashMap<String, String>>) -> ApiResult {
+pub(crate) async fn metric(AxState(st): AxState<AppState>, Path((run, key)): Path<(String, String)>, Query(q): Query<HashMap<String, String>>, h: HeaderMap) -> ApiResult {
+    st.guard(&h, &run)?;
     let ReadResponse::History(full) = read(&st, ReadRequest::History { run: run.clone(), keys: vec![key.clone()], range: range_of(&q), stride: 1 }).await? else { return Err(ApiError::NotFound) };
     let n = full.steps.len();
     let stride = q.get("max_points").and_then(|m| m.parse::<usize>().ok()).filter(|&m| m > 0).map(|m| n.div_ceil(m)).unwrap_or(1).max(1);
@@ -355,6 +395,7 @@ pub(crate) async fn metric(AxState(st): AxState<AppState>, Path((run, key)): Pat
 /// Same schema as the static `arrays/<key>.json` (plus `offset`).
 /// `?steps=1,2&lo=&hi=&max_steps=`; frames when asked.
 pub(crate) async fn arrays(AxState(st): AxState<AppState>, Path((run, key)): Path<(String, String)>, Query(q): Query<HashMap<String, String>>, h: HeaderMap) -> ApiResult {
+    st.guard(&h, &run)?;
     let steps: Option<Vec<u64>> = q.get("steps").map(|s| s.split(',').filter_map(|x| x.parse().ok()).collect());
     let index_range = match (q.get("lo").and_then(|v| v.parse().ok()), q.get("hi").and_then(|v| v.parse().ok())) {
         (None, None) => None,
@@ -407,11 +448,19 @@ fn content_type(p: &std::path::Path) -> &'static str {
     }
 }
 
-async fn static_file(AxState(st): AxState<AppState>, uri: Uri) -> ApiResult {
+/// Paths the app routes itself (the sign-in links point at `/login`);
+/// they serve the same page as `/`.
+const APP_PATHS: &[&str] = &["login", "account"];
+
+async fn static_file(AxState(st): AxState<AppState>, uri: Uri, h: HeaderMap) -> ApiResult {
     let Some(root) = &st.static_dir else { return Err(ApiError::NotFound) };
     let rel = uri.path().trim_start_matches('/');
     // `/`: the obs root's dashboard.html, or the app's own index.html (obs/web/dist)
-    let rel = if !rel.is_empty() { rel } else if root.join("dashboard.html").is_file() { "dashboard.html" } else { "index.html" };
+    let rel = if !rel.is_empty() && !APP_PATHS.contains(&rel) { rel } else if root.join("dashboard.html").is_file() { "dashboard.html" } else { "index.html" };
+    // a store root served as files: its runs and boards read like the API
+    if let Some(rest) = rel.strip_prefix("runs/").or_else(|| rel.strip_prefix("boards/")) {
+        st.guard(&h, rest).map_err(|_| ApiError::NotFound)?;
+    }
     // no traversal: every component must be a plain name
     let path = std::path::Path::new(rel);
     // and no dotfiles (the token store lives at <root>/.obs-auth.json)
@@ -442,6 +491,7 @@ pub fn router(st: AppState) -> Router {
             .route("/api/runs/:run/finish", post(finish));
     }
     r.merge(crate::v1::routes())
+        .merge(crate::portal::routes(st.clone()))
         .route("/api/runs/:run/config", get(config))
         .route("/api/runs/:run/summary", get(summary))
         .route("/api/runs/:run/events", get(events))

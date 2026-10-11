@@ -5440,6 +5440,7 @@ dependencies = [
  "tower-test",
  "tracing",
  "tracing-subscriber 0.3.23",
+ "ureq",
 ]
 
 [[package]]

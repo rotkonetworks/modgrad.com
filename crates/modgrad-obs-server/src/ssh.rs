@@ -15,6 +15,11 @@
 //! * `token`: a fresh (expiring) project token on stdout, and how to use it
 //!   with `modgrad init` and curl on stderr.
 //! * `runs`: this key's runs. `tail <run>`: latest values ([`spark::table`]).
+//! * `login`: a one-time link (`<public>/login#ssh=<token>`, 10 minutes)
+//!   that signs the browser in with this key, or adds the key to the
+//!   account the browser is signed in to ([`crate::portal`]). A key that
+//!   was pasted into an account on the web gets only `login` and `help`
+//!   until such a link confirms it.
 //! * `help`, an unknown verb, or an interactive login (a pty): usage.
 //!
 //! Bounds: [`SshConfig`] caps connections (globally, over a semaphore taken
@@ -141,7 +146,7 @@ pub async fn serve(lis: tokio::net::TcpListener, key: PrivateKey, st: AppState, 
         tokio::spawn(async move {
             let _permit = permit;
             let authed = Arc::new(AtomicBool::new(false));
-            let h = Conn { door: door.clone(), fp: None, project: None, channels: Arc::new(AtomicUsize::new(0)), authed: authed.clone() };
+            let h = Conn { door: door.clone(), fp: None, line: None, project: None, channels: Arc::new(AtomicUsize::new(0)), authed: authed.clone() };
             // the version exchange happens in here: bound it like auth
             let session = match tokio::time::timeout(door.cfg.auth_timeout, russh::server::run_stream(rcfg, sock, h)).await {
                 Ok(Ok(s)) => s,
@@ -171,6 +176,9 @@ pub async fn serve(lis: tokio::net::TcpListener, key: PrivateKey, st: AppState, 
 struct Conn {
     door: Arc<Door>,
     fp: Option<String>,
+    /// The key as an openssh line (bound into `login` links).
+    line: Option<String>,
+    /// None for a key added on the web and not yet confirmed.
     project: Option<String>,
     channels: Arc<AtomicUsize>,
     authed: Arc<AtomicBool>,
@@ -186,13 +194,22 @@ impl Handler for Conn {
     /// Called after the signature proved the client holds the key.
     async fn auth_publickey(&mut self, _user: &str, key: &PublicKey) -> Result<SshAuth, Self::Error> {
         let fp = fingerprint(key);
-        match self.door.st.auth.ssh_key_project(&fp) {
+        let line = key.to_openssh().ok();
+        match self.door.st.auth.ssh_key_project_with(&fp, line.as_deref()) {
             Ok((project, new)) => {
                 if new {
                     tracing::info!("ssh: new key {fp} -> project {project}");
                 }
                 self.fp = Some(fp);
+                self.line = line;
                 self.project = Some(project);
+                self.authed.store(true, Ordering::Relaxed);
+                Ok(SshAuth::Accept)
+            }
+            // in, but only for `login` (which confirms it) and `help`
+            Err(crate::AuthError::Unconfirmed) => {
+                self.fp = Some(fp);
+                self.line = line;
                 self.authed.store(true, Ordering::Relaxed);
                 Ok(SshAuth::Accept)
             }
@@ -204,7 +221,7 @@ impl Handler for Conn {
     }
 
     async fn channel_open_session(&mut self, channel: Channel<Msg>, reply: russh::server::ChannelOpenHandle, _s: &mut Session) -> Result<(), Self::Error> {
-        let (Some(fp), Some(project)) = (self.fp.clone(), self.project.clone()) else {
+        let (Some(fp), line, project) = (self.fp.clone(), self.line.clone().unwrap_or_default(), self.project.clone()) else {
             reply.reject(ChannelOpenFailure::AdministrativelyProhibited).await;
             return Ok(());
         };
@@ -216,7 +233,7 @@ impl Handler for Conn {
         reply.accept().await;
         let (door, channels) = (self.door.clone(), self.channels.clone());
         tokio::spawn(async move {
-            run_channel(&door, channel, &fp, &project).await;
+            run_channel(&door, channel, &fp, &line, project.as_deref()).await;
             channels.fetch_sub(1, Ordering::Relaxed);
         });
         Ok(())
@@ -303,6 +320,8 @@ impl Door {
              \x20 ssh <server> token                              a project token for curl, `modgrad init` and Python\n\
              \x20 ssh <server> runs                               this key's runs\n\
              \x20 ssh <server> tail <run>                         latest values of a run\n\
+             \x20 ssh <server> login                             a link that signs your browser in with this key\n\
+             \x20                                                (or adds the key to the account it is signed in to)\n\
              \n\
              Metric lines like \"step 100: loss 2.31 acc 71%\" become rows; your output is echoed back unchanged.\n",
             base = self.public
@@ -345,7 +364,7 @@ async fn exit(door: &Door, ch: &Channel<Msg>, code: u32) {
 }
 
 /// Wait for shell/exec on a fresh channel, then run the verb.
-async fn run_channel(door: &Door, mut ch: Channel<Msg>, fp: &str, project: &str) {
+async fn run_channel(door: &Door, mut ch: Channel<Msg>, fp: &str, line: &str, project: Option<&str>) {
     let mut pty = false;
     let command = loop {
         match ch.wait().await {
@@ -364,20 +383,46 @@ async fn run_channel(door: &Door, mut ch: Channel<Msg>, fp: &str, project: &str)
     };
     let words: Vec<&str> = command.as_deref().unwrap_or("").split_whitespace().collect();
     let code = match (command.is_none(), words.as_slice()) {
-        // an interactive login (`ssh <server>` from a terminal) is not a log
-        (true, _) if pty => err(door, &ch, door.usage().replace('\n', "\r\n")).await.map(|_| 0),
-        (_, []) => ingest(door, &mut ch, project, None).await,
-        (_, ["run"]) => ingest(door, &mut ch, project, None).await,
-        (_, ["run", name]) => ingest(door, &mut ch, project, Some(name)).await,
-        (_, ["token"]) => token(door, &ch, project).await,
-        (_, ["runs"]) => runs(door, &ch, project).await,
-        (_, ["tail", run]) => tail(door, &ch, project, run).await,
+        (_, ["login"]) => login(door, &ch, fp, line).await,
         (_, ["help" | "-h" | "--help" | "usage"]) => out(door, &ch, door.usage()).await.map(|_| 0),
-        (_, w) => err(door, &ch, format!("modgrad: unknown command {:?}\n\n{}", w.join(" "), door.usage())).await.map(|_| 2),
+        _ if project.is_none() => err(door, &ch, format!("modgrad: {}\n", crate::AuthError::Unconfirmed)).await.map(|_| 1),
+        _ => run_verb(door, &mut ch, project.unwrap_or_default(), command.is_none(), pty, &words).await,
     };
     // a gone channel just drops (no exit status to deliver)
     if let Ok(code) = code {
         exit(door, &ch, code).await;
+    }
+}
+
+/// The verbs that need the key's project.
+async fn run_verb(door: &Door, ch: &mut Channel<Msg>, project: &str, no_command: bool, pty: bool, words: &[&str]) -> Exit {
+    let ch_ref = &*ch;
+    match (no_command, words) {
+        // an interactive login (`ssh <server>` from a terminal) is not a log
+        (true, _) if pty => err(door, ch_ref, door.usage().replace('\n', "\r\n")).await.map(|_| 0),
+        (_, []) => ingest(door, ch, project, None).await,
+        (_, ["run"]) => ingest(door, ch, project, None).await,
+        (_, ["run", name]) => ingest(door, ch, project, Some(name)).await,
+        (_, ["token"]) => token(door, ch_ref, project).await,
+        (_, ["runs"]) => runs(door, ch_ref, project).await,
+        (_, ["tail", run]) => tail(door, ch_ref, project, run).await,
+        (_, w) => err(door, ch_ref, format!("modgrad: unknown command {:?}\n\n{}", w.join(" "), door.usage())).await.map(|_| 2),
+    }
+}
+
+/// `ssh <server> login`: a one-time sign-in link for this key on stdout.
+async fn login(door: &Door, ch: &Channel<Msg>, fp: &str, line: &str) -> Exit {
+    match door.st.auth.ssh_login_token(fp, line) {
+        Ok(t) => {
+            out(door, ch, format!("{}/login#ssh={t}\n", door.public)).await?;
+            let mins = (door.st.auth.portal.ssh_ttl / 60.0).round();
+            err(door, ch, format!("modgrad: open this link within {mins:.0} minutes to sign in with key {fp}; signed in already, it adds the key to that account. It works once.\n")).await?;
+            Ok(0)
+        }
+        Err(e) => {
+            err(door, ch, format!("modgrad: {e}\n")).await?;
+            Ok(1)
+        }
     }
 }
 

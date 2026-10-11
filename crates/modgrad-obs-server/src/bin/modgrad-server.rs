@@ -3,7 +3,7 @@
 //!            [--dev] [--no-anon] [--anon-expiry-days 30] [--mcp]
 //!            [--h3 <udp addr> (--tls-cert <pem> --tls-key <pem> | --h3-self-signed) [--h3-advertise <port>]]
 //!            [--ssh <tcp addr> [--ssh-idle <secs>] [--ssh-max-conns 256] [--ssh-max-per-key 8]]
-//!            [--public-url <https://obs.example.org>]
+//!            [--public-url <https://obs.example.org>] [--mail log | cmd:<path> | jmap] [--mail-from <addr>]
 //! modgrad-server token add <project> [--root <obs dir>] [--json]
 //! ```
 //!
@@ -38,7 +38,17 @@
 //! `--public-url` is the base of links the server prints and returns
 //! (dashboard URLs, board links); without it HTTP responses use the
 //! request's Host / X-Forwarded-* headers and the SSH door uses
-//! `http://<--listen>`.
+//! `http://<--listen>`. It is also the sign-in origin: cookies get
+//! `Secure` under https, zafu challenges and passkeys are bound to it (rpId
+//! = its host). Without it a request's own Host is the origin (dev).
+//!
+//! Sign-in (`/api/v1/auth/*`, `/api/v1/me/*`, see `portal.rs`): `--mail`
+//! picks how email sign-in links go out: `log` (default; nothing is sent,
+//! the link is logged at info level: `RUST_LOG=info`), `cmd:<path>` (RFC
+//! 5322 on the stdin of `<path> -t -i`, From `--mail-from`, default
+//! `modgrad <noreply@<public host>>`), or `jmap` (feature `jmap`; env
+//! `MODGRAD_JMAP_URL`, `MODGRAD_JMAP_USER`, `MODGRAD_JMAP_PASS`). With
+//! `--ssh`, `ssh <host> login` prints a sign-in link.
 
 use modgrad_obs_server::auth::{Auth, AuthConfig};
 use modgrad_obs_server::{IngestConfig, http};
@@ -50,12 +60,17 @@ const USAGE: &str = "usage:
              [--h3 <udp addr> (--tls-cert <pem> --tls-key <pem> | --h3-self-signed) [--h3-advertise <port>]]
              [--ssh <tcp addr> [--ssh-idle <secs>] [--ssh-max-conns 256] [--ssh-max-per-key 8]]
              [--public-url <https://obs.example.org>]
+             [--mail log | cmd:<path> | jmap] [--mail-from <addr>]
   modgrad-server token add <project> [--root <obs dir>] [--json]
---dev accepts writes without a token (local use only). Logging: RUST_LOG=info.";
+--dev accepts writes without a token (local use only). Logging: RUST_LOG=info.
+--public-url is the sign-in origin (cookies, zafu, passkeys); default: the request's Host.
+--mail: how email sign-in links go out. log (default): not sent, logged at info level.
+  cmd:<path>: the message on the stdin of `<path> -t -i` (sendmail, msmtp), From --mail-from.
+  jmap (built with --features jmap): env MODGRAD_JMAP_URL, MODGRAD_JMAP_USER, MODGRAD_JMAP_PASS.";
 /// flags that take a value, and flags that do not
 const VALUED: &[&str] = &[
     "--root", "--listen", "--static", "--anon-expiry-days", "--h3", "--tls-cert", "--tls-key", "--h3-advertise",
-    "--ssh", "--ssh-idle", "--ssh-max-conns", "--ssh-max-per-key", "--public-url",
+    "--ssh", "--ssh-idle", "--ssh-max-conns", "--ssh-max-per-key", "--public-url", "--mail", "--mail-from",
 ];
 const SWITCHES: &[&str] = &["--no-static", "--dev", "--no-anon", "--mcp", "--h3-self-signed", "--json"];
 
@@ -155,8 +170,18 @@ async fn main() {
     if let Some(u) = &public_url {
         state = state.with_public_url(u.clone());
     }
+    let mail_host = public_url.as_deref().and_then(|u| u.split_once("://")).map(|(_, r)| r.split(['/', ':']).next().unwrap_or(r).to_string()).unwrap_or_else(|| "localhost".into());
+    let from = flag("--mail-from").unwrap_or_else(|| format!("modgrad <noreply@{mail_host}>"));
+    let mailer = modgrad_obs_server::mail::from_spec(&flag("--mail").unwrap_or_else(|| "log".into()), &from).unwrap_or_else(|e| {
+        eprintln!("modgrad-server: {e}");
+        std::process::exit(2)
+    });
+    eprintln!("modgrad-server: sign-in mail: {}", mailer.describe());
+    state = state.with_mailer(mailer);
     #[cfg(feature = "ssh")]
-    ssh_listener(&args, &root, &state, public_url.clone().unwrap_or_else(|| loopback_url(&lis))).await;
+    if let Some(cmd) = ssh_listener(&args, &root, &state, public_url.clone().unwrap_or_else(|| loopback_url(&lis))).await {
+        state = state.with_ssh_login(cmd);
+    }
     #[cfg(not(feature = "ssh"))]
     if has("--ssh") {
         eprintln!("modgrad-server: built without the ssh feature; --ssh ignored");
@@ -175,7 +200,8 @@ async fn main() {
         eprintln!("modgrad-server: built without the h3 feature; --h3 ignored (serving TCP only)");
     }
     eprintln!("modgrad-server: {} on http://{listen}/{}", root.display(), if cfg.dev { "  (dev mode: tokenless writes allowed)" } else { "" });
-    axum::serve(lis, app).with_graceful_shutdown(async { let _ = tokio::signal::ctrl_c().await; }).await.unwrap();
+    // the peer address feeds the sign-in email rate limit
+    axum::serve(lis, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).with_graceful_shutdown(async { let _ = tokio::signal::ctrl_c().await; }).await.unwrap();
     #[cfg(feature = "h3")]
     if let Some(ep) = quic {
         ep.close(0u32.into(), b"shutdown");
@@ -229,16 +255,17 @@ fn loopback_url(lis: &tokio::net::TcpListener) -> String {
 }
 
 /// `--ssh <tcp addr>`: load or make the host key, bind, and serve in the
-/// background. Exits on a bad flag or bind error.
+/// background. Exits on a bad flag or bind error. Returns the `ssh … login`
+/// command for the sign-in page (None without `--ssh`).
 #[cfg(feature = "ssh")]
-async fn ssh_listener(args: &[String], root: &std::path::Path, state: &http::AppState, public: String) {
+async fn ssh_listener(args: &[String], root: &std::path::Path, state: &http::AppState, public: String) -> Option<String> {
     use modgrad_obs_server::ssh::{SshConfig, fingerprint, host_key, serve};
     let flag = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1).cloned());
     let die = |m: String| -> ! {
         eprintln!("modgrad-server: {m}");
         std::process::exit(1)
     };
-    let Some(addr) = flag("--ssh") else { return };
+    let addr = flag("--ssh")?;
     let num = |k: &str, d: f64| flag(k).map_or(d, |v| v.parse::<f64>().ok().filter(|x| *x > 0.0).unwrap_or_else(|| die(format!("{k} {v:?}: want a positive number"))));
     let d = SshConfig::default();
     let cfg = SshConfig {
@@ -254,5 +281,8 @@ async fn ssh_listener(args: &[String], root: &std::path::Path, state: &http::App
     if flag("--public-url").is_none() && lis.local_addr().is_ok_and(|a| !a.ip().is_loopback()) {
         eprintln!("modgrad-server: warning: ssh is reachable from other hosts but its links point at {public}; pass --public-url <https://your.host>");
     }
+    let port = lis.local_addr().map(|a| a.port()).unwrap_or(22);
+    let host = public.split_once("://").map_or(public.as_str(), |(_, r)| r).split(['/', ':']).next().unwrap_or("localhost").to_string();
     tokio::spawn(serve(lis, key, state.clone(), public, cfg));
+    Some(if port == 22 { format!("ssh {host} login") } else { format!("ssh -p {port} {host} login") })
 }

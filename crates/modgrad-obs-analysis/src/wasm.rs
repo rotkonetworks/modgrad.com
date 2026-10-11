@@ -515,7 +515,8 @@ pub fn forecast_n(steps: &[f64], vals: &[f64], pool_off: &[u32], pool_steps: &[f
 
 /// Families of per-layer metrics among the newline-joined `names` with at
 /// least `min_layers` distinct layers, as JSON
-/// `[{"family": "layers/*/grad_norm", "layers": [0, 1, …], "metrics": [...]}]`.
+/// `[{"family": <template>, "layers": [0, 1, …], "metrics": [...]}]`, where the
+/// template is the metric name with the layer index replaced by a star.
 #[wasm_bindgen]
 pub fn layer_families(names: &str, min_layers: usize) -> String {
     let n: Vec<&str> = split_names(names);

@@ -2,11 +2,12 @@
 // logged arrays (`<array>.mean|min|max|rms`).
 import { A } from '@/lib/wasm';
 import { f32 } from '@/lib/fmt';
-import { STATS, type Loader } from '@/logic/data';
+import { STATS, SAMPLES_METRIC, type Loader } from '@/logic/data';
 import { S, metricSeries, arrayOf } from '@/stores/runs';
 
 export const loader: Loader = async (runId, metric) => {
   const run = S.byId.get(runId); if (!run) return null;
+  if (metric === SAMPLES_METRIC && !run.metrics[metric]) return { steps: new Float64Array(0), values: new Float64Array(0) }; // text, not a curve
   if (run.metrics[metric]) {
     const s = await metricSeries(run, metric);
     return s ? { steps: Float64Array.from(s.steps), values: Float64Array.from(s.values) } : null;

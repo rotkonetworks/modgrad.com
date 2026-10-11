@@ -5,7 +5,7 @@ import { A } from '@/lib/wasm';
 import type { Board, Chip, Panel, PanelView, Parsed } from '@/logic/types';
 
 export const BOARD_VERSION = 2;
-export const STAGE_KINDS = ['ema', 'by', 'agg', 'split', 'x', 'forecast', 'log', 'norm', 'baseline', 'align', 'show'];
+export const STAGE_KINDS = ['ema', 'by', 'agg', 'split', 'x', 'forecast', 'log', 'norm', 'baseline', 'align', 'show', 'heatmap'];
 
 export const uid = (): string => 'p' + Math.random().toString(36).slice(2, 10).replace(/[^a-z0-9]/g, '0');
 export const quote = (s: unknown): string => '"' + String(s).replace(/"/g, '') + '"';
@@ -217,8 +217,13 @@ const AUTO: [string, RegExp, string][] = [
   ['entropy', /entropy/i, ''],
   ['response length', /resp(onse)?_?len/i, ''],
 ];
-export function autoBoard(metrics: Map<string, number>, { replicates = false, hasTokens = null as string | null, filter = '' } = {}): Board | null {
-  const names = [...metrics.keys()];
+export interface AutoLLM { families?: { family: string; metrics: string[] }[]; samples?: boolean; heatmapQuery?: (family: string, filter: string) => string; samplesMetric?: string }
+/** families that earn a heatmap on the default board, most useful first */
+const HEATMAP_RANK = (f: string): number => (/grad_?norm/i.test(f) ? 0 : /act(ivation)?s?_?rms|rms/i.test(f) ? 1 : /update|weight_?norm|norm/i.test(f) ? 2 : 9);
+export function autoBoard(metrics: Map<string, number>, { replicates = false, hasTokens = null as string | null, filter = '', families = [], samples = false, heatmapQuery, samplesMetric = 'samples:text' } = {} as { replicates?: boolean; hasTokens?: string | null; filter?: string } & AutoLLM): Board | null {
+  // per-layer metrics belong to their family's heatmap, not to a single-metric panel
+  const layered = new Set(families.flatMap((f) => f.metrics));
+  const names = [...metrics.keys()].filter((m) => !layered.has(m));
   const panels: Panel[] = [];
   const used = new Set<string>();
   for (const [title, re, extra] of AUTO) {
@@ -233,6 +238,13 @@ export function autoBoard(metrics: Map<string, number>, { replicates = false, ha
       panels.push(newPanel(q));
     }
   }
+  // per-layer heatmaps (pre-training post-mortems: which layer's gradients blew up, how activations drift with depth)
+  if (heatmapQuery) {
+    const fams = families.filter((f) => f.metrics.length >= 4 && HEATMAP_RANK(f.family) < 9).sort((a, b) => HEATMAP_RANK(a.family) - HEATMAP_RANK(b.family) || a.family.localeCompare(b.family));
+    for (const f of fams.slice(0, 3)) panels.push(newPanel(heatmapQuery(f.family, filter)));
+  }
+  // generations of SFT / RL runs: the latest samples
+  if (samples) panels.push(newPanel(samplesMetric + filter));
   return panels.length >= 2 ? { version: BOARD_VERSION, panels } : null;
 }
 /** headline metrics when nothing else applies: loss first, then acc/ppl/reward/score, sys/* last */

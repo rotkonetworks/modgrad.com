@@ -5,7 +5,7 @@ export type Action =
   | { type: 'stage'; kind: string; text: string | null }
   | { type: 'add'; entries: string }
   | { type: 'new'; q: string | null }
-  | { type: 'follow' | 'editText' | 'expand' | 'back' | 'undo' | 'export' | 'import' | 'inspect' }
+  | { type: 'follow' | 'editText' | 'expand' | 'back' | 'undo' | 'export' | 'import' | 'inspect' | 'anomalies' }
   | { type: 'preset'; name: string }
   | { type: 'view'; name: string };
 export interface Command { label: string; action: Action }
@@ -46,6 +46,9 @@ export function commands(input: string, ctx: Ctx): Command[] {
   push('x axis: step', { type: 'stage', kind: 'x', text: null });
   push('x axis: time', { type: 'stage', kind: 'x', text: 'x time' });
   push('x axis: tokens', { type: 'stage', kind: 'x', text: 'x tokens' });
+  push('layer heatmap', { type: 'stage', kind: 'heatmap', text: 'heatmap over layer' }, 'per layer heatmap grad norm activation');
+  push('layer heatmap, per-layer normalised', { type: 'stage', kind: 'heatmap', text: 'heatmap over layer rownorm' }, 'per layer heatmap rownorm spike');
+  push('lines instead of heatmap', { type: 'stage', kind: 'heatmap', text: null }, 'remove heatmap');
   push('edit query as text', { type: 'editText' });
   push('inspect panel', { type: 'inspect' }, 'inspector settings');
   push('expand panel', { type: 'expand' }, 'focus fullscreen');
@@ -59,6 +62,9 @@ export function commands(input: string, ctx: Ctx): Command[] {
   push('go to across runs', { type: 'view', name: 'cross' }, 'view tab surface heatmap');
   push('go to arrays / 3D', { type: 'view', name: 'arrays' }, 'view tab pca trajectory volume');
   push('go to runs', { type: 'view', name: 'runs' }, 'view tab table');
+  push('go to samples', { type: 'view', name: 'samples' }, 'view tab generations completions text sft rl');
+  push('go to evals', { type: 'view', name: 'evals' }, 'view tab benchmarks table checkpoints');
+  push('show or hide anomalies (spikes, NaN)', { type: 'anomalies' }, 'spikes nan inf loss grad norm post-mortem jump');
   for (const f of ctx.fields.slice(0, 40)) { push(`colour by ${f}`, { type: 'stage', kind: 'by', text: `by ${f}` }); push(`split by ${f}`, { type: 'stage', kind: 'split', text: `split ${f}` }); }
   for (const name of ctx.metrics.slice(0, 200)) push(`add ${name}`, { type: 'add', entries: name });
   // parametric hits stay on top; the rest must contain every typed word

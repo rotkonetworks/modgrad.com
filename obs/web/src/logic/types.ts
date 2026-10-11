@@ -20,6 +20,8 @@ export interface Run {
   metrics: Record<string, MetricInfo>; arrays: Record<string, ArrayInfo>;
   finished?: boolean; last_step?: number | null; last_t?: number | null;
   n_rows?: number; n_events?: number; skipped_lines?: number; unparsed: string[]; has_small?: boolean;
+  /** text samples logged (samples.jsonl); 0 or absent = none */
+  n_samples?: number;
   /** inline rows (live feed, other modules): read before fetching */
   data?: Record<string, Rows>;
   local?: LocalData;
@@ -36,7 +38,7 @@ export interface ForecastView {
   window: [number, number] | null; target: number | null; band: number; pool: 'none' | 'metric' | 'group';
   live: boolean; frozen: Record<string, FitForecast> | null;
 }
-export interface PanelView { follow: boolean; hidden: string[]; solo: string | null; y2: string | null; fc: ForecastView }
+export interface PanelView { follow: boolean; hidden: string[]; solo: string | null; y2: string | null; fc: ForecastView; samplesK?: number }
 export interface Panel { id: string; title: string; q: string; view: PanelView }
 export interface Board { version: number; panels: Panel[] }
 
@@ -47,11 +49,14 @@ export interface TraceMeta {
   label: string; letter: string; metric: string; runs: string[]; color: string; cell?: string; band: boolean; off: number; n: number; [k: string]: unknown;
 }
 export interface Trace extends TraceMeta { xs: Float64Array; ys: Float64Array; raw: Float64Array; lo: Float64Array; hi: Float64Array; steps: Float64Array }
+/** one layer x step matrix of `heatmap over layer` (query.rs LayerHeatmap) */
+export interface HeatmapMeta { run: string; family: string; layers: number[]; metrics: string[]; ncols: number; off: number }
+export interface LayerHeatmap extends HeatmapMeta { cols: Float64Array; z: Float64Array }
 export interface QueryMeta {
-  traces: TraceMeta[]; warnings: string[]; cells: string[]; x_label: string; ylog: boolean;
+  traces: TraceMeta[]; heatmaps?: HeatmapMeta[]; warnings: string[]; cells: string[]; x_label: string; ylog: boolean;
   by?: string | null; by_numeric?: boolean; forecast?: { to?: number | null; method?: string } | null; downsampled?: number | null; [k: string]: unknown;
 }
-export type QueryResult = { ok: true; meta: QueryMeta; traces: Trace[]; streams: number } | { ok: false; error: string; start?: number; end?: number };
+export type QueryResult = { ok: true; meta: QueryMeta; traces: Trace[]; heatmaps: LayerHeatmap[]; streams: number } | { ok: false; error: string; start?: number; end?: number };
 
 export interface FitForecast {
   none?: undefined; method: string; skill: boolean; mae: number; naive: number; nTest: number; cfg: string;

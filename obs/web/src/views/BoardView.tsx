@@ -7,6 +7,7 @@ import { openPopover, setPaletteOpen, railOpen, setRailOpen } from '@/stores/ui'
 import Panel from '@/components/Panel';
 import Rail from '@/components/Rail';
 import Inspector from '@/components/Inspector';
+import Anomalies, { anomaliesOpen, setAnomaliesOpen } from '@/components/Anomalies';
 
 let fileInput!: HTMLInputElement;
 export const openImport = (): void => fileInput?.click();
@@ -48,6 +49,7 @@ export function BoardToolbar() {
       <button type="button" title="command palette (Ctrl+K)" aria-label="open the command palette" onClick={() => setPaletteOpen(true)}>commands</button>
       <button type="button" title="builder settings" aria-label="builder settings" onClick={(e) => openPopover(e.currentTarget, () => <SettingsPop />)}>settings</button>
       <button type="button" classList={{ on: inspector() }} aria-pressed={inspector()} title="panel settings for the selected panel" aria-label="toggle the inspector" onClick={() => setInspector(!inspector())}>inspector</button>
+      <button type="button" classList={{ on: anomaliesOpen() }} aria-pressed={anomaliesOpen()} title="loss / grad-norm spikes and NaN/inf in the selected runs, with jump-to-step" aria-label="toggle the anomaly list" onClick={() => setAnomaliesOpen(!anomaliesOpen())}>anomalies</button>
       <span class="msg">{board.panels.length} panel{board.panels.length === 1 ? '' : 's'}</span>
     </div>
   );
@@ -71,6 +73,7 @@ export default function BoardView() {
       <div class="bmain">
         <SharedBanner />
         <BoardToolbar />
+        <Anomalies />
         <div class="bcanvas" data-canvas="board" aria-label="board">
           <For each={board.panels}>{(p) => (
             <Show when={focusId() !== p.id} fallback={<div class="bnew">"{titleOf(p)}" is open in the focus view</div>}>

@@ -22,12 +22,12 @@ function Sel(props: { label: string; title: string; value: string; options: Opt[
 export default function Inspector() {
   const pv = () => { const id = selPanel(); return id ? board.panels.find((p) => p.id === id) : undefined; };
   const model = () => findPanel(selPanel());
-  const [qerr, setQerr] = createSignal<{ src: string; msg: string; a: number; b: number } | null>(null);
+  const [qerr, setQerr] = createSignal<{ src: string; msg: string; a: number; b: number; suggest: string[] } | null>(null);
   const stage = (k: string) => { const p = pv(); return p ? Bd.getStage(p.q, k) : null; };
   const runs = () => { runsVersion(); const p = model(); return p ? panelRuns(p) : []; };
   const set = (k: string, t: string | null) => { const p = model(); if (p) setStage(p, k, t); };
   let qi!: HTMLInputElement;
-  const applyQ = () => { const x = parseQ(qi.value); if (!x.ok) { setQerr({ src: qi.value, msg: x.error, a: x.start, b: x.end }); return; } setQerr(null); const p = model(); if (p) setQuery(p, x.canonical); };
+  const applyQ = () => { const x = parseQ(qi.value); if (!x.ok) { setQerr({ src: qi.value, msg: x.error, a: x.start, b: x.end, suggest: x.suggest }); return; } setQerr(null); const p = model(); if (p) setQuery(p, x.canonical); };
   return (
     <aside class="binsp" aria-label="panel inspector" data-board-scope>
       <div class="ihead">
@@ -47,7 +47,7 @@ export default function Inspector() {
                 <input ref={qi} class="q" value={p().q} spellcheck={false} aria-label="query" title="query text; Enter applies" onKeyDown={(e) => { if (e.key === 'Enter') applyQ(); }} />
                 <button type="button" title="apply the query" aria-label="apply the query" onClick={applyQ}>apply</button>
               </div>
-              <Show when={qerr()}>{(e) => <ErrLine src={e().src} msg={e().msg} a={e().a} b={e().b} />}</Show>
+              <Show when={qerr()}>{(e) => <ErrLine src={e().src} msg={e().msg} a={e().a} b={e().b} suggest={e().suggest} onFix={(t) => { qi.value = t; applyQ(); }} />}</Show>
               <div class="row">
                 <button type="button" classList={{ on: !!stage('log') }} aria-pressed={!!stage('log')} title="y scale: linear or log10" aria-label="y scale: linear or log10" onClick={() => set('log', stage('log') ? null : 'log')}>{stage('log') ? 'log y' : 'lin y'}</button>
                 <Sel label="x" title="step, time, tokens, or any metric joined on step" value={(stage('x') || 'x step').slice(2)}

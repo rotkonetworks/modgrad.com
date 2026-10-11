@@ -67,9 +67,21 @@ export function makeUndo(limit = 40): Undo {
 }
 
 // ------------------------------------------------------------ query text operations (via wasm)
+/** string index of UTF-8 byte offset `b` in `s` (the Rust parser reports byte offsets) */
+export function byteIdx(s: string, b: number): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    if (n >= b) return i;
+    const c = s.codePointAt(i)!;
+    n += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+    if (c >= 0x10000) i++;
+  }
+  return s.length;
+}
 export function parse(q: string): Parsed {
   const r = A.query_parse(q);
-  const out: Parsed = r.ok() ? { ok: true, canonical: r.canonical(), chips: JSON.parse(r.chips()) as Chip[] } : { ok: false, error: r.error(), start: r.err_start(), end: r.err_end() };
+  const out: Parsed = r.ok() ? { ok: true, canonical: r.canonical(), chips: JSON.parse(r.chips()) as Chip[] }
+    : { ok: false, error: r.error(), start: byteIdx(q, r.err_start()), end: byteIdx(q, r.err_end()), suggest: r.suggest().split('\n').filter(Boolean) };
   r.free();
   return out;
 }

@@ -9,7 +9,7 @@ import { fmt, fmtTick, fmtTime, fmtStep } from '@/lib/fmt';
 import { PALETTE, cssv, hexToRgb, mixRgb } from '@/lib/color';
 import * as Dt from '@/logic/data';
 import { fitInWorker } from '@/logic/forecasts';
-import type { FitForecast, Forecast, Panel, QueryResult, RunEvent, Trace } from '@/logic/types';
+import type { FitForecast, Forecast, Panel, QueryFix, QueryResult, RunEvent, Trace } from '@/logic/types';
 import { S } from '@/stores/runs';
 import {
   fcCache, fcHist, fresh, hiddenTrace, settings, commit, setStage, placeTarget, soloTrace, toggleY2, removeTrace, pauseFollow,
@@ -49,6 +49,22 @@ function redrawSoon(id: string, redraw: () => void) {
 }
 const niceRound = (v: number) => { const e = Math.pow(10, Math.floor(Math.log10(v)) - 1); return Math.round(v / e) * e; };
 
+/** "no metric 'losss': did you mean [loss]?" with each suggestion a button that rewrites the query */
+function fixLine(id: string, fixes: QueryFix[] | undefined, into: HTMLElement) {
+  if (!fixes || !fixes.length) return;
+  const byMsg = new Map<string, QueryFix[]>();
+  for (const f of fixes) byMsg.set(f.msg, [...(byMsg.get(f.msg) || []), f]);
+  for (const [msg, fs] of byMsg) {
+    const line = h('div', { class: 'berr', role: 'alert' }, into, `${msg}: did you mean `);
+    fs.forEach((f, i) => {
+      if (i) line.append(' or ');
+      const b = btn(line, f.label, `use ${f.label}: ${f.query}`, () => { const p = findPanel(id); if (p) commit(`fix query: ${f.label}`, () => { p.q = f.query; }); });
+      b.classList.add('mini', 'fix'); b.setAttribute('aria-label', `fix: use ${f.label}`);
+    });
+    line.append('?');
+  }
+}
+
 export function drawPanel(c: DrawCtx): DrawOut {
   const { panel: p, host, foot, res } = c;
   host.textContent = ''; foot.textContent = '';
@@ -60,6 +76,7 @@ export function drawPanel(c: DrawCtx): DrawOut {
     // with warnings the reason is known (e.g. no run logs the x-axis metric): say it in the panel, not under it
     if (!meta.warnings.length) { h('div', { class: 'bempty' }, host, 'nothing matches this query yet; it updates as runs arrive'); return out; }
     const box = h('div', { class: 'bempty' }, host, `nothing to draw: ${meta.warnings.join('; ')}`);
+    fixLine(p.id, meta.fixes, box);
     const xs = getStage(p.q, 'x');
     if (xs) { h('br', {}, box); btn(box, 'plot against step instead', `plot against step instead (removes "${xs}")`, () => setStage(findPanel(p.id)!, 'x', null, 'x axis: step')); }
     return out;
@@ -212,6 +229,7 @@ export function drawPanel(c: DrawCtx): DrawOut {
   } else if (meta.forecast && !isStep) h('div', { class: 'bnote' }, foot, 'forecasts are drawn on the step axis only');
   if (meta.downsampled) h('div', { class: 'bnote' }, foot, `long series block-averaged to ${MAX_POINTS} points (longest ${meta.downsampled}); legend statistics are over block means`);
   for (const w of meta.warnings) h('div', { class: 'bnote' }, foot, w);
+  fixLine(p.id, meta.fixes, foot);
   return out;
 }
 
@@ -252,6 +270,7 @@ function drawHeatmaps(c: DrawCtx, res: Extract<QueryResult, { ok: true }>): Draw
   if (rownorm) h('div', { class: 'bnote' }, foot, 'rownorm: each layer divided by its own median, so 1 is typical for that layer and a spike in one layer stands out');
   h('div', { class: 'bnote' }, foot, 'click a cell for that layer as a line; columns are the union of logged steps, block-reduced past 400');
   for (const w of res.meta.warnings) h('div', { class: 'bnote' }, foot, w);
+  fixLine(p.id, res.meta.fixes, foot);
   return { badge: null };
 }
 

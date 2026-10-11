@@ -34,7 +34,7 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
   const parsed = createMemo(() => parseQ(props.panel.q));
   const [badge, setBadge] = createSignal<DrawOut['badge']>(null);
   const [chipEdit, setChipEdit] = createSignal<number | null>(null);
-  const [qErr, setQErr] = createSignal<{ src: string | null; msg: string; a: number; b: number } | null>(null);
+  const [qErr, setQErr] = createSignal<{ src: string | null; msg: string; a: number; b: number; suggest?: string[] } | null>(null);
   const [pending, setPending] = createSignal(true);
   let host!: HTMLDivElement, foot!: HTMLDivElement, titleBtn!: HTMLButtonElement;
 
@@ -168,7 +168,7 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
   }
   function applyText(v: string): void {
     const r = parseQ(v);
-    if (!r.ok) { setQErr({ src: v, msg: r.error, a: r.start, b: r.end }); return; }
+    if (!r.ok) { setQErr({ src: v, msg: r.error, a: r.start, b: r.end, suggest: r.suggest }); return; }
     setQErr(null);
     const p = model(); if (p) setQuery(p, r.canonical);
   }
@@ -211,9 +211,9 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
         </Show>
       </div>
       <Show when={!parsed().ok}>
-        {(() => { const pq = parsed(); return pq.ok ? null : <ErrLine src={props.panel.q} msg={pq.error} a={pq.start} b={pq.end} />; })()}
+        {(() => { const pq = parsed(); return pq.ok ? null : <ErrLine src={props.panel.q} msg={pq.error} a={pq.start} b={pq.end} suggest={pq.suggest} onFix={applyText} />; })()}
       </Show>
-      <Show when={qErr()}>{(e) => <ErrLine src={e().src} msg={e().msg} a={e().a} b={e().b} />}</Show>
+      <Show when={qErr()}>{(e) => <ErrLine src={e().src} msg={e().msg} a={e().a} b={e().b} suggest={e().suggest} onFix={applyText} />}</Show>
       <Show when={editing().has(id)}>
         <QueryText q={props.panel.q} onApply={applyText} />
       </Show>

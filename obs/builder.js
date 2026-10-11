@@ -64,8 +64,8 @@ const CSS = `
 .bpanel.wide { grid-column: 1 / -1; max-width: none; }
 .bpanel.selp { border-color: var(--frame); }
 .bpanel .panel .ptitle { display: none; }
-.bpanel .bbar { display: flex; gap: 3px; align-items: center; font: 600 12px var(--mono); border-bottom: 1px solid var(--rule); padding: 1px 2px; }
-.bpanel .bbar .bt { flex: 1; text-align: center; overflow-wrap: anywhere; cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; border: 0; background: none; font: 600 12px var(--mono); padding: 1px 2px; }
+.bpanel .bbar { display: flex; flex-wrap: wrap; gap: 3px; align-items: center; font: 600 12px var(--mono); border-bottom: 1px solid var(--rule); padding: 1px 2px; }
+.bpanel .bbar .bt { flex: 1 1 140px; text-align: center; overflow-wrap: anywhere; cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; border: 0; background: none; font: 600 12px var(--mono); padding: 1px 2px; }
 .bpanel .bbar .bt input { font: 600 12px var(--mono); width: 100%; text-align: center; }
 .bpanel button.on, .binsp button.on, .bpop button.on { background: var(--hl); border-color: var(--frame); color: var(--ink); font-weight: 600; }
 .bchips { display: flex; flex-wrap: wrap; gap: 3px; padding: 3px 2px 1px; font: 10px var(--mono); align-items: center; }
@@ -130,6 +130,7 @@ body.bfocused { overflow: hidden; }
 @media (max-width: 860px) {
   #builder, .bfocus .fbody { flex-direction: column; }
   .bside { width: 100%; position: static; max-height: 46vh; }
+  .bmain { width: 100%; }
   .bfocus { overflow-y: auto; }
 }
 `;

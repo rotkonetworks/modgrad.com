@@ -38,6 +38,8 @@ export interface Chart2DOpts {
   ghostNotes?: [string | null, string][] | null; yrange?: [number, number] | null;
   decorateLegend?: (t: HTMLTableElement | null, series: Series[]) => void;
   onview?: (v: View | null) => void; overlay?: (api: OverlayApi) => void; onclick?: (ev: PointerEvent) => void;
+  /** drawing size in CSS px (default 540 x 210); pass the box's real width so text stays ~10 px on screen */
+  width?: number; height?: number;
 }
 export interface Chart2D {
   panel: HTMLDivElement;
@@ -91,7 +93,7 @@ let activeDrags = 0;
 export const chartBusy = (): boolean => activeDrags > 0;
 export function chart2d(parent: Element, o: Chart2DOpts): HTMLDivElement & { chart?: Chart2D } {
   const hasY2 = o.series.some((s) => s.y2) && o.series.some((s) => !s.y2);
-  const W = 540, H = 210, L = 58, R = hasY2 ? 52 : 14, T = 10, B = 28;
+  const W = Math.max(280, Math.round(o.width || 540)), H = Math.round(o.height || Math.max(170, (W * 210) / 540)), L = 58, R = hasY2 ? 52 : 14, T = 10, B = 28;
   const pw = W - L - R, ph = H - T - B;
   const panel = h('div', { class: 'panel' }, parent) as HTMLDivElement & { chart?: Chart2D };
   h('div', { class: 'ptitle' }, panel, o.title);

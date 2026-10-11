@@ -20,6 +20,10 @@ import { getStage, quote } from '@/logic/board';
 import { addToNew } from '@/stores/board';
 
 export const MAX_POINTS = 1500;
+/** chart width for a box: its CSS width rounded down to 60 px, so the SVG scales by at most ~1.2
+ *  (text stays 10-12 px from a 400 px phone to a full-screen focus view) and a resize redraws
+ *  only when the step changes */
+export const chartWidth = (px: number): number => (px > 0 ? Math.max(300, Math.floor(px / 60) * 60) : 540);
 export interface DrawOut { badge: { text: string; skill: boolean; title: string } | null }
 export interface DrawCtx { panel: Panel; host: HTMLElement; foot: HTMLElement; res: QueryResult; events: Map<string, RunEvent[]>; inFocus: boolean; focusOpen: boolean; dataKey: string; title: string; redraw?: () => void }
 
@@ -152,8 +156,11 @@ export function drawPanel(c: DrawCtx): DrawOut {
       };
     });
     if (!series.length) continue;
+    const W = chartWidth(cbox.clientWidth);
+    // the focus view fills the window's height (one chart); the board keeps the 540:210 shape
+    const H = c.inFocus && !split ? Math.max(210, Math.min(Math.round(W * 0.6), innerHeight - 300)) : undefined;
     chart2d(cbox, {
-      title: c.title + (cell ? ' / ' + cell : ''), series, ylog: meta.ylog, yrange: lockY ? yrange : null,
+      title: c.title + (cell ? ' / ' + cell : ''), series, ylog: meta.ylog, yrange: lockY ? yrange : null, width: W, height: H,
       xlabel: meta.x_label, xfmt: meta.x_label === 'time' ? fmtTime : fmtTick, group,
       legendHead: series.length > 6 ? `${series.length} series` : '',
       decorateLegend: (tbl, ss) => decorateLegend(p.id, tbl, ss, cbox),

@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from 'solid-js';
+import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from 'solid-js';
 import type { Chip, Panel as PanelT, QueryResult, RunEvent } from '@/logic/types';
 import * as Bd from '@/logic/board';
 import { evalQuery, planOf, varyingFields, SAMPLES_METRIC } from '@/logic/data';
@@ -12,7 +12,7 @@ import {
   panelRuns, setInspector, focusId, board,
 } from '@/stores/board';
 import { openMenu, openPopover } from '@/stores/ui';
-import { drawPanel, MAX_POINTS, type DrawOut } from '@/board/drawPanel';
+import { drawPanel, chartWidth, MAX_POINTS, type DrawOut } from '@/board/drawPanel';
 import { chartBusy } from '@/charts/chart2d';
 import { draggable } from '@/board/dnd';
 import { loader } from '@/board/loader';
@@ -90,12 +90,19 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
     const cur = model(); if (!cur) return;
     // keep keyboard/wheel focus on the same chart across a redraw (click-then-wheel zoom)
     const fi = [...host.querySelectorAll('svg')].indexOf(document.activeElement as SVGSVGElement);
+    drawnW = chartWidth(host.clientWidth);
     const out = drawPanel({ panel: cur, host, foot, res, events, inFocus: !!props.inFocus, focusOpen: !!focusId(), dataKey: dataKey(), title: title(), redraw: () => { if (t === tok) draw(); } });
     if (fi >= 0) host.querySelectorAll('svg')[fi]?.focus({ preventScroll: true });
     setBadge(out.badge);
     setPending(false);
   }
   createEffect(on(sig, () => { draw(); }));
+  // charts are drawn at the box's width (rounded to 60 px): redraw when that step changes
+  let drawnW = -1;
+  onMount(() => {
+    const ro = new ResizeObserver(() => { const w = chartWidth(host.clientWidth); if (drawnW >= 0 && w !== drawnW && !pending()) draw(); });
+    ro.observe(host); onCleanup(() => ro.disconnect());
+  });
   createEffect(on(() => props.panel.view.follow, (f) => { if (f) draw(); }, { defer: true }));
   onCleanup(() => { tok++; });
 

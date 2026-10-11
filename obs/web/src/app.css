@@ -228,7 +228,8 @@ details.run .dh { font-weight: 600; margin-top: 6px; }
 .bfocus .fbody .binsp { position: static; max-height: 100%; width: 300px; flex: none; }
 .bfocus .fmain { flex: 1; min-width: 0; overflow-y: auto; border: 1px dashed transparent; }
 .bfocus .bpanel { max-width: none; }
-.bfocus .bpanel .panel { max-width: min(100%, calc((100vh - 230px) * 540 / 210)); margin: 0 auto; }
+.bfocus .bpanel .panel { max-width: none; margin: 0 auto; } /* drawn at the focus view's size (drawPanel), not scaled up */
+.bfocus .bpanel table.legend td.name, .bfocus .bpanel table.legend td.name button { max-width: min(60vw, 720px); }
 .bfocus .bpanel .bcells .panel { max-width: none; }
 body.bfocused { overflow: hidden; }
 

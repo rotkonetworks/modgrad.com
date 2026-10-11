@@ -1,7 +1,7 @@
 import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from 'solid-js';
 import type { Chip, Panel as PanelT, QueryResult, RunEvent } from '@/logic/types';
 import * as Bd from '@/logic/board';
-import { evalQuery, planOf, varyingFields, SAMPLES_METRIC } from '@/logic/data';
+import { evalQuery, planOf, varyingFields, fieldsOf, hasReplicates, layerFamilies, SAMPLES_METRIC } from '@/logic/data';
 import SamplesPanel from '@/components/SamplesPanel';
 import { A } from '@/lib/wasm';
 import { themeVersion } from '@/lib/theme';
@@ -144,24 +144,35 @@ export default function Panel(props: { panel: PanelT; inFocus?: boolean }) {
     const vf = varyingFields(runs);
     const lets = Bd.letters(p.q);
     const st = (kind: string, text: string) => () => setStage(p, kind, text);
+    // only stages that apply to what this panel reads
+    const streams = planOf(p.q, catalog());
+    const metrics = [...new Set(streams.map(([, m]) => m))];
+    const nRuns = new Set(streams.map(([r]) => r)).size;
+    const runMetrics = new Set(runs.flatMap((r) => Object.keys(r.metrics || {})));
+    const tokens = [...runMetrics].some((m) => m.includes('tokens')); // x tokens takes the first metric containing it
+    const layered = layerFamilies(metrics, 2).length > 0;
+    const numeric = fieldsOf(runs).filter((k) => runs.some((r) => typeof (r.config || {})[k] === 'number'));
+    const when = <T,>(c: boolean, items: T[]): T[] => (c ? items : []);
     openMenu(anchor, [
       { label: 'ema .9 (smoothing)', run: st('ema', 'ema .9') },
-      { label: 'mean±sd over seed', run: st('agg', 'mean±sd over seed') },
+      ...when(vf.includes('seed') || hasReplicates(runs), [{ label: 'mean±sd over seed', run: st('agg', 'mean±sd over seed') }]),
       ...vf.slice(0, 6).map((f) => ({ label: `colour by ${f}`, run: st('by', `by ${f}`) })),
-      { label: 'split by metric', run: st('split', 'split metric') },
-      { label: 'split by run', run: st('split', 'split run') },
+      ...when(metrics.length > 1, [{ label: 'split by metric', run: st('split', 'split metric') }]),
+      ...when(nRuns > 1, [{ label: 'split by run', run: st('split', 'split run') }]),
       ...vf.slice(0, 4).map((f) => ({ label: `split by ${f}`, run: st('split', `split ${f}`) })),
-      { label: 'x axis: time', run: st('x', 'x time') },
-      { label: 'x axis: tokens', run: st('x', 'x tokens') },
+      ...when(runMetrics.has('elapsed_min'), [{ label: 'x axis: time', run: st('x', 'x time') }]),
+      ...when(tokens, [{ label: 'x axis: tokens', run: st('x', 'x tokens') }]),
       { label: 'forecast', run: st('forecast', 'forecast') },
       { label: 'log y', run: st('log', 'log') },
-      { label: 'layer x step heatmap (layers/<i>/<stat>)', run: st('heatmap', 'heatmap over layer') },
-      { label: 'layer heatmap, each layer / its median', run: st('heatmap', 'heatmap over layer rownorm') },
+      ...when(layered, [
+        { label: 'layer x step heatmap (layers/<i>/<stat>)', run: st('heatmap', 'heatmap over layer') },
+        { label: 'layer heatmap, each layer / its median', run: st('heatmap', 'heatmap over layer rownorm') },
+      ]),
       { label: 'normalise: z-score', run: st('norm', 'norm z') },
-      ...runs.slice(0, 8).map((r) => ({ label: `baseline ${r.id} (difference)`, run: st('baseline', `baseline ${Bd.quote(r.id)}`) })),
+      ...when(nRuns > 1, runs.slice(0, 8).map((r) => ({ label: `baseline ${r.id} (difference)`, run: st('baseline', `baseline ${Bd.quote(r.id)}`) }))),
       ...(lets.length >= 2 ? [{ label: `formula: ${lets[0]} - ${lets[1]}`, run: () => commit('add formula', () => { p.q = Bd.addEntries(p.q, `${Bd.nextLetter(lets)} = ${lets[0]} - ${lets[1]}`); }) }] : []),
       { label: 'formula (type it)...', run: () => toggleEditing(id, true) },
-      { label: 'filter: lr > ...', run: () => toggleEditing(id, true) },
+      ...when(numeric.length > 0, [{ label: `filter: ${numeric.includes('lr') ? 'lr' : numeric[0]} > ... (type it)`, run: () => toggleEditing(id, true) }]),
     ], 'add a stage');
   }
   function applyChip(i: number, c: Chip, text: string): void {

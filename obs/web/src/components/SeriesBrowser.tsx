@@ -72,6 +72,15 @@ export default function SeriesBrowser() {
           </select></label>
           <label title="only list runs selected in the Runs list"><input type="checkbox" checked={st.onlySel} onChange={(e) => setSt('onlySel', e.currentTarget.checked)} /> selected runs</label>
         </div>
+        {/* next to the list, not in the footer: the footer of a tall rail starts below the fold */}
+        <Show when={picks().size}>
+          <div class="brow picked" role="group" aria-label="picked series">
+            <span>{picks().size} picked:</span>
+            <button type="button" title="new panel from the picked series" aria-label="new panel from the picked series" onClick={() => { if (picks().size) addToNew(pickedEntries(), `${picks().size} series`); }}>new panel</button>
+            <button type="button" title="add the picked series to a panel" aria-label="add the picked series to a panel" onClick={(e) => { if (picks().size) addMenu(e.currentTarget, pickedEntries(), `${picks().size} series`); }}>add to...</button>
+            <button type="button" title="clear the picks" aria-label="clear the picked series" onClick={() => setPicks(new Set<string>())}>clear</button>
+          </div>
+        </Show>
       </div>
       <div class="blist">
         <For each={groups()}>{(g) => {
@@ -115,10 +124,7 @@ export default function SeriesBrowser() {
         <Show when={!items().length}><div class="bnote" style={{ padding: '6px' }}>No series match.</div></Show>
       </div>
       <div class="bfoot">
-        <span>{items().length} shown, {picks().size} selected</span>
-        <button type="button" disabled={!picks().size} title="new panel from the selected series" aria-label="new panel from the selected series" onClick={() => { if (picks().size) addToNew(pickedEntries(), `${picks().size} series`); }}>new panel</button>
-        <button type="button" disabled={!picks().size} title="add the selected series to a panel" aria-label="add the selected series to a panel" onClick={(e) => { if (picks().size) addMenu(e.currentTarget, pickedEntries(), `${picks().size} series`); }}>add to...</button>
-        <button type="button" disabled={!picks().size} title="clear the selection" aria-label="clear the series selection" onClick={() => setPicks(new Set<string>())}>clear</button>
+        <span>{items().length} shown{picks().size ? '' : '; click series to pick several for one panel'}</span>
       </div>
     </div>
   );

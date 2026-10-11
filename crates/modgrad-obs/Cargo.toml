@@ -25,3 +25,8 @@ tokio = { version = "1", optional = true, features = ["rt-multi-thread", "time",
 bytes = { version = "1.11", optional = true }
 http = { version = "1", optional = true }
 
+[dev-dependencies]
+# a real server (TCP + HTTP/3) in-process for the CLI's transport tests
+modgrad-obs-server = { path = "../modgrad-obs-server" }
+tokio = { version = "1", features = ["rt-multi-thread", "net"] }
+axum = { version = "0.7", default-features = false, features = ["http1", "tokio"] }

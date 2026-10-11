@@ -32,20 +32,31 @@ It ends by printing the next steps:
     modgrad tail exp1                                # latest values and sparklines
     modgrad-server --root obs                        # local mode: then open http://127.0.0.1:8790/
 
-With a server, Python logs to the same project with no further setup:
+Python logs with no further setup (`pip install ./clients/python`):
 
     import modgrad as wandb
     wandb.init(name="exp1", config={"lr": 3e-4})
     wandb.log({"loss": 0.52})
 
+In local mode this writes `obs/runs/exp1/` directly, in the same format as
+`modgrad run --offline`, and prints
+`modgrad: run exp1 -> obs/runs/exp1 (view: modgrad-server --root obs)`.
+With a server it logs to the file's project. `init(project="sweep")` puts the
+run in `obs/runs/sweep/exp1`; a name that is already taken gets a `-<4 hex>`
+suffix, and `init(id="exp1", resume=True)` continues a run after its last
+step. Each `log` call is appended to disk at once, so a killed script still
+leaves a readable run. `mode="offline"` (or `WANDB_MODE=offline`) writes
+locally whatever the project file says.
+
 `modgrad run`, `tail`, `mcp` and the Python client find `.modgrad.json` in
 the current directory or a parent. Precedence: flag > environment variable >
 `.modgrad.json` > default. The token in it is only sent to the server it
-names. In local mode the Python client has no local writer; print metric
-lines and wrap the script with `modgrad run` instead.
+names. `MODGRAD_URL` picks a server and `MODGRAD_DATA` a local obs
+directory, whatever the file says.
 
 Data lives in an obs directory (default `./obs`): `obs/runs/<run>/` holds
-`config.json`, `metrics.jsonl`, `events.jsonl`, `summary.json`. Run names are
+`config.json`, `metrics.jsonl`, `arrays.jsonl` (histograms, tensors),
+`events.jsonl`, `summary.json`. Run names are
 1 to 3 `/`-separated parts of `[A-Za-z0-9_.-]`, e.g. `sweep/lr3e-4_s1`.
 Name seeds `<config>_s1`, `<config>_s2`, ...: the tools group them and test
 differences against seed noise.
@@ -186,8 +197,14 @@ project token, a run id without `/` lands in the token's project.
 
 ## Framework snippets
 
-All of these post to the HTTP API with `requests`; each logging call is one
-small POST. Set `MODGRAD_URL` (and `MODGRAD_TOKEN` unless the server runs `--dev`).
+With the Python client installed, use its integrations; they write local
+runs in local mode and post to the server otherwise:
+
+    from modgrad.integrations.huggingface import ModgradCallback   # Trainer(..., report_to="none", callbacks=[ModgradCallback(project="sft")])
+    from modgrad.integrations.lightning import ModgradLogger       # L.Trainer(logger=ModgradLogger(project="pretrain"))
+
+Without the client, the snippets below post to the HTTP API with
+`requests`; each logging call is one small POST. Set `MODGRAD_URL` (and `MODGRAD_TOKEN` unless the server runs `--dev`).
 Never let logging crash training: catch and drop errors.
 
     import os, requests

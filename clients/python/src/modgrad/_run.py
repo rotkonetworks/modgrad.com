@@ -582,10 +582,8 @@ class Run:
             return
         self._spool.meta["finish"] = fin
         self._spool.save_meta()
-        if self._sender is None:  # offline
+        if self._sender is None:  # not reached: a spool is online-only (offline runs are local)
             self._spool.close()
-            if not quiet:
-                say(f"offline run saved to {self._spool.dir}; send it with `python -m modgrad sync {self._spool.dir}`")
             return
         pending = self._spool.pending()
         ok = self._sender.close(fin, self._finish_timeout)

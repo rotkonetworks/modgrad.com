@@ -1,4 +1,4 @@
-"""`python -m modgrad sync [DIR ...]`: send spooled or offline runs.
+"""`python -m modgrad sync [DIR ...]`: send spooled runs.
 
 Without DIR, every run under the spool root is sent. Rows, events, config
 and summary go to the server named in each run's meta.json (override with
@@ -48,7 +48,7 @@ def sync_dir(d: Path, url: str = None, timeout: float = 60.0) -> bool:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="python -m modgrad", description="modgrad client tools")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    s = sub.add_parser("sync", help="send offline / spooled runs to the server")
+    s = sub.add_parser("sync", help="send spooled runs to the server")
     s.add_argument("dirs", nargs="*", help="spool directories (default: all under the spool root)")
     s.add_argument("--url", default=os.environ.get("MODGRAD_URL") or os.environ.get("OBS_URL"), help="server URL override")
     s.add_argument("--timeout", type=float, default=60.0)

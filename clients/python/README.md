@@ -292,6 +292,8 @@ cd clients/python && python -m venv .venv && .venv/bin/pip install -e '.[test]'
 .venv/bin/python -m pytest -q
 ```
 
-The fixture starts the built `modgrad-server --dev` on a free port. Tests that need `torch`,
+The fixture starts the built `modgrad-server --dev` on a free port (a debug build is enough;
+release is preferred when both exist). Set `PYTEST_OBS_PORTS=18940-18949` to keep test servers
+inside a port range. The local-mode tests read their runs back with the built `modgrad`. Tests that need `torch`,
 `transformers` or `lightning` are skipped when those packages are missing. You can point
 the tests at other binaries with `OBS_SERVER_BIN` and `OBS_BIN`.

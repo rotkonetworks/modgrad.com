@@ -20,7 +20,15 @@ function getWorker(): Worker | null {
       const m = e.data, j = pending.get(m.id);
       if (!j) return;
       pending.delete(m.id);
-      j.done(m.f || { none: 'forecast failed: ' + (m.error || 'unknown error') });
+      if (m.error) {
+        // a wasm trap poisons the instance: start a fresh worker for the next fits, refit this
+        // one and anything queued behind it on the main thread
+        w.terminate(); worker = null;
+        const rest = [...pending.values()]; pending.clear();
+        for (const r of [j, ...rest]) r.done(r.sync());
+        return;
+      }
+      j.done(m.f!);
     };
     w.onerror = () => {
       // the worker died (or never started): finish what was queued here, and stay on the main thread

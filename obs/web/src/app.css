@@ -282,7 +282,7 @@ body.bdragging, body.bdragging * { cursor: grabbing !important; }
   /* secondary actions live in the header's "more" menu; tabs stay one (scrollable) row */
   .wideonly { display: none !important; }
   header.top { gap: 4px 8px; margin-bottom: 6px; }
-  nav.tabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  nav.tabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: thin; }
   nav.tabs a { padding: 4px 7px 3px; white-space: nowrap; flex: none; }
   .btool { margin-bottom: 4px; gap: 6px; }
   .btool select { width: 8.5em; }

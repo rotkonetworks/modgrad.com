@@ -44,3 +44,30 @@ node contact.mjs
 Built and run by `.github/workflows/deploy.yaml` as the `modgrad-api` container on
 the `modgrad-net` podman network, alongside the nginx static server which proxies
 `/api/` to it.
+
+# LLM proxy (`proxy.mjs`, not deployed yet)
+
+An OpenAI-compatible gateway (`POST /v1/chat/completions`, `GET /v1/balance`)
+that meters every request through the ledger (`ledger.mjs`: `balance`,
+`credit`, `debit`, `history`, integer µUSD).
+
+Callers are **modgrad accounts**. A request carries
+`Authorization: Bearer <modgrad project token>` (`obsp_…`, minted on the
+account page at `/app/account`); the proxy asks modgrad-server
+`GET /api/v1/auth/whoami` over the internal podman network, and the answer's
+`account` (`acct_…`) keys the ledger. A project token stands for its project's
+owner; run tokens and anonymous (unclaimed) projects are refused. Cookies are
+never forwarded, so a cross-site page cannot spend a signed-in user's balance.
+whoami unreachable → 503.
+
+| var | default | notes |
+|-----|---------|-------|
+| `MODGRAD_INTERNAL_URL` | `http://modgrad-app:8790` | modgrad-server, no `/app` prefix (internal network) |
+| `SETTINGS_PATH` | `./data/settings.json` | per-account billing: `{ "acct_…": { "tier": "byo", "byoKey": "sk-…" } }`; no entry = hosted |
+| `LEDGER_PATH` | `./data/ledger.json` | the FileLedger journal |
+| `MARGIN` | `0.2` | hosted price = provider cost × (1 + MARGIN) |
+| `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` | — | hosted upstream keys (secrets) |
+| `PORT` | `3002` | |
+
+`npm test` runs the ledger test and `test-proxy.mjs` (a stub whoami and a stub
+upstream; no network).

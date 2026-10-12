@@ -2,33 +2,54 @@
 // through the Ledger. Thin HTTP shell; all money logic lives in ledger.mjs.
 //
 // Flow (mirrors the OpenCode "Zen" lifecycle, minus the ceremony):
-//   auth (key → account) → balance precheck → forward to upstream (BYO or
-//   hosted key) → stream response back while capturing usage → settle → debit.
+//   auth (modgrad token → account, via modgrad-server) → balance precheck →
+//   forward to upstream (BYO or hosted key) → stream response back while
+//   capturing usage → settle → debit.
 //
 // Hybrid tiers: an account with its own `byoKey` pays 0 (we just proxy); a
 // hosted account is charged provider-cost × (1 + MARGIN). See settle().
 import { createServer } from "node:http";
 import { readFileSync, existsSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { FileLedger, settle, fmtUSD } from "./ledger.mjs";
 
 const PORT = Number(process.env.PORT || 3002);
 const MARGIN = Number(process.env.MARGIN || 0.2);
 const MIN_BALANCE = Number(process.env.MIN_BALANCE_UUSD || 1); // hosted needs >0
 
-const ledger = new FileLedger();
+// ── Identity: modgrad accounts. The caller's `Authorization: Bearer <token>`
+// (a modgrad project token, obsp_…, minted on the account page) goes to
+// modgrad-server's GET /api/v1/auth/whoami over the internal podman network;
+// the answer's `account` (acct_…) keys the ledger. Bearer only: no cookies,
+// so a cross-site page cannot spend a signed-in user's balance.
+const MODGRAD_INTERNAL_URL = (process.env.MODGRAD_INTERNAL_URL || "http://modgrad-app:8790").replace(/\/$/, "");
 
-// ── Accounts: apiKey → { userId, tier, byoKey? }. File-backed, swappable. ──
-// Identity, not money — deliberately separate from the Ledger. Format:
-//   { "mg-lIVE-abc": { "userId": "u1", "tier": "hosted" },
-//     "mg-byok-xyz": { "userId": "u2", "tier": "byo", "byoKey": "sk-..." } }
-const ACCOUNTS_PATH = process.env.ACCOUNTS_PATH || "./data/accounts.json";
-function resolveAccount(apiKey) {
-  if (!apiKey || !existsSync(ACCOUNTS_PATH)) return null;
+// → { account, via, project? } | { status: 401 | 503, message }
+export async function whoami(authorization, base = MODGRAD_INTERNAL_URL) {
+  if (!/^Bearer\s+\S+/i.test(authorization || "")) return { status: 401, message: "missing API key (Authorization: Bearer <modgrad project token>)" };
+  let r;
   try {
-    const table = JSON.parse(readFileSync(ACCOUNTS_PATH, "utf8"));
-    return table[apiKey] || null;
+    r = await fetch(`${base}/api/v1/auth/whoami`, { headers: { authorization }, signal: AbortSignal.timeout(5000) });
+  } catch (e) {
+    return { status: 503, message: `account service unreachable: ${e.message}` };
+  }
+  const body = await r.json().catch(() => ({}));
+  if (r.status === 401) return { status: 401, message: body.error || "invalid or expired API key", code: body.code };
+  if (!r.ok || typeof body.account !== "string") return { status: 503, message: `account service answered ${r.status}` };
+  return { account: body.account, via: body.via, project: body.project };
+}
+
+// ── Per-account settings: account id → { tier, byoKey? }. Billing, not
+// identity; an account without an entry is hosted. Format:
+//   { "acct_abc": { "tier": "hosted" },
+//     "acct_xyz": { "tier": "byo", "byoKey": "sk-..." } }
+const SETTINGS_PATH = process.env.SETTINGS_PATH || "./data/settings.json";
+function settingsFor(account, path = SETTINGS_PATH) {
+  if (!existsSync(path)) return {};
+  try {
+    return JSON.parse(readFileSync(path, "utf8"))[account] || {};
   } catch {
-    return null;
+    return {};
   }
 }
 
@@ -69,7 +90,7 @@ function extractUsage(text, isStream) {
   return usage;
 }
 
-async function handleChat(req, res, account, reqBody) {
+async function handleChat(req, res, account, reqBody, ledger) {
   const isStream = !!reqBody.stream;
   const model = reqBody.model;
   const byoKey = account.byoKey || null;
@@ -136,43 +157,50 @@ async function handleChat(req, res, account, reqBody) {
   }
 }
 
-const server = createServer((req, res) => {
-  const url = (req.url || "").split("?")[0];
+// The proxy as a request handler; `opts` replaces the defaults (tests).
+export function createProxy({ ledger = new FileLedger(), whoamiURL = MODGRAD_INTERNAL_URL, settingsPath = SETTINGS_PATH } = {}) {
+  return createServer(async (req, res) => {
+    const url = (req.url || "").split("?")[0];
 
-  if (req.method === "GET" && url === "/api/health") return json(res, 200, { ok: true });
+    if (req.method === "GET" && url === "/api/health") return json(res, 200, { ok: true });
 
-  // Auth: `Authorization: Bearer <modgrad key>` → account.
-  const bearer = (req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
-  const account = resolveAccount(bearer);
-  if (!account) return json(res, 401, { error: { message: "invalid or missing API key" } });
+    // Auth: `Authorization: Bearer <modgrad token>` → modgrad account.
+    const who = await whoami(req.headers.authorization, whoamiURL);
+    if (!who.account) {
+      return json(res, who.status, { error: { message: who.message, type: who.status === 401 ? "unauthorized" : "unavailable", ...(who.code ? { code: who.code } : {}) } });
+    }
+    const settings = settingsFor(who.account, settingsPath);
+    const account = { userId: who.account, tier: settings.tier || (settings.byoKey ? "byo" : "hosted"), byoKey: settings.byoKey || null };
 
-  if (req.method === "GET" && url === "/v1/balance") {
-    return ledger.balance(account.userId).then((bal) =>
-      json(res, 200, { userId: account.userId, tier: account.tier, balance_uusd: bal, balance: fmtUSD(bal) })
-    );
-  }
+    if (req.method === "GET" && url === "/v1/balance") {
+      const bal = await ledger.balance(account.userId);
+      return json(res, 200, { account: account.userId, tier: account.tier, balance_uusd: bal, balance: fmtUSD(bal) });
+    }
 
-  if (req.method === "POST" && url === "/v1/chat/completions") {
-    let body = "";
-    let tooBig = false;
-    req.on("data", (c) => { body += c; if (body.length > 2_000_000) { tooBig = true; req.destroy(); } });
-    req.on("end", async () => {
-      if (tooBig) return;
-      let data;
-      try { data = JSON.parse(body); } catch { return json(res, 400, { error: { message: "invalid JSON body" } }); }
-      if (!data.model) return json(res, 400, { error: { message: "`model` is required" } });
-      try {
-        await handleChat(req, res, account, data);
-      } catch (e) {
-        console.error("chat handler error:", e);
-        if (!res.headersSent) json(res, 500, { error: { message: "internal error" } });
-        else res.end();
-      }
-    });
-    return;
-  }
+    if (req.method === "POST" && url === "/v1/chat/completions") {
+      let body = "";
+      let tooBig = false;
+      req.on("data", (c) => { body += c; if (body.length > 2_000_000) { tooBig = true; req.destroy(); } });
+      req.on("end", async () => {
+        if (tooBig) return;
+        let data;
+        try { data = JSON.parse(body); } catch { return json(res, 400, { error: { message: "invalid JSON body" } }); }
+        if (!data.model) return json(res, 400, { error: { message: "`model` is required" } });
+        try {
+          await handleChat(req, res, account, data, ledger);
+        } catch (e) {
+          console.error("chat handler error:", e);
+          if (!res.headersSent) json(res, 500, { error: { message: "internal error" } });
+          else res.end();
+        }
+      });
+      return;
+    }
 
-  return json(res, 404, { error: { message: "not found" } });
-});
+    return json(res, 404, { error: { message: "not found" } });
+  });
+}
 
-server.listen(PORT, () => console.log(`modgrad LLM proxy on :${PORT} (margin ${MARGIN}, ledger metering on)`));
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  createProxy().listen(PORT, () => console.log(`modgrad LLM proxy on :${PORT} (margin ${MARGIN}, ledger metering on, accounts via ${MODGRAD_INTERNAL_URL})`));
+}

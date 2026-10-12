@@ -7,6 +7,6 @@
   "scripts": {
     "start": "node contact.mjs",
     "proxy": "node proxy.mjs",
-    "test": "node test-ledger.mjs"
+    "test": "node test-ledger.mjs && node test-proxy.mjs"
   }
 }

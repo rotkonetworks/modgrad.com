@@ -37,6 +37,11 @@ export default function Header() {
                 >
                   {item.label} ↗
                 </a>
+              ) : item.app ? (
+                // a full page load: /app/ is modgrad-server, not a route of this app
+                <a href={item.href} rel="external" class="px-3 py-1.5 text-[.92rem] text-dim hover:text-base transition-colors">
+                  {item.label}
+                </a>
               ) : (
                 <A
                   href={item.href}
@@ -78,6 +83,10 @@ export default function Header() {
                 item.ext ? (
                   <a href={item.href} target="_blank" rel="noopener" class="py-2 text-dim">
                     {item.label} ↗
+                  </a>
+                ) : item.app ? (
+                  <a href={item.href} rel="external" class="py-2 text-dim">
+                    {item.label}
                   </a>
                 ) : (
                   <A href={item.href} class="py-2 text-dim" onClick={() => setOpen(false)}>

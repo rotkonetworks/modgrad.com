@@ -10,12 +10,16 @@ export const site = {
   org: "Rotko Networks",
 } as const;
 
-/** Primary header navigation. External links carry `ext: true`. */
-export const nav = [
+/** Primary header navigation. External links carry `ext: true`; `app: true`
+ *  links go to modgrad-server under /app (a full page load, not a route here). */
+export const nav: readonly { label: string; href: string; ext?: boolean; app?: boolean }[] = [
   { label: "architecture", href: "/docs/continuous-thought-machine" },
   { label: "sdk", href: "/docs/crates" },
   { label: "docs", href: "/docs" },
   { label: "play", href: "/play" },
   { label: "community", href: "/contact" },
+  // the observability app, served by modgrad-server under /app (not part of this SPA)
+  { label: "app", href: "/app/", app: true },
+  { label: "sign in", href: "/app/login", app: true },
   { label: "github", href: site.repo, ext: true },
-] as const;
+];

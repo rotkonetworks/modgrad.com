@@ -8,6 +8,14 @@ on:
 env:
   CONTAINER_NAME: modgrad-com
   API_CONTAINER: modgrad-api
+  # modgrad-server (deploy/obs/Containerfile): the dashboard, sign-in and API under /app
+  APP_CONTAINER: modgrad-app
+  APP_VOLUME: modgrad-app-data
+  APP_PUBLIC_URL: https://modgrad.com/app
+  # the SSH door (python train.py | ssh -p 2222 modgrad.com); see the run step
+  APP_SSH_PORT: 2222
+  # cargo parallelism for the image build on the host (keep modest)
+  APP_JOBS: 3
   NETWORK: modgrad-net
   CONTAINER_PORT: 55560
   API_PORT: 3001
@@ -35,8 +43,13 @@ jobs:
             exit 1
           fi
 
-          # ship the static site and the contact-form service
-          tar czf site.tar.gz dist/ server/
+          # The app image is rebuilt only when its sources change: tag it with
+          # a hash of the trees that go into it.
+          echo "APP_SRC=$(git ls-tree -r HEAD -- Cargo.toml Cargo.lock .containerignore crates obs/web deploy/obs | sha256sum | cut -c1-16)" >> "$GITHUB_ENV"
+
+          # ship the static site, the node services, the nginx config, and the
+          # app's sources (the host builds the image)
+          tar czf site.tar.gz dist/ server/ deploy/ Cargo.toml Cargo.lock .containerignore crates/ obs/web/
 
       - name: Upload site
         uses: appleboy/scp-action@v0.1.5
@@ -53,112 +66,90 @@ jobs:
           JMAP_URL: ${{ secrets.JMAP_URL }}
           JMAP_USER: ${{ secrets.JMAP_USER }}
           JMAP_PASS: ${{ secrets.JMAP_PASS }}
+          APP_SRC: ${{ env.APP_SRC }}
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_KEY }}
-          envs: JMAP_URL,JMAP_USER,JMAP_PASS
+          envs: JMAP_URL,JMAP_USER,JMAP_PASS,APP_SRC
+          # a first (uncached) Rust image build takes a while on the host
+          command_timeout: 60m
           script: |
             set -e
             cd /home/${{ secrets.DEPLOY_USER }}
 
-            cat > nginx-modgrad.conf << 'NGINX_EOF'
-            server {
-                listen 80;
-                server_name localhost;
-                root /usr/share/nginx/html;
-                index index.html;
-
-                # Behind the TLS-terminating haproxy: emit RELATIVE redirects so a
-                # trailing-slash redirect (e.g. /play → /play/) keeps the https
-                # scheme instead of downgrading to http:// (mixed-content abort).
-                absolute_redirect off;
-                port_in_redirect off;
-
-                gzip on;
-                gzip_vary on;
-                gzip_min_length 1024;
-                gzip_types text/plain text/css text/xml text/javascript application/javascript application/xml+rss application/json image/svg+xml;
-
-                # contact form → JMAP service on the shared network
-                location /api/ {
-                    proxy_pass http://modgrad-api:3001;
-                    proxy_set_header Host $host;
-                    proxy_set_header X-Real-IP $remote_addr;
-                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                    proxy_read_timeout 30s;
-                }
-
-                # /play runs the modgrad wasm engine across browser cores (rayon +
-                # SharedArrayBuffer). That needs a cross-origin-isolated document, which
-                # requires COOP+COEP on the /play HTML response. Scope it to this route
-                # ONLY so the rest of the site (and the contact form under /api/) keeps
-                # its normal, non-isolated context. SPA route → served as index.html.
-                location /play {
-                    add_header Cross-Origin-Opener-Policy "same-origin" always;
-                    add_header Cross-Origin-Embedder-Policy "require-corp" always;
-                    add_header X-Frame-Options "SAMEORIGIN" always;
-                    add_header X-Content-Type-Options "nosniff" always;
-                    add_header X-XSS-Protection "1; mode=block" always;
-                    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-                    try_files $uri $uri/ /index.html;
-                }
-
-                # engine assets (wasm, glue js, rayon worker) load as subresources of the
-                # isolated /play document. ^~ stops the regex asset block below from
-                # winning for /engine/*.js, so CORP is applied. All same-origin already,
-                # but CORP makes the isolation explicit and future-proofs a CDN move.
-                location ^~ /engine/ {
-                    # rayon spawns its workerHelpers.js as nested workers from inside
-                    # the (require-corp) engine worker. A worker created in a
-                    # require-corp context must itself assert COEP: require-corp, not
-                    # just carry CORP — otherwise it is blocked (ERR_BLOCKED_BY_RESPONSE).
-                    add_header Cross-Origin-Embedder-Policy "require-corp" always;
-                    add_header Cross-Origin-Resource-Policy "same-origin" always;
-                    expires 1y;
-                    add_header Cache-Control "public, immutable";
-                }
-
-                location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
-                    expires 1y;
-                    add_header Cache-Control "public, immutable";
-                    # The Vite-bundled engine Web Worker ships under /assets/worker-*.js.
-                    # A dedicated worker created in the require-corp /play context must
-                    # itself assert COEP: require-corp AND pass the CORP check, or it is
-                    # blocked (ERR_BLOCKED_BY_RESPONSE) and the page hangs on "loading".
-                    # These headers are meaningful only for the worker script; on plain
-                    # js/css/img responses they are inert. same-origin CORP only blocks
-                    # cross-site hotlinking of our own assets, which is fine here.
-                    add_header Cross-Origin-Embedder-Policy "require-corp" always;
-                    add_header Cross-Origin-Resource-Policy "same-origin" always;
-                }
-
-                location / {
-                    try_files $uri $uri/ /index.html;
-                }
-
-                add_header X-Frame-Options "SAMEORIGIN" always;
-                add_header X-Content-Type-Options "nosniff" always;
-                add_header X-XSS-Protection "1; mode=block" always;
-                add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-            }
-            NGINX_EOF
-
             # Clear the prior extraction FIRST: tar is additive, so a file
             # removed from the repo would otherwise linger in the server-side
-            # dist/ across deploys and get carried into PROJECT_DIR by cp -a.
-            rm -rf dist server
-            tar xzf site.tar.gz
+            # tree across deploys and get carried into PROJECT_DIR by cp -a.
+            rm -rf dist server modgrad-src
+            mkdir modgrad-src
+            tar xzf site.tar.gz -C modgrad-src
             # zsh aborts on globs that match nothing — avoid PROJECT_DIR/* and dist/*
             rm -rf ${{ env.PROJECT_DIR }}
             mkdir -p ${{ env.PROJECT_DIR }}
-            cp -a dist/. ${{ env.PROJECT_DIR }}/
+            cp -a modgrad-src/dist/. ${{ env.PROJECT_DIR }}/
+
+            # the nginx config lives in the repo: deploy/nginx/modgrad.conf
+            cp modgrad-src/deploy/nginx/modgrad.conf nginx-modgrad.conf
 
             # shared network for nginx ↔ api
             podman network exists ${{ env.NETWORK }} || podman network create ${{ env.NETWORK }}
 
+            # ── modgrad-app: modgrad-server + the dashboard, at https://modgrad.com/app ──
+            # Built only when its sources changed (APP_SRC = hash of the trees that
+            # go into it); podman's layer cache and the cargo cache mounts in the
+            # Containerfile make a rebuild after a small change incremental.
+            : "${APP_SRC:?APP_SRC (the app source hash) was not passed}"
+            APP_IMAGE=${{ env.APP_CONTAINER }}:$APP_SRC
+            if ! podman image exists "$APP_IMAGE"; then
+              nice podman build --layers \
+                -f modgrad-src/deploy/obs/Containerfile \
+                --build-arg JOBS=${{ env.APP_JOBS }} \
+                -t "$APP_IMAGE" -t ${{ env.APP_CONTAINER }}:latest \
+                modgrad-src
+            fi
+            # accounts, sessions, tokens, runs, boards and the SSH host key; back it up
+            podman volume exists ${{ env.APP_VOLUME }} || podman volume create ${{ env.APP_VOLUME }}
+            podman stop ${{ env.APP_CONTAINER }} 2>/dev/null || true
+            podman rm ${{ env.APP_CONTAINER }} 2>/dev/null || true
+            # Sign-in mail goes out through the same Stalwart account as the contact
+            # form (From = JMAP_USER). The secrets go in by name (-e VAR), not on the
+            # command line. HTTP/3 is off (no --h3): QUIC would need a UDP port and a
+            # certificate on this host.
+            # SSH door: published on the host's port APP_SSH_PORT. It is reachable
+            # from outside only once the OPERATOR forwards that TCP port to this
+            # host in the firewall / haproxy (plain TCP, not HTTP). Until then the
+            # sign-in page shows an `ssh -p 2222 modgrad.com login` that does not connect.
+            MODGRAD_JMAP_URL="${JMAP_URL%/}/.well-known/jmap" \
+            MODGRAD_JMAP_USER="$JMAP_USER" \
+            MODGRAD_JMAP_PASS="$JMAP_PASS" \
+            podman run -d \
+              --name ${{ env.APP_CONTAINER }} \
+              --network ${{ env.NETWORK }} \
+              -p ${{ env.APP_SSH_PORT }}:2222 \
+              -v ${{ env.APP_VOLUME }}:/data \
+              -e MODGRAD_JMAP_URL -e MODGRAD_JMAP_USER -e MODGRAD_JMAP_PASS \
+              --restart unless-stopped \
+              "$APP_IMAGE" \
+              --public-url ${{ env.APP_PUBLIC_URL }} \
+              --mail jmap \
+              --ssh 0.0.0.0:2222 \
+              --mcp
+            # nginx resolves modgrad-app when it starts: refuse to go on (and leave
+            # the running nginx alone) if the app did not come up
+            sleep 3
+            if [ "$(podman inspect -f '{{.State.Running}}' ${{ env.APP_CONTAINER }} 2>/dev/null)" != "true" ]; then
+              echo "modgrad-app failed to start"
+              podman logs ${{ env.APP_CONTAINER }}
+              exit 1
+            fi
+            # keep the current image and :latest; drop older source-hash tags
+            podman images --format '{{.Repository}}:{{.Tag}}' \
+              | grep '/${{ env.APP_CONTAINER }}:' | grep -v ":$APP_SRC\$" | grep -v ':latest$' \
+              | xargs -r podman rmi 2>/dev/null || true
+
             # build + (re)start the contact-form service
-            podman build -t ${{ env.API_CONTAINER }}:latest ./server
+            podman build -t ${{ env.API_CONTAINER }}:latest ./modgrad-src/server
             podman stop ${{ env.API_CONTAINER }} 2>/dev/null || true
             podman rm ${{ env.API_CONTAINER }} 2>/dev/null || true
             podman run -d \
@@ -210,7 +201,18 @@ jobs:
               exit 1
             fi
 
+            # the app through nginx: sign-in methods (API) and the dashboard page
+            if ! curl -fs http://127.0.0.1:${{ env.CONTAINER_PORT }}/app/api/v1/auth/methods | grep -q '"email":true'; then
+              echo "modgrad-app API not responding through nginx at /app/"
+              podman logs --tail 50 ${{ env.APP_CONTAINER }}
+              exit 1
+            fi
+            curl -fs http://127.0.0.1:${{ env.CONTAINER_PORT }}/app/ | grep -q 'id="app"' || {
+              echo "modgrad-app dashboard not served at /app/"
+              exit 1
+            }
+
             rm -f site.tar.gz
-            rm -rf dist/
+            rm -rf modgrad-src
 
             echo "Deployment successful"

@@ -1,0 +1,11 @@
+# Build context for deploy/obs/Containerfile (podman build -f deploy/obs/Containerfile .):
+# only the Rust workspace and the dashboard sources. Everything else (the site,
+# target/, node_modules, models) stays out of the context.
+*
+!Cargo.toml
+!Cargo.lock
+!crates
+!obs/web
+obs/web/node_modules
+obs/web/dist
+**/target

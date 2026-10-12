@@ -1,4 +1,4 @@
-// Portal API client: accounts, sign-in methods, projects, tokens (contract: PORTAL_SPEC.md at the
+// Portal API client: accounts, sign-in methods, projects, tokens (contract: docs/design/portal-spec.md at the
 // repo root). No DOM, no Solid. The transport, WebAuthn and zafu layers are swappable so a mock
 // (accountMock.ts, dev only) can drive every path, including the byte conversions, without a server,
 // an authenticator or the extension.

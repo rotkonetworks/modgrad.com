@@ -174,7 +174,7 @@ HTTP maps them to 400, 404, 503 and 504.
 
 ## Accounts and sign-in (`portal.rs`, `account.rs`)
 
-The contract shared with the web UI is `PORTAL_SPEC.md` at the repository
+The contract shared with the web UI is `docs/design/portal-spec.md` at the repository
 root; `GET /api/v1` (`v1_api.txt`) lists the routes. In short:
 
 - `.obs-auth.json` is schema v2 (`"version": 2`). A v1 file (no version)

@@ -1,4 +1,4 @@
-// Dev-only in-memory stand-in for the portal API (PORTAL_SPEC.md), loaded by stores/account.ts only
+// Dev-only in-memory stand-in for the portal API (docs/design/portal-spec.md), loaded by stores/account.ts only
 // when the dev server runs with ?mock[=flags]; production builds never import it. It also swaps in
 // fake WebAuthn and zafu layers, so the byte conversions in logic/account.ts still run.
 //

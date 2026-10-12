@@ -1,7 +1,7 @@
 //! The account portal over HTTP: `/api/v1/auth/*` (sign in with an email
 //! link, a zafu signature, a passkey, or an `ssh <server> login` link) and
 //! `/api/v1/me/*` (credentials, projects, tokens, sessions). The contract
-//! is `PORTAL_SPEC.md`; the account rules are in [`crate::account`].
+//! is `docs/design/portal-spec.md`; the account rules are in [`crate::account`].
 //!
 //! Sessions are a cookie (`mg_session`, HttpOnly, SameSite=Lax, Secure
 //! under an https `--public-url`). Every state-changing request here passes

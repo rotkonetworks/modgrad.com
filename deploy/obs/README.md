@@ -9,6 +9,20 @@ graphs, fits and forecasts are computed in the viewer's browser.
     podman run -p 8790:8790 -v obs-data:/data modgrad-obs
     # open http://localhost:8790/
 
+## Under a path (modgrad.com/app)
+
+modgrad.com runs this image as `modgrad-app` behind the site's nginx, at
+`/app/` (`.github/workflows/deploy.yaml`, `deploy/nginx/modgrad.conf`):
+
+    podman run … modgrad-app --public-url https://modgrad.com/app --mail jmap --ssh 0.0.0.0:2222 --mcp
+
+nginx strips `/app` from the raw request URI (so `%2F` in run ids survives)
+and does not buffer (SSE). With a path in `--public-url`, every link the
+server prints keeps it (`/app/login#email=…`, `/app/#run=…`), the session
+cookie gets `Path=/app`, and the browser origin checked for CSRF, zafu and
+passkeys is still `https://modgrad.com` (passkey rpId `modgrad.com`).
+Clients take the prefixed URL as the server: `MODGRAD_URL=https://modgrad.com/app`.
+
 Build args: `JOBS` (cargo parallelism, default 6). Runs as uid 10001; data
 lives in the `/data` volume (`/data/runs/<run>/`; boards saved by the MCP
 `make_board` tool in `/data/boards/`, opened as `/#board=<name>`). Image ≈ 97 MB. `--dev` (appended to `podman run … modgrad-obs`) accepts writes without a token.

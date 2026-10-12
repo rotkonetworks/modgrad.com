@@ -1,2 +1,8 @@
 node_modules
 dist
+/target
+obs/pkg
+obs/web/dist
+__pycache__
+*.egg-info
+.pytest_cache

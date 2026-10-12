@@ -1,0 +1,16 @@
+# modgrad: the training observability service (CLI, server, browser analysis).
+# The site (Vite + Solid) lives alongside at the repo root; the SDK and
+# research code live in the modgrad repo (modgrad lab).
+[workspace]
+resolver = "2"
+members = [
+    "crates/modgrad-obs",
+    "crates/modgrad-obs-analysis",
+    "crates/modgrad-obs-ingest",
+    "crates/modgrad-obs-server",
+    "crates/modgrad-obs-wandb",
+]
+
+[profile.release]
+lto = "thin"
+codegen-units = 4

@@ -1,0 +1,52 @@
+[package]
+name = "modgrad-obs-server"
+version = "0.1.0"
+edition = "2024"
+description = "Zebra-style tower services (Ingest, State, ReadState) serving modgrad-obs runs; storage and selection only, no analysis"
+license = "MIT"
+
+[features]
+default = ["h3", "ssh"]
+# HTTP/3 (QUIC) listener next to the TCP one: `modgrad-server --h3 <udp addr>`.
+h3 = ["dep:quinn", "dep:h3", "dep:h3-quinn", "dep:rustls", "dep:rcgen", "dep:bytes", "dep:http-body-util"]
+# The SSH door: `modgrad-server --ssh <tcp addr>`; `python train.py | ssh <host>`.
+ssh = ["dep:russh", "dep:bytes"]
+# `--mail jmap`: sign-in emails through a JMAP server (Stalwart). Off by default.
+jmap = ["dep:ureq"]
+
+[dependencies]
+modgrad-obs = { path = "../modgrad-obs", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }
+tower = { version = "0.5", features = ["buffer", "limit", "load-shed", "timeout", "util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "query", "tokio"] }
+base64 = "0.22"
+sha2 = "0.10"
+# ed25519 for zafu sign-in, passkey signatures (src/webauthn.rs); already in the tree via rustls/quinn/russh
+ring = "0.17.14"
+# passkey CBOR
+ciborium = "=0.2.2"
+ureq = { version = "3", optional = true, default-features = false, features = ["rustls"] }
+async-stream = "0.3"
+futures-util = { version = "0.3", default-features = false }
+quinn = { version = "0.11.9", optional = true, default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+h3 = { version = "0.0.8", optional = true }
+h3-quinn = { version = "0.0.10", optional = true }
+rustls = { version = "0.23.37", optional = true, default-features = false, features = ["ring", "std"] }
+rcgen = { version = "0.13.2", optional = true }
+bytes = { version = "1.11", optional = true }
+http-body-util = { version = "0.1", optional = true }
+# ring (shared with quinn/rustls) instead of the default aws-lc-rs; rsa so RSA user keys work
+russh = { version = "=0.64.1", optional = true, default-features = false, features = ["ring", "rsa"] }
+
+[dev-dependencies]
+# the CLI's HTTP/3 client, to test the listener with the code that talks to it
+modgrad-obs = { path = "../modgrad-obs", features = ["h3"] }
+rcgen = "0.13.2"
+tower-test = "0.4"
+proptest = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }

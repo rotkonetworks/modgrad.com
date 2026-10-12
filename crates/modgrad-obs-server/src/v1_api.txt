@@ -1,0 +1,218 @@
+modgrad-obs ingest API v1
+=========================
+
+$OBS is the server URL (e.g. http://127.0.0.1:8794). $MODGRAD_TOKEN is a bearer token.
+Bodies are JSON whatever the Content-Type, so plain `curl -d` works. NDJSON
+(one JSON object per line) is accepted wherever an array of rows is.
+
+Quick start (no account)
+------------------------
+  curl -X POST $OBS/api/v1/projects
+      -> {"project": "anon-…", "token": "obsp_…", "board": "<url>", "claim": "<url>", "expires_unix": …}
+  curl -X POST $OBS/api/v1/runs/my-run/log -H "Authorization: Bearer $MODGRAD_TOKEN" -d '{"loss": 0.52}'
+      -> {"run": "anon-…/my-run", "created": true, "dashboard": "<url>", "rows": 1, …}
+  Open the board URL; the graph updates live.
+
+Tokens
+------
+  Authorization: Bearer <token>
+  obsp_…  project token: creates and writes any run in its project. A run id
+          without "/" is put in the project: "my-run" -> "<project>/my-run".
+  obsr_…  run token: writes one run. Returned once, when a run is created.
+  Anonymous project tokens expire (default 30 days, see expires_unix).
+  Dev servers (modgrad-server --dev) also accept writes without a token.
+  Reads need no token, except in private projects (see Accounts). Anonymous
+  projects are listed only by their board URL.
+
+Write
+-----
+  POST /api/v1/projects
+      New anonymous project. No body, no auth.
+
+  POST /api/v1/runs/<id>/log
+      Log to run <id>. The run is created on first write (no create call needed).
+      Body is one of:
+        a row        {"step": 10, "loss": 0.52, "acc": "71.5%"}
+        many rows    [{"step": 10, "loss": 0.52}, {"step": 11, "loss": 0.50}]   (or NDJSON)
+        an envelope  {"rows": [...], "events": ["checkpoint saved"], "config": {"lr": 3e-4},
+                      "summary": {"best_loss": 0.4}, "finish": true | {"exit_code": 0}}
+      Row rules:
+        step     optional; missing = one past the run's last step (0 for a new run).
+                 "_step" (W&B) is accepted too. Must be a non-negative integer.
+        t        optional seconds since run start; default = server arrival time.
+        values   numbers, or numeric strings ("3.4", "7.5%", "1e-3"); null, "nan",
+                 "inf" are stored as gaps; true/false = 1/0.
+                 Nested objects are flattened with "/": {"train": {"loss": 1}} -> "train/loss".
+                 {"histogram": {"edges": [...], "counts": [...]}} and
+                 {"tensor": {"shape": [...], "data": [...]}} are arrays.
+                 Other values (text) are skipped and listed under "ignored".
+      Idempotent: re-sending a row is harmless. Rows are append-only on disk and
+      every read merges rows by step, last write wins per (step, key).
+      Response: {"run", "created", "dashboard", "rows", "events", "finished", "token"?, "ignored"?}
+
+  POST /api/v1/runs/<id>/text
+      Raw log text (e.g. a training script's stdout). Each line is parsed for
+      metrics ("step 1250: loss 3.48 acc 7.5%", "iter 100 | loss=2.31 | lr 3e-4",
+      "[epoch 2/10] train_loss: 0.45", tqdm postfixes, {'loss': 0.4} dicts).
+      A line without a step takes the last step seen in the same body, else "next".
+      ?events=unparsed also stores the lines without metrics as events.
+      Response: {"run", "dashboard", "lines", "rows", "unparsed", "unparsed_sample"}
+
+  POST /api/v1/runs/<id>/samples
+      Text samples (generations) for SFT/RL/eval. Creates the run like .../log.
+      Body: one sample, an array (or NDJSON), or {"samples": [...]}:
+        {"step": 1200, "key": "eval/gsm8k", "prompt": "...", "completion": "...",
+         "reward": 0.73, "score": 1.0, "meta": {"temperature": 0.7}}
+      completion  required (aliases: response, output, generation, text)
+      prompt      optional (aliases: input, query); key optional (default "default")
+      step        optional; missing = the run's last history step
+      reward, score  optional numbers; other unknown keys are kept under "meta".
+      Log the same prompts at every eval step: the dashboard diffs completions
+      of one (key, prompt) across steps.
+      Response: {"run", "created", "dashboard", "samples": N}
+
+  POST /api/v1/runs/<id>/finish
+      Optional body: an object merged into the run summary, e.g. {"exit_code": 0}.
+
+  POST /api/v1/runs
+      Explicit create, optional: {"name"?, "project"?, "config"?, "meta"?: {"git", "hostname", …}}.
+      201 {"run", "token", "dashboard", "log", "text"} for a new run, 200 for a resume.
+      Without a name the id is run-<UTC yyyymmdd-hhmmss>-<4 hex>.
+
+  Run ids: 1 to 3 "/"-separated segments of [A-Za-z0-9_.-]. Write them plainly
+  in the URL (/api/v1/runs/proj/run-1/log) or with "/" as %2F.
+
+Read
+----
+  GET /api/index[?project=<p>]                    run list (same schema as the static index.json)
+  GET /api/v1/runs/<id>/history?keys=a,b&from=&to=&stride=
+                                                  {"steps", "t", "columns": {key: [...]}}
+  GET /api/v1/runs/<id>/config | /summary | /events
+  GET /api/v1/runs/<id>/samples?from=&to=&key=&limit=
+                                                  {"samples": [...newest limit (default 5000)...],
+                                                   "steps": [all steps], "keys": [all keys], "n": total}
+      Samples are read from samples.jsonl directly (outside the snapshot the
+      metric reads use), so they may be slightly newer than other reads; a torn
+      last line is never returned. New ones also arrive over the SSE stream.
+  GET /api/runs/<id %2F-encoded>/metrics/<key>?max_points=N   {"step": [...], "value": [...]}
+  GET /api/v1/boards/<name>                       a saved board ({"panels": [{"query"}]}); opens as <server>/#board=<name>
+
+Boards
+------
+  PUT /api/v1/boards/<name>                       store a dashboard board (JSON object, e.g.
+      {"title", "panels": [{"query": "loss{run=~\"a|b\"}", "metric": "loss", "runs": ["a", "b"]}]})
+      A project token stores it as "<project>/<name>"; tokenless needs --dev.
+      -> {"board": "<id>", "url": "<server>/#board=<id>", "get": "<url>"}
+  GET /api/v1/boards/<id>                         the stored board JSON
+
+  GET /api/index with a project token (Authorization header) lists that project's runs.
+
+SSH (servers started with --ssh <addr>)
+---------------------------------------
+  Zero install: your SSH key is your account (one anonymous project per key,
+  made on first connect; any key type; no password).
+  python train.py 2>&1 | ssh <host>              stream stdout into a new run (auto name);
+                                                 output is echoed back unchanged, metric
+                                                 lines (as .../text) become rows, the
+                                                 dashboard URL is printed first on stderr.
+                                                 EOF finishes the run with exit_code 0; a
+                                                 dropped connection leaves it unfinished.
+  python train.py 2>&1 | ssh <host> run <name>   the same, run <project>/<name>
+  ssh <host> token                               a project token (obsp_…) for this API,
+                                                 `modgrad init` and Python; anonymous expiry
+  ssh <host> runs | tail <run> | help            this key's runs, latest values, usage
+  ssh <host> login                               a one-time link (10 min) that signs a browser
+                                                 in with this key, or adds the key to the
+                                                 account the browser is signed in to
+  Links use the server's --public-url.
+
+Accounts (sign in on the web)
+-----------------------------
+  One account holds any number of credentials: email addresses, SSH keys,
+  zafu keys, passkeys. Sign in with any; signed in, a new one is added to the
+  account; one that belongs to another account is refused (409 cred_taken).
+  The session is the HttpOnly cookie mg_session (30 days, sliding). Cookie
+  requests that change state need a same-origin browser (Sec-Fetch-Site /
+  Origin); bearer requests are unaffected. Errors here are {"error", "code"}.
+
+  GET  /api/v1/auth/methods        {email, zafu, passkey, ssh: {command} | null, account | null}
+  POST /api/v1/auth/email          {"email"} -> 202 always; mails <site>/login#email=<token> (15 min)
+  POST /api/v1/auth/email/consume  {"token"} -> {account: {id, created}, linked, created}; 410 token_expired
+  POST /api/v1/auth/ssh/consume    {"token"} (from `ssh <host> login`), same reply
+  POST /api/v1/auth/zafu/challenge -> {challenge_hex, statement, expires}; sign the bytes with ed25519
+  POST /api/v1/auth/zafu/verify    {challenge_hex, signature, public_key} (hex)
+  POST /api/v1/auth/passkey/register/options | register/verify | login/options | login/verify  (WebAuthn)
+  POST /api/v1/auth/logout         204
+
+  Signed in (else 401 {"code": "signed_out"}):
+  GET    /api/v1/me                {account, creds, projects, sessions, tokens}
+  DELETE /api/v1/me                {"confirm": "<account id>"}: account, sessions, tokens, project data
+  POST   /api/v1/me/projects       {"name", "visibility"?: "private"|"public"} -> 201; 409 name_taken; 400 bad_name
+                                   name: 3-40 of a-z 0-9 '-', not anon-…, not reserved
+  PATCH  /api/v1/me/projects/<name> {"visibility"}
+  POST   /api/v1/me/claim          {"project": "anon-…", "token": "obsp_… or obsc_…"}: becomes yours,
+                                   private, no longer expires
+  POST   /api/v1/me/tokens         {"project", "label", "expires_days"?} -> {id, token} (token shown once)
+  DELETE /api/v1/me/tokens/<id>
+  POST   /api/v1/me/creds/ssh      {"public_key": "ssh-ed25519 AAAA… comment"}: added unconfirmed;
+                                   `ssh <host> login` from that key confirms it
+  DELETE /api/v1/me/creds/<id>     409 last_cred for the only one
+  DELETE /api/v1/me/sessions/<id>
+
+  Private projects (the default for POST /api/v1/me/projects, and claimed ones)
+  are read only with the owner's session or a token for the project
+  (Authorization: Bearer obsp_…): index, history, config, summary, events,
+  samples, metrics, arrays, streams, boards. Otherwise 401 (no session or
+  token) or 403. Public and unowned projects read as before.
+
+MCP (for coding agents)
+-----------------------
+  Preferred: run the tools locally against this server; analysis then runs on
+  your machine and the server only stores and selects:
+      modgrad mcp --url $OBS --token $MODGRAD_TOKEN
+  Servers started with --mcp also serve MCP over streamable HTTP at POST /mcp
+  (Authorization: Bearer <token> for writes, and for reads of a private
+  project), for agents that cannot run a local binary. Its analysis runs on the server.
+
+Live (Server-Sent Events)
+-------------------------
+  GET /api/v1/stream[?runs=a,b | ?project=<p>]    all public runs, some runs, or one project
+  GET /api/v1/runs/<id>/stream                    one run
+  Events (data is JSON, always with "run" and "unix" except hello):
+    hello    {"runs": [{"run", "finished", "updated_unix"}], "unix"}
+    run      {"entry": <index entry>}            a run appeared
+    rows     {"rows": [{"step", "t", key: value, ...}]}
+    events   {"events": [{"step", "t", "text"}]}
+    samples  {"samples": [{"step", "t", "key", "prompt", "completion", ...}], "n": total}
+    summary  {"finished", "summary"}
+    resync   {}                                  you fell behind: refetch
+
+Naming conventions the dashboard understands
+--------------------------------------------
+  layers/<i>/<stat>        per-layer metrics (layers/0/grad_norm, layers/23/act_rms):
+                           shown as a layer x step heatmap. Nested rows work:
+                           {"layers": {"0": {"grad_norm": 1.2}}} -> layers/0/grad_norm
+  eval/<benchmark>/<metric>  evals at checkpoints (eval/gsm8k/acc): the Evals table
+  loss, grad_norm, lr, tokens_seen, reward, kl, entropy, response_length:
+                           the default board
+
+Transports
+----------
+  The API is served over HTTP/1.1 on TCP and, on servers started with
+  --h3 <udp addr>, also over HTTP/3 (QUIC, UDP). Those servers add
+      Alt-Svc: h3=":<udp port>"; ma=86400
+  to every TCP response: HTTP/3 is on that UDP port of the same hostname,
+  with a certificate for that name. Paths, bodies, tokens, errors and SSE
+  are the same on both.
+  TCP is always there: curl, browsers and the Python client use it.
+  `modgrad run` / `modgrad push` switch to HTTP/3 when an https server
+  advertises it (or with --h3), and fall back to TCP if the UDP handshake
+  does not finish within 1.5 s (UDP blocked); --no-h3 skips the attempt.
+
+Errors
+------
+  Every error is JSON {"error", "example", "help", "message"}: what was wrong, a
+  corrected request, and both as one plain-text paragraph.
+  400 bad body, 401 missing/unknown/expired token, 403 token does not cover
+  this run, 409 run exists with its own token, 503/504 overloaded (retry).
+  Reads of a private project: 401 / 403 with "code": "signed_out" / "forbidden".

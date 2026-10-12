@@ -1,0 +1,3 @@
+{"step": 10, "metrics": {"loss": 2.0, "acc": {"top1": 0.5, "top5": 0.8}}}
+{"step": 20, "metrics": {"loss": 1.5, "acc": {"top1": 0.6, "top5": 0.85}}}
+{"step": 30, "metrics": {"loss": 1.2, "acc": {"top1": 0.7, "top5": 0.9}}, "phase": "eval"}

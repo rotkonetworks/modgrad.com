@@ -1,0 +1,20 @@
+[package]
+name = "modgrad-obs-ingest"
+version = "0.1.0"
+edition = "2024"
+description = "Parse training logs from anywhere (CSV/TSV, JSONL, plain-text logs, TensorBoard event files, W&B offline .wandb, modgrad-obs run directories) into in-memory runs; compiled to wasm for the dashboard's drag-and-drop"
+license = "MIT"
+
+# The wasm artifact is built with `cargo rustc --crate-type cdylib --features
+# wasm` (scripts/build_obs_wasm.sh); the plain rlib is ordinary Rust.
+
+[features]
+default = []
+wasm = ["dep:wasm-bindgen"]
+
+[dependencies]
+modgrad-obs = { path = "../modgrad-obs", default-features = false }
+modgrad-obs-wandb = { path = "../modgrad-obs-wandb" }
+prost = "0.13"
+serde_json = "1"
+wasm-bindgen = { version = "0.2.126", optional = true }

@@ -1,0 +1,8 @@
+{"_step": 0, "_runtime": 1.5, "_timestamp": 1760000000.1, "loss": 3.2, "lr": 0.001, "done": false}
+{"_step": 1, "_runtime": 2.5, "_timestamp": 1760000001.1, "loss": 2.9, "weights": {"_type": "histogram", "values": [1, 2], "bins": [0, 1, 2]}}
+
+{"_step": 2, "_runtime": 3.5, "loss": "NaN", "eval": {"acc": 0.4, "f1": 0.31}, "tags": ["a"]}
+{"_step": 3, "loss": null, "done": true}
+{"_step": 4, "_runtime": 5.5, "loss": 2.1, "acc_str": "55%"}
+{this is not json
+{"_step": 5, "_runtime": 6.5, "loss": 1.9

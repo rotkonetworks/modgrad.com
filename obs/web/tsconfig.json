@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable", "WebWorker.ImportScripts"],
+    "jsx": "preserve",
+    "jsxImportSource": "solid-js",
+    "noEmit": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "allowJs": false,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"],
+      "@pkg/*": ["../pkg/*"]
+    },
+    "types": ["vite/client"]
+  },
+  "include": ["src"]
+}

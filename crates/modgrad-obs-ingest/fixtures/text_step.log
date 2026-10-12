@@ -1,0 +1,7 @@
+PyTorch version 2.1 on 8 GPUs
+Loading 3 shards from /data/fineweb (12.3 GB)
+step 1000: loss 3.92 acc 5.0%
+step 1250: loss 3.48 acc 7.5%
+step 1500: loss 3.30 acc 9.1% grad_norm 0.82
+saved checkpoint to ckpt/step_1500.pt
+step 1750: loss 3.21 acc 10.2%

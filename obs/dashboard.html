@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>modgrad obs</title>
+<!-- The dashboard is the Vite + Solid app in obs/web (built to obs/web/dist). This page keeps old
+     links working when obs/ itself is served (python3 -m http.server --directory obs, or
+     obs-server with its default --static <root>): data and API stay at this level (?data=../../). -->
+<script>location.replace('web/dist/index.html?data=../../' + location.hash);</script>
+</head>
+<body style="font: 13px ui-monospace, monospace; padding: 16px">
+<p>The dashboard moved to <a href="web/dist/index.html?data=../../">web/dist/</a>. Build it with
+<code>cd obs/web &amp;&amp; npm ci &amp;&amp; npm run build</code> (after <code>scripts/build_obs_wasm.sh</code>).</p>
+</body>
+</html>

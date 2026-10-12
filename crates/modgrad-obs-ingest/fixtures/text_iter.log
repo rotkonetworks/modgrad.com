@@ -1,0 +1,5 @@
+2026-10-11 12:00:00,001 INFO starting run on host atomman
+2026-10-11 12:00:01,532 INFO iter 100 | loss=2.31 | lr 3e-4 | 1200 tok/s | 12:01:02
+2026-10-11 12:00:02,532 INFO iter 200 | loss=2.12 | lr 3e-4 | 1250 tok/s
+2026-10-11 12:00:03,532 WARNING iter 300 | loss=nan | lr 2.5e-4 | 1190 tok/s
+2026-10-11 12:00:04,532 INFO iter 400 | loss=1.98 | lr 2e-4 | 1300 tok/s

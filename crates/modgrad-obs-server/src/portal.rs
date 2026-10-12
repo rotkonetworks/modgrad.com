@@ -165,8 +165,19 @@ fn secure(st: &AppState) -> bool {
     st.public_url.as_deref().is_some_and(|u| u.starts_with("https://"))
 }
 
+/// The path of a URL (`/app` of `https://modgrad.com/app/`), `/` for none.
+fn path_of(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let path = rest.find('/').map_or("", |i| rest[i..].trim_end_matches('/'));
+    if path.is_empty() { "/".into() } else { path.to_string() }
+}
+
+/// The cookie is scoped to `--public-url`'s path, so a server mounted under
+/// a prefix (`https://modgrad.com/app`) does not hand its session to the
+/// rest of the site.
 fn set_cookie(st: &AppState, value: &str, max_age: u64) -> HeaderValue {
-    let s = format!("{COOKIE}={value}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}{}", if secure(st) { "; Secure" } else { "" });
+    let path = st.public_url.as_deref().map_or_else(|| "/".to_string(), path_of);
+    let s = format!("{COOKIE}={value}; HttpOnly; SameSite=Lax; Path={path}; Max-Age={max_age}{}", if secure(st) { "; Secure" } else { "" });
     HeaderValue::from_str(&s).expect("cookie is ascii")
 }
 
@@ -227,14 +238,24 @@ async fn csrf_layer(AxState(st): AxState<AppState>, req: Request, next: Next) ->
     next.run(req).await
 }
 
+/// Is `ip` where a reverse proxy in front of this server would connect
+/// from: loopback, or a private network (a container network, e.g. nginx
+/// and this server on one podman network)?
+fn local_proxy(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v) => v.is_loopback() || v.is_private() || v.is_link_local(),
+        std::net::IpAddr::V6(v) => v.is_loopback() || v.is_unique_local() || v.is_unicast_link_local() || v.to_ipv4_mapped().is_some_and(|v| v.is_loopback() || v.is_private()),
+    }
+}
+
 /// The client address for rate limits: the peer, unless it is a local
-/// reverse proxy, in which case the address it forwarded.
+/// reverse proxy (see [`local_proxy`]), in which case the address it forwarded.
 fn client_ip(peer: Option<SocketAddr>, h: &HeaderMap) -> String {
     let forwarded = || {
         h.get("x-real-ip").and_then(|v| v.to_str().ok()).map(|s| s.trim().to_string()).or_else(|| h.get("x-forwarded-for").and_then(|v| v.to_str().ok()).and_then(|v| v.rsplit(',').next()).map(|s| s.trim().to_string()))
     };
     match peer {
-        Some(p) if !p.ip().is_loopback() => p.ip().to_string(),
+        Some(p) if !local_proxy(p.ip()) => p.ip().to_string(),
         Some(p) => forwarded().unwrap_or_else(|| p.ip().to_string()),
         None => forwarded().unwrap_or_else(|| "unknown".into()),
     }
@@ -322,6 +343,34 @@ async fn logout(AxState(st): AxState<AppState>, h: HeaderMap) -> PResult {
     Ok(r)
 }
 
+/// `GET /api/v1/auth/whoami`: the account behind a request, for services
+/// next to this one (the metered LLM proxy) that bill modgrad accounts.
+/// A bearer token, when sent, decides: a project token stands for its
+/// project's owner (`{account, via: "token", project}`); an unknown or
+/// expired token, a run token, or a token of an unowned (anonymous)
+/// project is 401. Without one, the session cookie (`{account, via:
+/// "session"}`). Nothing is 401 `signed_out`. Reads only; no cookie is set.
+async fn whoami(AxState(st): AxState<AppState>, h: HeaderMap) -> PResult {
+    let no_store = |v: Value| {
+        let mut r = axum::Json(v).into_response();
+        r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        r
+    };
+    let Some(token) = crate::v1::bearer(&h) else {
+        let (account, _) = need_session(&st, &h)?;
+        return Ok(no_store(json!({ "account": account, "via": "session" })));
+    };
+    let refuse = |code: &'static str, m: &str| perr(StatusCode::UNAUTHORIZED, code, m);
+    match st.auth.cred(Some(&token)) {
+        Ok(Cred::Project(p)) => match st.auth.owned(&p) {
+            Some(o) if st.auth.account(&o.owner).is_some() => Ok(no_store(json!({ "account": o.owner, "via": "token", "project": p }))),
+            _ => Err(refuse("unowned", "this token's project has no account; sign in and claim it (POST /api/v1/me/claim)")),
+        },
+        Ok(Cred::Run(_)) => Err(refuse("run_token", "a run token only writes its run; send a project token (obsp_…)")),
+        Ok(Cred::None) | Err(_) => Err(refuse("bad_token", "unknown or expired token")),
+    }
+}
+
 /// `POST /api/v1/auth/email {email}`: 202 whether or not a mail went out
 /// (never says whether an account exists; rate limits are silent too).
 async fn email(AxState(st): AxState<AppState>, peer: Option<ConnectInfo<SocketAddr>>, h: HeaderMap, b: Bytes) -> PResult {
@@ -332,7 +381,7 @@ async fn email(AxState(st): AxState<AppState>, peer: Option<ConnectInfo<SocketAd
     let allowed = st.portal.limits.lock().unwrap().allow(&address, &ip, p.email_per_address, p.email_per_ip, modgrad_obs::now_unix());
     if allowed {
         let token = st.auth.email_token(&address)?;
-        let mail = sign_in_mail(&address, &format!("{}/login#email={token}", origin(&st, &h)), (p.email_ttl / 60.0).round() as u64);
+        let mail = sign_in_mail(&address, &format!("{}/login#email={token}", st.base_url(&h)), (p.email_ttl / 60.0).round() as u64);
         let mailer = st.portal.mailer.clone();
         // off the request: delivery time says nothing, and a slow relay holds nothing up
         tokio::task::spawn_blocking(move || {
@@ -684,6 +733,7 @@ pub fn routes(st: AppState) -> Router<AppState> {
     Router::new()
         .route("/api/v1/auth/methods", get(methods))
         .route("/api/v1/auth/logout", post(logout))
+        .route("/api/v1/auth/whoami", get(whoami))
         .route("/api/v1/auth/email", post(email))
         .route("/api/v1/auth/email/consume", post(email_consume))
         .route("/api/v1/auth/ssh/consume", post(ssh_consume))
@@ -716,6 +766,10 @@ mod tests {
         assert_eq!(rp_id("https://modgrad.com"), "modgrad.com");
         assert_eq!(rp_id("http://localhost:8790"), "localhost");
         assert_eq!(rp_id("http://[::1]:8790"), "::1");
+        assert_eq!(path_of("https://modgrad.com/app/"), "/app");
+        assert_eq!(path_of("https://modgrad.com/a/b"), "/a/b");
+        assert_eq!(path_of("https://modgrad.com"), "/");
+        assert_eq!(path_of("http://127.0.0.1:8790/"), "/");
         let v = "a".repeat(43);
         let mut h = HeaderMap::new();
         h.insert(header::COOKIE, HeaderValue::from_str(&format!("theme=dark; {COOKIE}={v}; x=1")).unwrap());
@@ -746,6 +800,10 @@ mod tests {
         h.insert("x-forwarded-for", HeaderValue::from_static("6.6.6.6, 1.2.3.4"));
         assert_eq!(client_ip(Some("8.8.8.8:1".parse().unwrap()), &h), "8.8.8.8");
         assert_eq!(client_ip(Some("127.0.0.1:1".parse().unwrap()), &h), "1.2.3.4");
+        // nginx on the same container network
+        assert_eq!(client_ip(Some("10.89.0.7:1".parse().unwrap()), &h), "1.2.3.4");
+        assert_eq!(client_ip(Some("[fd00::7]:1".parse().unwrap()), &h), "1.2.3.4");
+        assert_eq!(client_ip(Some("[2001:db8::1]:1".parse().unwrap()), &h), "2001:db8::1");
         assert_eq!(client_ip(None, &HeaderMap::new()), "unknown");
     }
 }

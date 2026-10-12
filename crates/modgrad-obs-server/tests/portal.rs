@@ -31,12 +31,21 @@ fn tmp(tag: &str) -> PathBuf {
 }
 
 fn app_with(tag: &str, p: PortalConfig) -> T {
+    app_full(tag, p, None)
+}
+
+/// `public_url`: as `modgrad-server --public-url`, e.g. a server mounted
+/// under a path by the reverse proxy in front of it.
+fn app_full(tag: &str, p: PortalConfig, public_url: Option<&str>) -> T {
     let root = tmp(tag);
     let (ingest, read) = open(&root, IngestConfig::default()).unwrap();
     std::fs::write(root.join("dashboard.html"), "<html>dash</html>").unwrap();
     let auth = Auth::open(&root, AuthConfig::default()).unwrap().with_portal(p);
     let mail = MemoryMailer::default();
-    let st = AppState::new(ingest, read, Some(root.clone()), auth.clone()).with_boards(root.join("boards")).with_mailer(Arc::new(mail.clone()));
+    let mut st = AppState::new(ingest, read, Some(root.clone()), auth.clone()).with_boards(root.join("boards")).with_mailer(Arc::new(mail.clone()));
+    if let Some(u) = public_url {
+        st = st.with_public_url(u.into());
+    }
     T { app: router(st), mail, auth, root }
 }
 
@@ -545,4 +554,98 @@ async fn passkey_registers_and_signs_in_over_http() {
     let (c, _, e) = call(&t, "POST", "/api/v1/auth/passkey/login/verify", Req::default(), login(1, l["challenge"].clone())).await;
     assert_eq!((c, e["code"].as_str()), (StatusCode::BAD_REQUEST, Some("bad_passkey")));
     let _ = std::fs::remove_dir_all(&t.root);
+}
+
+#[tokio::test]
+async fn whoami_for_services_next_to_the_server() {
+    let t = app("whoami");
+    let bearer = |tk: &str| -> Req<'static> { Req { token: Some(Box::leak(tk.to_string().into_boxed_str())), ..Default::default() } };
+    // nothing: signed out
+    let (c, _, e) = call(&t, "GET", "/api/v1/auth/whoami", Req::default(), Value::Null).await;
+    assert_eq!((c, e["code"].as_str()), (StatusCode::UNAUTHORIZED, Some("signed_out")), "{e}");
+    // a session
+    let (cookie, id) = signed_in(&t, "me@x.org").await;
+    let (c, h, v) = call(&t, "GET", "/api/v1/auth/whoami", as_cookie(Some(&cookie)), Value::Null).await;
+    assert_eq!(c, StatusCode::OK, "{v}");
+    assert_eq!(v, json!({ "account": id, "via": "session" }));
+    assert_eq!(h.get("cache-control").and_then(|v| v.to_str().ok()), Some("no-store"));
+    assert!(h.get("set-cookie").is_none(), "whoami does not slide the session");
+    // a project token stands for its project's owner
+    call(&t, "POST", "/api/v1/me/projects", as_cookie(Some(&cookie)), json!({ "name": "lab-one" })).await;
+    let (_, _, tk) = call(&t, "POST", "/api/v1/me/tokens", as_cookie(Some(&cookie)), json!({ "project": "lab-one" })).await;
+    let token = tk["token"].as_str().unwrap().to_string();
+    let (c, _, v) = call(&t, "GET", "/api/v1/auth/whoami", bearer(&token), Value::Null).await;
+    assert_eq!(c, StatusCode::OK, "{v}");
+    assert_eq!(v, json!({ "account": id, "via": "token", "project": "lab-one" }));
+    // a bearer decides over a cookie: someone else's session plus this token is still the token's owner
+    let (other, other_id) = signed_in(&t, "you@x.org").await;
+    let (_, _, v) = call(&t, "GET", "/api/v1/auth/whoami", Req { cookie: Some(&other), token: Some(&token), ..Default::default() }, Value::Null).await;
+    assert_eq!(v["account"].as_str(), Some(id.as_str()));
+    assert_ne!(id, other_id);
+    // and a bad bearer is not rescued by the cookie
+    let (c, _, e) = call(&t, "GET", "/api/v1/auth/whoami", Req { cookie: Some(&other), token: Some("obsp_nope"), ..Default::default() }, Value::Null).await;
+    assert_eq!((c, e["code"].as_str()), (StatusCode::UNAUTHORIZED, Some("bad_token")));
+    // a run token is not an account credential
+    let rt = t.auth.register_run("lab-one/r9", false).unwrap().unwrap();
+    let (c, _, e) = call(&t, "GET", "/api/v1/auth/whoami", bearer(&rt), Value::Null).await;
+    assert_eq!((c, e["code"].as_str()), (StatusCode::UNAUTHORIZED, Some("run_token")));
+    // an anonymous project has no account until claimed
+    let (_, _, p) = call(&t, "POST", "/api/v1/projects", Req { no_origin: true, ..Default::default() }, Value::Null).await;
+    let (project, anon) = (p["project"].as_str().unwrap().to_string(), p["token"].as_str().unwrap().to_string());
+    let (c, _, e) = call(&t, "GET", "/api/v1/auth/whoami", bearer(&anon), Value::Null).await;
+    assert_eq!((c, e["code"].as_str()), (StatusCode::UNAUTHORIZED, Some("unowned")));
+    call(&t, "POST", "/api/v1/me/claim", as_cookie(Some(&other)), json!({ "project": project, "token": anon })).await;
+    let (_, _, v) = call(&t, "GET", "/api/v1/auth/whoami", bearer(&anon), Value::Null).await;
+    assert_eq!(v, json!({ "account": other_id, "via": "token", "project": project }));
+    // a revoked token stops resolving
+    call(&t, "DELETE", &format!("/api/v1/me/tokens/{}", tk["id"].as_str().unwrap()), as_cookie(Some(&cookie)), Value::Null).await;
+    let (c, _, _) = call(&t, "GET", "/api/v1/auth/whoami", bearer(&token), Value::Null).await;
+    assert_eq!(c, StatusCode::UNAUTHORIZED);
+}
+
+/// Behind a reverse proxy that mounts the server under a path
+/// (`--public-url https://modgrad.com/app`, nginx stripping `/app`): links
+/// keep the path, the cookie is scoped to it, and the browser origin is
+/// still the bare scheme and host.
+#[tokio::test]
+async fn mounted_under_a_path_prefix() {
+    let t = app_full("prefix", PortalConfig::default(), Some("http://obs.test/app/"));
+    let (cookie, _) = signed_in(&t, "me@x.org").await;
+    let m = t.mail.0.lock().unwrap()[0].clone();
+    assert!(m.body.contains("http://obs.test/app/login#email="), "{}", m.body);
+    let (_, h, _) = call(&t, "GET", "/api/v1/me", as_cookie(Some(&cookie)), Value::Null).await;
+    let sc = h.get("set-cookie").unwrap().to_str().unwrap();
+    assert!(sc.contains("; Path=/app;") && !sc.contains("Secure"), "{sc}");
+    // CSRF: the page's Origin is http://obs.test, without the path
+    let (c, _, v) = call(&t, "POST", "/api/v1/me/projects", as_cookie(Some(&cookie)), json!({ "name": "lab-two" })).await;
+    assert_eq!(c, StatusCode::CREATED, "{v}");
+    let (c, _, e) = call(&t, "POST", "/api/v1/me/projects", Req { cookie: Some(&cookie), origin: Some("http://obs.test/app"), ..Default::default() }, json!({ "name": "lab-three" })).await;
+    assert_eq!((c, e["code"].as_str()), (StatusCode::FORBIDDEN, Some("csrf")), "an Origin is never a path");
+    let (_, _, tk) = call(&t, "POST", "/api/v1/me/tokens", as_cookie(Some(&cookie)), json!({ "project": "lab-two" })).await;
+    assert!(tk["use"].as_str().unwrap().contains("--server http://obs.test/app -- "), "{tk}");
+    let token = tk["token"].as_str().unwrap().to_string();
+    let (_, _, v) = call(&t, "POST", "/api/v1/runs/r1/log", Req { token: Some(&token), ..Default::default() }, json!({ "loss": 0.5 })).await;
+    assert_eq!(v["dashboard"].as_str(), Some("http://obs.test/app/#run=lab-two%2Fr1"), "{v}");
+    let (_, _, p) = call(&t, "POST", "/api/v1/projects", Req { no_origin: true, ..Default::default() }, Value::Null).await;
+    assert!(p["board"].as_str().unwrap().starts_with("http://obs.test/app/#project=anon-"), "{p}");
+    // passkeys and zafu: bound to the host, not the path
+    let (_, _, o) = call(&t, "POST", "/api/v1/auth/passkey/login/options", Req::default(), Value::Null).await;
+    assert_eq!(o["rpId"].as_str(), Some("obs.test"));
+    let (_, _, z) = call(&t, "POST", "/api/v1/auth/zafu/challenge", Req::default(), Value::Null).await;
+    assert!(z["statement"].as_str().unwrap().ends_with("at http://obs.test"), "{z}");
+    // logout clears the cookie on the same path
+    let (_, h, _) = call(&t, "POST", "/api/v1/auth/logout", as_cookie(Some(&cookie)), Value::Null).await;
+    assert!(h.get("set-cookie").unwrap().to_str().unwrap().contains("; Path=/app;"));
+}
+
+/// Without --public-url, a proxy's X-Forwarded-Prefix keeps the path in links.
+#[tokio::test]
+async fn forwarded_prefix_without_a_public_url() {
+    let t = app("fwdprefix");
+    let req = |prefix: &str| Request::builder().method("POST").uri("/api/v1/projects").header("host", "obs.test").header("x-forwarded-proto", "https").header("x-forwarded-prefix", prefix).body(Body::empty()).unwrap();
+    for (prefix, want) in [("/app", "https://obs.test/app/#project="), ("/app/", "https://obs.test/app/#project="), ("app", "https://obs.test/#project="), ("/a b", "https://obs.test/#project=")] {
+        let r = t.app.clone().oneshot(req(prefix)).await.unwrap();
+        let v: Value = serde_json::from_slice(&to_bytes(r.into_body(), 1 << 20).await.unwrap()).unwrap();
+        assert!(v["board"].as_str().unwrap().starts_with(want), "{prefix:?}: {v}");
+    }
 }

@@ -40,7 +40,10 @@
 //! request's Host / X-Forwarded-* headers and the SSH door uses
 //! `http://<--listen>`. It is also the sign-in origin: cookies get
 //! `Secure` under https, zafu challenges and passkeys are bound to it (rpId
-//! = its host). Without it a request's own Host is the origin (dev).
+//! = its host). Without it a request's own Host is the origin (dev). A
+//! path in it (`https://modgrad.com/app`) is where a reverse proxy mounts
+//! the server, stripping the path before it gets here: links keep the
+//! path and the session cookie is scoped to it.
 //!
 //! Sign-in (`/api/v1/auth/*`, `/api/v1/me/*`, see `portal.rs`): `--mail`
 //! picks how email sign-in links go out: `log` (default; nothing is sent,

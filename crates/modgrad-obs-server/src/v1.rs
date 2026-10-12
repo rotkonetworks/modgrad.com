@@ -341,12 +341,15 @@ pub(crate) fn bearer(h: &HeaderMap) -> Option<String> {
     (!t.is_empty()).then(|| t.to_string())
 }
 
-/// `scheme://host` the client used (honours X-Forwarded-*).
+/// `scheme://host[/prefix]` the client used (honours X-Forwarded-*,
+/// including X-Forwarded-Prefix from a proxy that mounts this server
+/// under a path, e.g. `/app`).
 pub fn base_url(h: &HeaderMap) -> String {
     let get = |k: &str| h.get(k).and_then(|v| v.to_str().ok()).map(|s| s.split(',').next().unwrap_or("").trim().to_string());
     let host = get("x-forwarded-host").or_else(|| get("host")).unwrap_or_else(|| "localhost".into());
     let proto = get("x-forwarded-proto").unwrap_or_else(|| "http".into());
-    format!("{proto}://{host}")
+    let prefix = get("x-forwarded-prefix").map(|p| p.trim_end_matches('/').to_string()).filter(|p| p.starts_with('/') && p[1..].split('/').all(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.~".contains(&b)))).unwrap_or_default();
+    format!("{proto}://{host}{prefix}")
 }
 
 pub fn run_url(base: &str, run: &str) -> String {

@@ -15,7 +15,6 @@ env:
   # the SSH door (python train.py | ssh -p 2222 modgrad.com); see the run step
   APP_SSH_PORT: 2222
   # cargo parallelism for the image build on the host (keep modest)
-  APP_JOBS: 3
   NETWORK: modgrad-net
   CONTAINER_PORT: 55560
   API_PORT: 3001
@@ -47,9 +46,27 @@ jobs:
           # a hash of the trees that go into it.
           echo "APP_SRC=$(git ls-tree -r HEAD -- Cargo.toml Cargo.lock .containerignore crates obs/web deploy/obs | sha256sum | cut -c1-16)" >> "$GITHUB_ENV"
 
-          # ship the static site, the node services, the nginx config, and the
-          # app's sources (the host builds the image)
-          tar czf site.tar.gz dist/ server/ deploy/ Cargo.toml Cargo.lock .containerignore crates/ obs/web/
+          # ship the static site, the node services and the nginx config; the app
+          # image is built below, on this runner (the host has 2 cores and ~1 GB)
+          tar czf site.tar.gz dist/ server/ deploy/
+
+      - uses: docker/setup-buildx-action@v3
+
+      # modgrad-server + CLI (native) and the dashboard with its wasm, in one
+      # image; layers and the cargo cache mounts persist in the Actions cache
+      - name: Build app image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/obs/Containerfile
+          build-args: JOBS=4
+          tags: localhost/${{ env.APP_CONTAINER }}:${{ env.APP_SRC }}
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Save app image
+        run: docker save localhost/${{ env.APP_CONTAINER }}:${{ env.APP_SRC }} | gzip > app-image.tar.gz && ls -lh app-image.tar.gz
 
       - name: Upload site
         uses: appleboy/scp-action@v0.1.5
@@ -57,7 +74,7 @@ jobs:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_KEY }}
-          source: site.tar.gz
+          source: site.tar.gz,app-image.tar.gz
           target: /home/${{ secrets.DEPLOY_USER }}/
 
       - name: Deploy containers
@@ -72,8 +89,7 @@ jobs:
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_KEY }}
           envs: JMAP_URL,JMAP_USER,JMAP_PASS,APP_SRC
-          # a first (uncached) Rust image build takes a while on the host
-          command_timeout: 60m
+          command_timeout: 15m
           script: |
             set -e
             cd /home/${{ secrets.DEPLOY_USER }}
@@ -96,18 +112,16 @@ jobs:
             podman network exists ${{ env.NETWORK }} || podman network create ${{ env.NETWORK }}
 
             # ── modgrad-app: modgrad-server + the dashboard, at https://modgrad.com/app ──
-            # Built only when its sources changed (APP_SRC = hash of the trees that
-            # go into it); podman's layer cache and the cargo cache mounts in the
-            # Containerfile make a rebuild after a small change incremental.
+            # Built on the Actions runner and shipped as app-image.tar.gz, tagged
+            # with APP_SRC (a hash of the trees that go into it); loaded only when
+            # this host does not have that tag yet.
             : "${APP_SRC:?APP_SRC (the app source hash) was not passed}"
-            APP_IMAGE=${{ env.APP_CONTAINER }}:$APP_SRC
+            APP_IMAGE=localhost/${{ env.APP_CONTAINER }}:$APP_SRC
             if ! podman image exists "$APP_IMAGE"; then
-              nice podman build --layers \
-                -f modgrad-src/deploy/obs/Containerfile \
-                --build-arg JOBS=${{ env.APP_JOBS }} \
-                -t "$APP_IMAGE" -t ${{ env.APP_CONTAINER }}:latest \
-                modgrad-src
+              gunzip -c app-image.tar.gz | podman load
+              podman tag "$APP_IMAGE" localhost/${{ env.APP_CONTAINER }}:latest
             fi
+            rm -f app-image.tar.gz
             # accounts, sessions, tokens, runs, boards and the SSH host key; back it up
             podman volume exists ${{ env.APP_VOLUME }} || podman volume create ${{ env.APP_VOLUME }}
             podman stop ${{ env.APP_CONTAINER }} 2>/dev/null || true

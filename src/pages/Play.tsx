@@ -9,80 +9,32 @@ import {
 } from "solid-js";
 import { A } from "@solidjs/router";
 import { useDocMeta } from "@/lib/meta";
-import { MOVES, softmax, cssVar } from "@/play/viz";
+import { softmax, cssVar } from "@/play/viz";
 import { createBrain3D } from "@/play/viz/brain3d";
 import type { Camera } from "@/play/viz/brain3d";
 import { drawMaze as drawMazeModule } from "@/play/viz/maze";
-import type { MazeRenderState, MazeTheme } from "@/play/viz/maze";
-// NOTE: "what it sees" (the retina image) is rendered inside the 3D brain by
-// brain3d.ts's built-in vision pathway, so we don't draw a standalone sight
-// screen here. drawSightScreen() from viz/retina.ts is available if a dedicated
-// spot is wanted later.
+import type { MazeRenderState, MazeTheme, TickRoute, Cell } from "@/play/viz/maze";
 import SdkFeatures from "@/play/components/SdkFeatures";
 import RegionTelemetry from "@/play/components/RegionTelemetry";
-import type { RegionTel } from "@/play/components/RegionTelemetry";
-import PlasticityPanel from "@/play/components/PlasticityPanel";
 
 // ── types mirrored from the worker ────────────────────────────────
 type BrainTick = { acts: number[][]; global: number; exit: number | null };
 type BrainTrace = { ticks: BrainTick[]; ticksUsed: number };
 type RetinaMap = { name: string; channels: number; h: number; w: number; data: number[] };
-// NEW engine telemetry, mirrored from the worker (all optional, feature-detected)
-type WorkerRegionTelemetry = {
-  name?: string;
-  activity?: number;
-  neuromod?: number;
-  certainty?: number;
-};
-type BrainTelemetry = {
-  regions: WorkerRegionTelemetry[];
-  exitGate?: number;
-  certainty?: number;
-};
-type StepMsg = {
-  type: "step";
-  agent: [number, number];
-  move: number; // brain's predicted move 0..3 (4 = wait), drives the move bars
-  verdict: "ok" | "wall" | "astray" | "wait"; // brain prediction vs the maze
-  agreed: boolean; // did the brain match the optimal step?
-  moveLogits: number[]; // last tick's 4 direction logits, for the move bars
+/** One maze and everything the brain computed looking at it (see worker.ts). */
+type MazeMsg = {
+  type: "maze";
+  grid: number[];
+  start: Cell;
+  end: Cell;
+  shortest: Cell[]; // reference only — never shown to the brain
+  routes: TickRoute[]; // the brain's decoded route at each internal tick
+  agree: number; // steps of the final route that match the shortest route
+  firstSteps: number[][]; // per tick: first-step logits [U, D, L, R, wait]
   brain: BrainTrace | null;
   vision: RetinaMap[] | null;
-  attn: number[] | null; // per-cell retina saliency mapped to the maze
-  route: [number, number][]; // the brain's predicted route — its attention targets
-  done: boolean;
-  reached: boolean;
-  // NEW engine signals — present only when the engine exports them
-  telemetry?: BrainTelemetry;
-  plasticDelta?: number;
-  signal?: number;
-  loss?: number; // move-head cross-entropy vs the target move (the curve that drops)
-  lr?: number; // three-factor learning rate θ used this step
-  // episodic recall: nearest past situation by global-sync similarity
-  episodic?: {
-    recalled: boolean;
-    sim: number;
-    id: number;
-    size: number;
-    move: number;
-    verdict: string;
-    reached: boolean;
-  } | null;
-  // ── drive-mode / graded neuromodulation (Part A) ──
-  neuromod?: "dopamine" | "reward" | "disappointment" | "pain";
-  efficiency?: number; // live steps ÷ shortest (→1.0 as it learns)
-  efficiencyFinal?: number; // per-solve efficiency point (only on reached)
-  shortest?: number; // BFS shortest-path length from the episode start
-  stepsTaken?: number; // steps taken in this episode so far
-  vetoed?: boolean; // the self-driven move hit a wall/edge → vetoed + PAIN
-  lost?: boolean; // honest mode: episode exceeded budget without solving
-  died?: boolean; // the raw move stepped into a wall / off-board → fatal
-  deathCell?: number; // grid index of the death mark
 };
-
-// the three modular drive-modes (a UI toggle switches them live).
-type DriveMode = "easy" | "normal" | "hard" | "hardcore";
-// structure of the 8-region brain, read from brain_solver_reference.json
+// structure of the 8-region brain, read from the *_reference.json exports
 type BrainConn = { from: number[]; to: number; receives_observation: boolean };
 type BrainRef = {
   size: number;
@@ -92,49 +44,39 @@ type BrainRef = {
   regions: { name: string; d_model: number }[];
   connections: BrainConn[];
   n_global_sync: number;
-  heldout_first_move_acc: number;
-};
-type Maze = {
-  grid: number[];
-  start: [number, number];
-  end: [number, number];
-  path_length: number;
 };
 
 type Status = "loading" | "ready" | "error";
-type RunState = "idle" | "thinking" | "solved" | "stuck";
+type RunState = "idle" | "thinking";
 
-const BASE_TICK_MS = 95; // base pace of the "thinking" animation (at 1× speed)
-const SPEEDS = [0.5, 1, 2, 4, 8, 16] as const; // UI-selectable stepping-speed multipliers
-const MAX_STEPS = 260; // safety backstop. 11×11 paths can be long, and self-drive
-// wanders up to ~3× shortest before the worker nudges/loses — so give it room.
-// the board the worker runs on. MUST stay ODD (recursive-backtracker mazes need
-// an odd side). reference.size (=9) is kept only for the "trained on 9×9" copy.
-const PLAY_SIZE = 11;
-// Bump when the shipped model weights change, to bust the heuristic browser
-// cache on the non-content-hashed /models/*.json (the brain export with its
-// folded-in planner). Mirrors ENGINE_VER's role for the wasm.
+const TICK_MS = 160; // pace of the tick-by-tick reveal
+// The brain's retina is built for a fixed 9×9 image (see worker.ts), so the
+// demo runs 9×9 only.
+const SIZE = 9;
+// Bump when the shipped model weights change, to bust the browser cache on the
+// non-content-hashed /models/*.json.
 const MODEL_VER = "20260703-full-brain-training";
-// UP=0 DOWN=1 LEFT=2 RIGHT=3 — [dr, dc], matches the worker's DELTA
-const DIR_DELTA: [number, number][] = [
-  [-1, 0],
-  [1, 0],
-  [0, -1],
-  [0, 1],
-];
+const STEP_LABELS = ["Up", "Down", "Left", "Right", "Wait"] as const;
+
+// Measured offline (headless, the shipped wasm + weights, 200 random 9×9 mazes,
+// the brain's final-tick route from the start image, argmax per step).
+const MEASURED = {
+  n: 200,
+  firstStep: "199",
+  meanMatch: "4.3",
+  meanLen: "17.4",
+  fullyCorrect: "0",
+};
 
 // ── camera helpers (build to brain3d.ts's documented free-fly interface) ──
 // brain3d's view transform is  view = Rx(-pitch)·Ry(-yaw)·(p − pos), so the
 // camera forward (the world dir that maps to view +z) is
 //   fwd = Ry(yaw)·Rx(pitch)·(0,0,1) = ( sin(yaw)cos(pitch), −sin(pitch),
 //                                       cos(yaw)cos(pitch) ).
-// Windowed orbit reuses the old rotX/rotY/zoom by deriving an equivalent
-// free-fly camera that looks at `center` from `dist` along those angles.
-//
-// NOTE: brain3d.ts is slated to export its own orbitToCamera(); when it does,
-// swap this local copy for the import. Until then this keeps Play.tsx
-// independently type-clean against the documented Camera contract.
-const BRAIN_CENTER: [number, number, number] = [0, 0, 0];
+// Windowed orbit derives an equivalent free-fly camera that looks at `center`
+// from `dist` along those angles.
+// centre of the anatomical scene (brain + eyes + the image in front of them)
+const BRAIN_CENTER: [number, number, number] = [0.9, 0.6, 0];
 const ORBIT_DIST = 13; // distance the orbit camera sits from the brain centre
 const BASE_FOV_PX = 720 * 0.72; // matches the old fov = W*0.72*zoom feel at W≈720
 
@@ -145,8 +87,6 @@ function orbitToCamera(
   center: [number, number, number] = BRAIN_CENTER,
   dist: number = ORBIT_DIST,
 ): Camera {
-  // orbit angles → look direction. rotY = yaw (horizontal), rotX = pitch
-  // (vertical). The camera sits opposite its forward vector, `dist` out.
   const yaw = rotY;
   const pitch = rotX;
   const cp = Math.cos(pitch);
@@ -180,7 +120,7 @@ export default function Play() {
   useDocMeta(() => ({
     title: "Watch it think",
     description:
-      "A modgrad learned planner (Value Iteration Network) solving mazes in your browser. Trained on solved mazes, it's handed the decoded maze — open cells and the goal — and plans its own route by propagating value across the grid, with no solver at inference, generalizing to mazes bigger than it trained on. Runs client-side as the modgrad SDK itself, compiled to WebAssembly.",
+      "A small 8-region CTM brain looks at a maze image and predicts a 20-step route over its internal ticks, live in your browser. Nothing else plans or decides. It is early: it usually gets the first steps right and then drifts. Runs client-side as the modgrad SDK, compiled to WebAssembly.",
     path: "/play",
   }));
 
@@ -192,108 +132,56 @@ export default function Play() {
   const [status, setStatus] = createSignal<Status>("loading");
   const [errMsg, setErrMsg] = createSignal("");
   const [runState, setRunState] = createSignal<RunState>("idle");
-
-  const [currentMaze, setCurrentMaze] = createSignal<Maze | null>(null);
-  const [mazeNum, setMazeNum] = createSignal(0);
   const [generating, setGenerating] = createSignal(false);
-  const [agent, setAgent] = createSignal<[number, number]>([1, 1]);
-  const [visited, setVisited] = createSignal<[number, number][]>([[1, 1]]);
-  const [stepCount, setStepCount] = createSignal(0);
 
-  // the brain's per-tick animation cursor (drives the 3D viz reveal)
+  // the current maze and the brain's output for it
+  const [result, setResult] = createSignal<MazeMsg | null>(null);
+  const [mazeNum, setMazeNum] = createSignal(0);
+
+  // tick cursor: drives the maze route, the first-step bars and the 3D view
   const [tickIdx, setTickIdx] = createSignal(0);
   const [ticksTotal, setTicksTotal] = createSignal(0);
-  const [committedMove, setCommittedMove] = createSignal(-1);
-  const [moveLogits, setMoveLogits] = createSignal<number[]>([0, 0, 0, 0]);
+  // true once the user scrubs: the 3D view then holds the chosen tick instead
+  // of looping through the trace.
+  const [pinned, setPinned] = createSignal(false);
 
-  const [playing, setPlaying] = createSignal(false);
-
-  // ── 8-region brain (the solver) ──
   const [brainRef, setBrainRef] = createSignal<BrainRef | null>(null);
-  const [brainOn, setBrainOn] = createSignal(false); // brain wasm available
+  const [brainOn, setBrainOn] = createSignal(false);
   const [brainTrace, setBrainTrace] = createSignal<BrainTrace | null>(null);
-  // visual-cortex feature maps (retina/V1/V2/V4) for the current cell
   let visionMaps: RetinaMap[] | null = null; // read in the rAF loop, not reactive
-  let attnMap: number[] | null = null; // per-cell retina saliency, read in drawMaze
-  let routeCells: [number, number][] = []; // brain's predicted route (attention targets)
 
-  // the brain's verdict on its last prediction vs the optimal step, plus a
-  // running tally of how often it agreed — honest "it predicts, here's its score"
-  const [verdict, setVerdict] = createSignal<StepMsg["verdict"] | null>(null);
-  const [agreeCount, setAgreeCount] = createSignal(0);
-  const [moveCount, setMoveCount] = createSignal(0);
-  const [reachedNow, setReachedNow] = createSignal(false); // reached goal this step
-  // ── graveyard: no safeguards, so a wall step kills the agent. Death marks
-  // accumulate on the CURRENT maze (cleared when a fresh maze loads); the tolls
-  // run for the whole session. This is the honest scoreboard of where and how
-  // often the model actually fails.
-  const [deaths, setDeaths] = createSignal<number[]>([]); // cell indices, this maze
-  const [deathToll, setDeathToll] = createSignal(0); // session deaths
-  const [solveToll, setSolveToll] = createSignal(0); // session solves
-  const DEATHS_PER_MAZE = 25; // give up on a maze after this many deaths → next
+  // session tally over the mazes shown on this page
+  const [seen, setSeen] = createSignal(0);
+  const [firstRight, setFirstRight] = createSignal(0);
+  const [allRight, setAllRight] = createSignal(0);
+  const [matchSum, setMatchSum] = createSignal(0);
 
-  // ── NEW SDK-feature signals (all optional / feature-detected) ──
-  const [plasticityAvailable, setPlasticityAvailable] = createSignal(false);
-  const [telemetry, setTelemetry] = createSignal<BrainTelemetry | null>(null);
-  const [plasticDelta, setPlasticDelta] = createSignal(0);
-  const [signal, setSignal] = createSignal(0);
-  const [loss, setLoss] = createSignal<number | undefined>(undefined);
-  const [lr, setLr] = createSignal<number | undefined>(undefined);
-  const [episodic, setEpisodic] = createSignal<StepMsg["episodic"] | null>(null);
-
-  // ── drive-mode + graded neuromodulation + efficiency (Part A) ──
-  const [driveMode, setDriveMode] = createSignal<DriveMode>("normal");
-  // user-settable board size (odd). The retina is arbitrary-resolution + the VIN
-  // is size-agnostic, so this needs no retrain — just a fresh maze at that size.
-  const [mazeSize, setMazeSize] = createSignal<number>(PLAY_SIZE);
-  const MAZE_SIZES = [9, 11, 13, 15, 21] as const;
-  // Brain size-selector: four trained variants of the SAME 8-region brain at
-  // different cortical widths (16 / 32 / 64 / 128). All share the retina
-  // cortex and the folded grid-planner; only the CTM's neuron count — the
-  // "thinking" you watch — changes. Hot-swapped in the worker without a reload.
+  // Brain size selector: four trained variants of the same 8-region brain at
+  // different cortical widths, hot-swapped in the worker without a reload.
   const BRAIN_MODELS = [
-    { key: "c16", label: "16", file: "brain_small_weights.json", ref: "brain_small_reference.json", note: "cortex 16" },
-    { key: "c32", label: "32", file: "brain_solver_weights.json", ref: "brain_solver_reference.json", note: "cortex 32" },
-    { key: "c64", label: "64", file: "brain_large_weights.json", ref: "brain_large_reference.json", note: "cortex 64" },
-    { key: "c128", label: "128", file: "brain_xl_weights.json", ref: "brain_xl_reference.json", note: "cortex 128" },
+    { key: "c16", label: "16", file: "brain_small_weights.json", ref: "brain_small_reference.json" },
+    { key: "c32", label: "32", file: "brain_solver_weights.json", ref: "brain_solver_reference.json" },
+    { key: "c64", label: "64", file: "brain_large_weights.json", ref: "brain_large_reference.json" },
+    { key: "c128", label: "128", file: "brain_xl_weights.json", ref: "brain_xl_reference.json" },
   ] as const;
   type BrainModelKey = (typeof BRAIN_MODELS)[number]["key"];
   const [modelSize, setModelSize] = createSignal<BrainModelKey>("c32");
   const [modelSwitching, setModelSwitching] = createSignal(false);
-  // user-settable stepping speed: a multiplier on the base tick (higher = faster).
-  const [speed, setSpeed] = createSignal(1);
-  const tickMs = () => Math.round(BASE_TICK_MS / speed());
-  // the consolidated factual reference (opened from the 3D panel's "what am I
-  // seeing?" link). Keeps the live panels value-only; the prose lives here.
   const [infoOpen, setInfoOpen] = createSignal(false);
-  const [neuromod, setNeuromod] = createSignal<StepMsg["neuromod"]>(undefined);
-  const [efficiency, setEfficiency] = createSignal<number | undefined>(undefined);
-  const [efficiencyFinal, setEfficiencyFinal] = createSignal<number | undefined>(undefined);
-
-  // the board the maze + agent are drawn at — the worker runs on PLAY_SIZE (11),
-  // so the page must render at the same resolution (NOT reference.size=9).
-  let SIZE = PLAY_SIZE;
-
-  const maze = () => currentMaze();
 
   // ── worker plumbing ─────────────────────────────────────────────
   let worker: Worker | null = null;
-  let pendingStep = false; // a step request is in flight to the worker
-  let stepTimer: number | undefined;
-  let playTimer: number | undefined;
+  let tickTimer: number | undefined;
 
   onMount(async () => {
-    let reference: BrainRef;
     try {
-      const r = await fetch("/models/brain_solver_reference.json");
-      reference = await r.json();
+      const r = await fetch(`/models/brain_solver_reference.json?v=${MODEL_VER}`);
+      setBrainRef(await r.json()); // drives the 3D viz structure
     } catch (e) {
       setStatus("error");
       setErrMsg("Could not load the brain reference.");
       return;
     }
-    SIZE = PLAY_SIZE; // the worker runs on the 11×11 board (reference.size=9 is copy-only)
-    setBrainRef(reference); // also drives the 3D viz structure
 
     try {
       worker = new Worker(new URL("../play/worker.ts", import.meta.url), {
@@ -309,9 +197,12 @@ export default function Play() {
       const msg = ev.data;
       if (msg.type === "ready") {
         setBrainOn(!!msg.brain);
-        setPlasticityAvailable(!!msg.plastic);
+        if (!msg.brain) {
+          setStatus("error");
+          setErrMsg("This browser's engine build has no brain entry points.");
+          return;
+        }
         setStatus("ready");
-        // start on a fresh, brain-solvable maze so every visit is different
         requestNewMaze();
         return;
       }
@@ -322,69 +213,17 @@ export default function Play() {
       }
       if (msg.type === "brainReloaded") {
         setModelSwitching(false);
-        // resume on a fresh maze so the newly-sized brain starts clean
         if (msg.ok) requestNewMaze();
         return;
       }
-      if (msg.type === "maze") {
-        batch(() => {
-          setGenerating(false);
-          setMazeNum((n) => n + 1);
-          if (typeof msg.sleepPressure === "number")
-            setSleepPressure(msg.sleepPressure);
-        });
-        loadMaze(msg as Maze);
-        // while asleep, hold playback: the maze is loaded but the agent rests
-        // (brain keeps dreaming). The sleep timer resumes it.
-        if (!reduced && !sleepingNow) startPlaying();
-        return;
-      }
-      if (msg.type === "slept") {
-        setSleepPressure(0);
-        const gap = (msg.lossBefore ?? 0) - (msg.lossAfter ?? 0);
-        setSleeping({
-          replays: msg.replays ?? 0,
-          bookmarks: msg.bookmarks ?? 0,
-          nightmares: msg.nightmares ?? 0,
-          lossBefore: msg.lossBefore ?? 0,
-          lossAfter: msg.lossAfter ?? 0,
-        });
-        // persistent record so a nap is observable after the flash fades
-        setNapCount((n) => n + 1);
-        setLastNapGap(gap);
-        // ── rest the agent while it consolidates ──
-        // Pause any in-flight playback so it doesn't solve the next maze over
-        // the SLEEPING flash; the brain's idle replay keeps spiking = dreaming.
-        sleepingNow = true;
-        clearTimeout(playTimer);
-        clearTimeout(stepTimer);
-        setRunState("idle");
-        if (sleepTimer) clearTimeout(sleepTimer);
-        sleepTimer = setTimeout(() => {
-          setSleeping(null);
-          sleepingNow = false;
-          // wake up: resume on the maze that loaded during the nap
-          if (!reduced && maze()) startPlaying();
-        }, SLEEP_PAUSE_MS);
-        return;
-      }
-      if (msg.type === "step") onStepResult(msg as StepMsg);
+      if (msg.type === "maze") onMaze(msg as MazeMsg);
     };
 
     try {
-      // The ~9MB brain weights are the demo's source — the brain IS the solver,
-      // and since the fold the export carries its own hippocampus planner (no
-      // separate VIN file). ?v= busts any stale heuristic cache on this
-      // non-content-hashed .json whenever the weights change.
       const br = await fetch(`/models/brain_solver_weights.json?v=${MODEL_VER}`).then((r) =>
         r.text(),
       );
-      worker.postMessage({
-        type: "init",
-        brainWeights: br,
-        size: PLAY_SIZE, // run on the 11×11 board (the engine retina is arbitrary-res)
-        mode: driveMode(), // the starting drive-mode (switchable live via setMode)
-      });
+      worker.postMessage({ type: "init", brainWeights: br });
     } catch (e) {
       setStatus("error");
       setErrMsg("Could not load the trained brain weights.");
@@ -393,8 +232,7 @@ export default function Play() {
 
   onCleanup(() => {
     worker?.terminate();
-    clearTimeout(stepTimer);
-    clearTimeout(playTimer);
+    clearTimeout(tickTimer);
     brainCanvas?.removeEventListener("wheel", brainWheel);
     brainIO?.disconnect();
     // free-fly / fullscreen teardown (idempotent — safe if never entered)
@@ -407,297 +245,127 @@ export default function Play() {
     if (document.pointerLockElement) document.exitPointerLock?.();
   });
 
-  // ── solve loop ──────────────────────────────────────────────────
-  function loadMaze(m: Maze) {
-    // the worker may have changed the board size — follow it from the grid so the
-    // canvas always draws at the maze's true dimensions.
-    SIZE = Math.round(Math.sqrt(m.grid.length)) || SIZE;
+  // ── one maze, one look ──────────────────────────────────────────
+  function requestNewMaze() {
+    if (!worker || status() !== "ready") return;
+    clearTimeout(tickTimer);
+    setGenerating(true);
+    worker.postMessage({ type: "newMaze" });
+  }
+
+  function onMaze(msg: MazeMsg) {
+    visionMaps = msg.vision;
+    const n = msg.routes.length;
+    const final = msg.routes[n - 1];
+    const correct =
+      !!final && final.end === "goal" && msg.agree === msg.shortest.length;
     batch(() => {
-      setCurrentMaze(m);
-      setAgent([m.start[0], m.start[1]]);
-      setVisited([[m.start[0], m.start[1]]]);
-      setDeaths([]); // fresh maze → fresh graveyard (session tolls persist)
-      setStepCount(0);
-      setBrainTrace(null);
-      setTickIdx(0);
-      setTicksTotal(0);
-      setCommittedMove(-1);
-      setMoveLogits([0, 0, 0, 0]);
+      setGenerating(false);
+      setMazeNum((k) => k + 1);
+      setResult(msg);
+      setBrainTrace(msg.brain);
+      setTicksTotal(n);
+      setPinned(false);
+      setSeen((k) => k + 1);
+      if (msg.agree >= 1) setFirstRight((k) => k + 1);
+      if (correct) setAllRight((k) => k + 1);
+      setMatchSum((k) => k + msg.agree);
+    });
+    playTicks();
+  }
+
+  // reveal the brain's ticks one by one, then hold the final tick
+  function playTicks() {
+    clearTimeout(tickTimer);
+    const n = ticksTotal();
+    setPinned(false);
+    if (reduced || n <= 1) {
+      setTickIdx(Math.max(0, n - 1));
       setRunState("idle");
-      // clear the per-step NEW signals on a fresh maze (keep plasticity stats —
-      // those live inside PlasticityPanel and survive Restart / New maze)
-      setReachedNow(false);
-      setTelemetry(null);
-      setPlasticDelta(0);
-      setSignal(0);
-      setEpisodic(null);
-      setNeuromod(undefined);
-      setEfficiency(undefined);
+      return;
+    }
+    setRunState("thinking");
+    const step = (i: number) => {
+      setTickIdx(i);
+      if (i >= n - 1) {
+        setRunState("idle");
+        return;
+      }
+      tickTimer = window.setTimeout(() => step(i + 1), TICK_MS);
+    };
+    step(0);
+  }
+
+  function scrubTo(i: number) {
+    clearTimeout(tickTimer);
+    batch(() => {
+      setRunState("idle");
+      setPinned(true);
+      setTickIdx(Math.max(0, Math.min(ticksTotal() - 1, i)));
     });
   }
 
-  // ── drive-mode (Part A) ──
-  // Switch how the agent decides its next move, live (no reload): tell the
-  // worker, which flips a single parameter gating the decided move + completion.
-  function changeMode(mode: DriveMode) {
-    if (mode === driveMode()) return;
-    setDriveMode(mode);
-    worker?.postMessage({ type: "setMode", mode });
-  }
-  // one-line description of the active mode, for the toggle caption.
-  const modeDesc = (): string => {
-    switch (driveMode()) {
-      case "easy":
-        return "The learned planner with a generous bio-escape: a frustration signal heats exploration and a per-cell bias adapts to break out of loops. Effectively always finishes.";
-      case "normal":
-        return "The learned planner with the standard bio-escape — plasticity + neuromodulator help it out of the occasional loop. Mostly finishes.";
-      case "hard":
-        return "Tighter budget and only a faint escape. On a tricky maze it can run out of moves and fail. Closer to the planner on its own.";
-      case "hardcore":
-        return "The raw frozen planner — no plastic bias, no neuromodulator. It plans purely from the maze image and can get stuck and fail. The honest \"how good is it really\".";
-    }
-  };
-
-  // ── board size (live) ──
-  // Resize the maze with no reload / no retrain — the worker resizes its buffers
-  // and hands back a fresh maze at the new size; loadMaze follows the dimensions.
-  function changeSize(size: number) {
-    if (size === mazeSize() || status() !== "ready") return;
-    setMazeSize(size);
-    pause();
-    setGenerating(true);
-    worker?.postMessage({ type: "setSize", size });
-  }
-
-  // Hot-swap the trained brain size. Fetches the variant's {cortex, regional}
-  // export and hands it to the worker, which re-deserialises it in place (the
-  // folded planner rides along). No engine teardown, no maze reset.
+  // Hot-swap the trained brain size: fetch the variant's export + reference and
+  // hand the weights to the worker, which reloads them in place.
   async function changeModel(key: BrainModelKey) {
     if (key === modelSize() || status() !== "ready" || modelSwitching()) return;
     const m = BRAIN_MODELS.find((b) => b.key === key);
     if (!m || !worker) return;
     setModelSwitching(true);
     setModelSize(key);
-    pause();
+    clearTimeout(tickTimer);
     try {
-      // Swap the reference too — region widths and the accuracy differ per
-      // size, and brainRef drives the 3D viz structure + the accuracy readout.
       const [br, ref] = await Promise.all([
         fetch(`/models/${m.file}?v=${MODEL_VER}`).then((r) => r.text()),
         fetch(`/models/${m.ref}?v=${MODEL_VER}`).then((r) => r.json() as Promise<BrainRef>),
       ]);
       setBrainRef(ref);
+      // a different brain → start the session tally over
+      batch(() => {
+        setSeen(0);
+        setFirstRight(0);
+        setAllRight(0);
+        setMatchSum(0);
+      });
       worker.postMessage({ type: "reloadBrain", brainWeights: br });
     } catch (e) {
       setModelSwitching(false);
     }
   }
 
-  // ask the worker to invent a fresh maze the brain can actually solve
-  function requestNewMaze() {
-    if (!worker || status() !== "ready") return;
-    pause();
-    setGenerating(true);
-    worker.postMessage({ type: "newMaze" });
-  }
-
-  // ask the worker to think about the current cell
-  function requestStep() {
-    const m = maze();
-    if (!m || !worker || pendingStep) return;
-    if (stepCount() >= MAX_STEPS) {
-      setRunState("stuck");
-      setPlaying(false);
-      return;
-    }
-    pendingStep = true;
-    setRunState("thinking");
-    // At the high speed tiers (≥8×) skip the heavy per-step brain-viz + retina
-    // forward (the 9MB 8-region brain run that drives the 3D "thinking" panels)
-    // and step on the lightweight planner alone — the agent's move comes from the
-    // VIN regardless, so navigation is unchanged; only the per-step visualisation
-    // pauses while you race. The 3D brain holds its last frame until you slow down.
-    worker.postMessage({
-      type: "step",
-      grid: m.grid,
-      agent: agent(),
-      goal: maze()!.end,
-      viz: speed() < 8,
-    });
-  }
-
-  // the worker returns the brain's full per-tick trace for one move; animate
-  // through the ticks, then commit the brain's chosen move.
-  function onStepResult(msg: StepMsg) {
-    pendingStep = false;
-    const nTicks = msg.brain?.ticks.length ?? 0;
-    visionMaps = msg.vision;
-    attnMap = msg.attn;
-    routeCells = msg.route ?? [];
-    batch(() => {
-      setBrainTrace(msg.brain);
-      setTicksTotal(nTicks);
-      setCommittedMove(msg.move);
-      setMoveLogits(msg.moveLogits);
-      setVerdict(msg.verdict);
-      setMoveCount((n) => n + 1);
-      if (msg.agreed) setAgreeCount((n) => n + 1);
-      setTickIdx(0);
-      // NEW engine signals — feature-detected, degrade gracefully when absent
-      setReachedNow(!!msg.reached);
-      setTelemetry(msg.telemetry ?? null);
-      setPlasticDelta(msg.plasticDelta ?? 0);
-      setSignal(msg.signal ?? 0);
-      setLoss(msg.loss);
-      setLr(msg.lr);
-      setEpisodic(msg.episodic ?? null);
-      // drive-mode signals (Part A) — graded tier + efficiency (live + per-solve)
-      setNeuromod(msg.neuromod);
-      setEfficiency(msg.efficiency);
-      if (msg.efficiencyFinal != null) setEfficiencyFinal(msg.efficiencyFinal);
-    });
-
-    if (reduced || nTicks === 0) {
-      // no animation: jump to the last tick, then apply the move
-      setTickIdx(Math.max(0, nTicks - 1));
-      applyMove(msg);
-      return;
-    }
-    animateTicks(0, msg);
-  }
-
-  function animateTicks(i: number, msg: StepMsg) {
-    setTickIdx(i);
-    const total = msg.brain?.ticks.length ?? 0;
-    if (i >= total - 1) {
-      // finished the thinking animation → commit
-      stepTimer = window.setTimeout(() => applyMove(msg), tickMs() * 2.4);
-      return;
-    }
-    stepTimer = window.setTimeout(() => animateTicks(i + 1, msg), tickMs());
-  }
-
-  function applyMove(msg: StepMsg) {
-    batch(() => {
-      setAgent(msg.agent);
-      setVisited((v) => [...v, msg.agent]);
-      setStepCount((s) => s + 1);
-    });
-
-    // DEATH: the raw move walked into a wall / off the board. No crutch caught
-    // it. Leave a death mark, tally it, and — if the maze isn't a hopeless
-    // graveyard yet — respawn at the start and let it try again (it samples its
-    // own move distribution, so each life takes a different, possibly-fatal
-    // route). Handle this BEFORE `lost`, since a death also sets lost.
-    if (msg.died) {
-      const cell = msg.deathCell;
-      batch(() => {
-        if (cell != null) setDeaths((d) => [...d, cell]);
-        setDeathToll((n) => n + 1);
-        setRunState("stuck");
-      });
-      const m = currentMaze();
-      const tooMany = deaths().length >= DEATHS_PER_MAZE;
-      if (playing() && m && !tooMany) {
-        // respawn at the maze start, same maze, marks intact
-        batch(() => {
-          setAgent([m.start[0], m.start[1]]);
-          setVisited([[m.start[0], m.start[1]]]);
-        });
-        // the worker already nulled its episode on death → respawn gets a fresh
-        // budget automatically; just step again from the start.
-        playTimer = window.setTimeout(() => requestStep(), tickMs() * 6);
-      } else if (playing() && m && tooMany) {
-        playTimer = window.setTimeout(() => requestNewMaze(), tickMs() * 8);
-      } else {
-        setPlaying(false);
-      }
-      return;
-    }
-
-    if (msg.reached) {
-      const looping = playing();
-      setRunState("solved");
-      setSolveToll((n) => n + 1);
-      // perpetual demo: reached the goal → pause to celebrate, then a fresh maze
-      if (looping) {
-        playTimer = window.setTimeout(() => requestNewMaze(), tickMs() * 14);
-      } else {
-        setPlaying(false);
-      }
-      return;
-    }
-    // honest mode: the episode gave up (over budget, no nudge) → mark it lost and
-    // move on to a fresh maze. Solve-rate climbs as the move-head learns.
-    if (msg.lost || msg.done) {
-      const looping = playing();
-      setRunState("stuck");
-      if (looping) {
-        playTimer = window.setTimeout(() => requestNewMaze(), tickMs() * 8);
-      } else {
-        setPlaying(false);
-      }
-      return;
-    }
-    // continue to the next cell if still auto-playing
-    if (playing()) {
-      playTimer = window.setTimeout(() => requestStep(), tickMs() * 3);
-    } else {
-      setRunState("idle");
-    }
-  }
-
-  // ── controls ────────────────────────────────────────────────────
-  function startPlaying() {
-    if (status() !== "ready") return;
-    if (runState() === "solved" || runState() === "stuck") restart();
-    setPlaying(true);
-    requestStep();
-  }
-  function pause() {
-    setPlaying(false);
-    clearTimeout(stepTimer);
-    clearTimeout(playTimer);
-    if (runState() === "thinking") setRunState("idle");
-  }
-  function togglePlay() {
-    playing() ? pause() : startPlaying();
-  }
-  // single manual think+move (used as "Step")
-  function stepOnce() {
-    if (status() !== "ready" || pendingStep) return;
-    if (runState() === "solved" || runState() === "stuck") return;
-    setPlaying(false);
-    requestStep();
-  }
-  function restart() {
-    pause();
-    const m = currentMaze();
-    if (m) loadMaze(m);
-  }
-  function newMaze() {
-    requestNewMaze();
-  }
-  // revert the live-plastic readout to the frozen weights (worker no-ops on old engine)
-  function resetPlasticity() {
-    worker?.postMessage({ type: "resetPlasticity" });
-    batch(() => {
-      setPlasticDelta(0);
-      setSignal(0);
-      // back to square one: clear the sleep/consolidation record too
-      setSleepPressure(0);
-      setNapCount(0);
-      setLastNapGap(0);
-    });
-  }
-
   // ── derived display values ──────────────────────────────────────
-  // the brain's move distribution over the 4 directions (last tick's logits)
-  const moveProbs = (): number[] => {
-    const l = moveLogits();
-    return l.length === 4 && l.some((v) => v !== 0)
-      ? softmax(l)
-      : [0.25, 0.25, 0.25, 0.25];
+  // first-step distribution [U, D, L, R, wait] at the tick on screen
+  const stepProbs = (): number[] => {
+    const fs = result()?.firstSteps[tickIdx()];
+    return fs && fs.length === 5 ? softmax(fs) : [0, 0, 0, 0, 0];
+  };
+  const stepArgmax = (): number => {
+    const p = stepProbs();
+    let b = 0;
+    for (let i = 1; i < p.length; i++) if (p[i] > p[b]) b = i;
+    return b;
+  };
+  // the shortest route's first step, as a direction index (reference)
+  const trueFirst = (): number => {
+    const r = result();
+    if (!r || !r.shortest.length) return -1;
+    const dr = r.shortest[0][0] - r.start[0];
+    const dc = r.shortest[0][1] - r.start[1];
+    return dr === -1 ? 0 : dr === 1 ? 1 : dc === -1 ? 2 : 3;
+  };
+  const routeAt = (): TickRoute | null => result()?.routes[tickIdx()] ?? null;
+  // how the final prediction ends, in words
+  const outcome = (): string => {
+    const r = result();
+    if (!r || !r.routes.length) return "";
+    const fin = r.routes[r.routes.length - 1];
+    const L = r.shortest.length;
+    if (fin.end === "goal" && r.agree === L) return `reaches the goal along the shortest route (${L} steps)`;
+    const where = `matches the shortest route for ${r.agree} of ${L} steps`;
+    if (fin.end === "wall") return `${where}, then predicts a step into a wall`;
+    if (fin.end === "wait") return `${where}, then stops (wait)`;
+    if (fin.end === "goal") return `${where}, reaches the goal by another way`;
+    return `${where}, then runs out of predicted steps`;
   };
 
   // ════════════════════════════════════════════════════════════════
@@ -719,48 +387,32 @@ export default function Play() {
     return ctx;
   }
 
-  // ── maze + agent + trail + attention overlay (delegated to viz/maze.ts) ──
+  // ── maze + shortest route + the brain's predicted route (viz/maze.ts) ──
   // The caller owns DPR + clear (ctxOf); the maze module draws everything pure
-  // from the snapshot we hand it. Theme colours are resolved from CSS vars so it
-  // tracks the paper / dark theme.
+  // from the snapshot we hand it. Theme colours come from CSS vars so it tracks
+  // the paper / dark theme.
   function drawMaze() {
-    const m = maze();
-    if (!m || !mazeCanvas) return;
+    const r = result();
+    if (!r || !mazeCanvas) return;
     const W = mazeCanvas.clientWidth || 360;
-    const H = W; // square
-    const ctx = ctxOf(mazeCanvas, W, H);
-
+    const ctx = ctxOf(mazeCanvas, W, W);
     const theme: MazeTheme = {
       wall: cssVar("--text", "#1B1822"),
       open: cssVar("--bg-card", "#fff"),
       line: cssVar("--line-2", "#D8D2C3"),
+      mute: cssVar("--text-mute", "#6A6676"),
       accent: cssVar("--accent", "#6243D9"),
     };
     const state: MazeRenderState = {
-      agent: agent(),
-      visited: visited(),
-      attn: attnMap,
-      route: routeCells,
-      verdict: verdict(),
-      committedMove: committedMove(),
-      thinking: runState() === "thinking",
+      shortest: r.shortest,
+      routes: r.routes,
       tick: tickIdx(),
-      ticksTotal: ticksTotal(),
-      sleeping: !!sleeping(),
-      deaths: deaths(),
+      agree: r.agree,
     };
-    drawMazeModule(
-      ctx,
-      W,
-      H,
-      { grid: m.grid, start: m.start, end: m.end },
-      SIZE,
-      state,
-      theme,
-    );
+    drawMazeModule(ctx, W, W, { grid: r.grid, start: r.start, end: r.end }, SIZE, state, theme);
   }
 
-  // ── the 8-region brain as a rotating 3D particle cloud (the solver) ──
+  // ── the 8-region brain as a rotating 3D particle cloud ──
   // Mirrors the modgrad debugger's 3D brain (debugger/src/main.rs): each neuron
   // is a point, clustered by region and coloured by region; brightness + size =
   // its activation, so individual neurons spike as the brain thinks. Hand-rolled
@@ -786,9 +438,10 @@ export default function Play() {
   // each frame. setRef() installs the structure once brainRef() loads.
   const brain3d = createBrain3D({ regionColors: REGION_COLORS });
 
-  let brainRotY = 0.7;
-  let brainRotX = -0.32;
-  let brainZoom = 0.66; // wheel / pinch zoom — start zoomed OUT so the whole brain
+  // three-quarter view from front-left, slightly above (+x = face, −x = occipital)
+  let brainRotY = -0.75;
+  let brainRotX = 0.22;
+  let brainZoom = 0.8; // wheel / pinch zoom — start zoomed OUT so the whole brain
   // is in frame (people fullscreen + scroll in to see more)
   let brainDragging = false;
   let brainPointers = new Map<number, { x: number; y: number }>(); // active pointers (pinch)
@@ -796,27 +449,6 @@ export default function Play() {
   const [brainAutoRotate, setBrainAutoRotate] = createSignal(true);
   // co-spike line persistence: 0 = instant, 1 = long trail (per-frame decay)
   const [spikeHold, setSpikeHold] = createSignal(0.55);
-  // sleep/consolidation flash: set when the worker reports a dream pass, cleared
-  // after a couple seconds. Drives the SLEEPING overlay on the 3D brain.
-  const [sleeping, setSleeping] = createSignal<{
-    replays: number;
-    bookmarks: number;
-    nightmares: number;
-    lossBefore: number;
-    lossAfter: number;
-  } | null>(null);
-  let sleepTimer: ReturnType<typeof setTimeout> | undefined;
-  // while true the agent rests: the next maze is loaded but playback is held so
-  // it visibly sleeps (the brain keeps dreaming) instead of solving over itself.
-  let sleepingNow = false;
-  const SLEEP_PAUSE_MS = 3400;
-  // homeostatic sleep pressure (0..1), reported by the worker each maze. Rises
-  // with surprise/wall-hits and discharges to 0 when a consolidation pass fires.
-  const [sleepPressure, setSleepPressure] = createSignal(0);
-  // persistent nap log — survives the brief SLEEPING flash so a consolidation
-  // pass stays observable: how many times it has slept and the last gain.
-  const [napCount, setNapCount] = createSignal(0);
-  const [lastNapGap, setLastNapGap] = createSignal(0);
   let brainTime = 0; // seconds, advanced by the rAF loop for the idle shimmer
   let brainReplay = 0; // fractional tick index; loops the trace so neurons keep
   // spiking between steps instead of freezing on the last tick.
@@ -845,22 +477,21 @@ export default function Play() {
   const FLY_SPEED = 6; // world units / second (the brain spans ~10 units)
   let brainContainer: HTMLDivElement | undefined; // fullscreen target (wraps canvas)
 
-  // brain tick aligned to the current animation tick (held at the last brain
-  // tick if the brain exited earlier than the solver's tick count).
+  // brain tick aligned to the tick cursor (held at the last brain tick).
   const curBrainTick = (): BrainTick | null => {
     const bt = brainTrace();
     if (!bt || bt.ticks.length === 0) return null;
     return bt.ticks[Math.min(tickIdx(), bt.ticks.length - 1)];
   };
 
-  // Tick shown in the 3D cloud. While a step animates it follows the live tick;
-  // when idle it REPLAYS the trace's ticks on a loop (brainReplay), so the
-  // neurons keep spiking instead of holding a single frozen frame.
+  // Tick shown in the 3D cloud. While the ticks are revealed, or when the user
+  // has scrubbed to a tick, it follows the cursor; otherwise it REPLAYS the
+  // trace on a loop (brainReplay) so the neurons keep moving.
   const displayBrainTick = (): BrainTick | null => {
     const bt = brainTrace();
     if (!bt || bt.ticks.length === 0) return null;
     const idx =
-      runState() === "thinking"
+      runState() === "thinking" || pinned()
         ? Math.min(tickIdx(), bt.ticks.length - 1)
         : Math.floor(brainReplay) % bt.ticks.length;
     return bt.ticks[idx];
@@ -882,7 +513,15 @@ export default function Play() {
       : Math.round(Math.max(340, Math.min(520, W * 0.6)));
     const ctx = ctxOf(brainCanvas, W, H);
     // windowed = orbit-derived camera; fullscreen = the live free-fly camera.
-    if (!fs) camera = orbitToCamera(brainRotX, brainRotY, brainZoom, BRAIN_CENTER);
+    // On narrow (phone-width) canvases scale the pixel focal length down so the
+    // whole head — eyes in front, occipital pole behind — stays in frame.
+    if (!fs)
+      camera = orbitToCamera(
+        brainRotX,
+        brainRotY,
+        brainZoom * Math.min(1, W / 500),
+        BRAIN_CENTER,
+      );
     brain3d.draw(ctx, W, H, {
       tick: displayBrainTick(),
       vision: visionMaps,
@@ -903,49 +542,17 @@ export default function Play() {
     return Math.min(1, t.global / gmax);
   };
 
-  // ── NEW-engine telemetry → RegionTel[] adapter ──
-  // The worker emits per-region {name, activity, neuromod, certainty}; the
-  // RegionTelemetry / SdkFeatures components want {name, rms, peak, dopamine?,
-  // pain?}. We map what's present (activity→rms/peak, neuromod sign→dopamine /
-  // pain) and otherwise leave it absent so the component falls back to the tick
-  // acts it always has. Returns undefined when the engine emits no telemetry.
-  const regionTel = (): RegionTel[] | undefined => {
-    const tel = telemetry();
-    if (!tel || !tel.regions.length) return undefined;
-    return tel.regions.map((r, i) => {
-      const name = r.name ?? brainRef()?.regions[i]?.name ?? `r${i}`;
-      const act = r.activity ?? 0;
-      const out: RegionTel = { name, rms: act, peak: act };
-      if (typeof r.neuromod === "number") {
-        if (r.neuromod >= 0) out.dopamine = r.neuromod;
-        else out.pain = -r.neuromod;
-      }
-      return out;
-    });
-  };
+  // the brain's outer exit-gate λ at the current tick, if it has one
+  const exitLambda = (): number | null => curBrainTick()?.exit ?? null;
 
-  // the brain's adaptive-compute exit gate λ for the current step (NEW engine's
-  // outer exit gate if present, else the per-tick CTM exit scalar).
-  const exitLambda = (): number | null => {
-    const eg = telemetry()?.exitGate;
-    if (typeof eg === "number") return eg;
-    const e = curBrainTick()?.exit;
-    return e ?? null;
-  };
-
-  // ticks the CTM actually ran this step (the trace length / ticksUsed).
-  const ticksUsed = (): number =>
-    brainTrace()?.ticksUsed ?? ticksTotal();
+  // ticks the CTM actually ran (the trace length / ticksUsed).
+  const ticksUsed = (): number => brainTrace()?.ticksUsed ?? ticksTotal();
 
   // assembled feature-state for <SdkFeatures> — every field a real signal.
   const sdkFeatureState = () => ({
     ticksUsed: ticksUsed(),
     exitLambda: exitLambda(),
-    visionActive: !!(visionMaps && visionMaps.length),
-    plasticDelta: plasticDelta(),
-    signal: signal(),
-    telemetry: regionTel(),
-    episodic: episodic(),
+    visionActive: !!(brainTrace() && visionMaps && visionMaps.length),
   });
 
   // ── mouse / touch orbit + zoom on the brain ──
@@ -1133,14 +740,8 @@ export default function Play() {
 
   // redraw whenever the relevant signals change
   createEffect(() => {
-    // dependencies: maze, agent, visited, tick, runState, sleeping
-    currentMaze();
-    agent();
-    visited();
+    result();
     tickIdx();
-    runState();
-    sleeping();
-    deaths();
     drawMaze();
   });
   // hand the brain structure to the 3D renderer whenever it loads/changes
@@ -1232,17 +833,31 @@ export default function Play() {
 
   // ── status line copy ──
   const statusLabel = () => {
-    if (generating()) return "new maze…";
-    switch (runState()) {
-      case "thinking":
-        return "thinking…";
-      case "solved":
-        return "solved";
-      case "stuck":
-        return "stopped";
-      default:
-        return "ready";
-    }
+    if (status() === "loading") return "loading…";
+    if (generating() || modelSwitching()) return "new maze…";
+    return runState() === "thinking" ? "thinking…" : "done";
+  };
+
+  // per-region rms at the current tick, for the fullscreen HUD
+  const regionRows = () => {
+    const names = brainRef()?.region_names ?? [];
+    return names.map((nm, i) => {
+      const acts = curBrainTick()?.acts?.[i] ?? [];
+      const rms = acts.length ? Math.sqrt(acts.reduce((a, v) => a + v * v, 0) / acts.length) : 0;
+      return { name: nm, rms, idx: i };
+    });
+  };
+
+  const pct = (a: number, b: number) => (b > 0 ? Math.round((a / b) * 100) : 0);
+
+  const segBtn = (active: boolean) => ({
+    background: active ? "var(--accent)" : "transparent",
+    color: active ? "#fff" : "var(--text-mute)",
+  });
+  const hudBtn = {
+    background: "rgba(255,255,255,0.08)",
+    color: "rgba(255,255,255,0.75)",
+    "backdrop-filter": "blur(4px)",
   };
 
   return (
@@ -1282,22 +897,20 @@ export default function Play() {
           Watch it <span class="grad-text">think.</span>
         </h1>
         <p class="mt-5 text-dim text-[1.05rem] max-w-[60ch] leading-relaxed">
-          A real modgrad{" "}
-          <span class="grad-text">learned planner</span> solving mazes live in
-          your browser. A Value Iteration Network, trained on solved mazes, is
-          handed the decoded maze — which cells are open and where the goal sits —
-          and plans its own route with{" "}
-          <span class="grad-text">no solver at inference</span>. And it isn't one
-          module: the planning is{" "}
-          <span class="grad-text">distributed across the brain's regions</span> —
-          the <strong>basal ganglia</strong> value each cell (dopamine =
-          reward-prediction error), the <strong>hippocampus</strong> replays that
-          value across its cognitive map (the value-iteration sweep), and{" "}
-          <strong>motor</strong> reads the move out ego-centrically at the agent's
-          own cell. It generalizes to mazes bigger than it ever trained on — the
-          modgrad SDK's own code (the{" "}
-          <code class="text-[0.85em]">modgrad-ctm</code> crate), compiled to
-          WebAssembly.
+          A small modgrad brain — eight Continuous Thought Machine regions behind
+          a retina — looks at a maze image and predicts a route to the goal over
+          its internal ticks. Nothing else plans or decides: the line on the maze
+          is the brain's own output, shown tick by tick, next to the true
+          shortest route for reference.
+        </p>
+        <p class="mt-3 text-dim text-[1.05rem] max-w-[60ch] leading-relaxed">
+          It is early work. It usually gets the first steps right and then
+          drifts: on {MEASURED.n} random 9×9 mazes the default brain's first
+          step was right in {MEASURED.firstStep}, its route matched the shortest
+          route for {MEASURED.meanMatch} of about {MEASURED.meanLen} steps on
+          average, and {MEASURED.fullyCorrect} of {MEASURED.n} routes were
+          correct all the way to the goal. It runs as the modgrad SDK's own code,
+          compiled to WebAssembly, on your device.
         </p>
         <div class="mt-4 flex flex-wrap gap-x-5 gap-y-1 text-sm">
           <A href="/docs/brain-composition" class="text-accent">
@@ -1317,36 +930,29 @@ export default function Play() {
         </div>
       </Show>
 
-      {/* ── solver (the maze) + brain, side by side, one view ───── */}
+      {/* ── maze + brain, side by side ───── */}
       <div class="grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1.12fr)] gap-5 mt-8 items-start">
-        {/* LEFT: maze hero + controls + move bars */}
+        {/* LEFT: maze + controls + first-step bars */}
         <div class="flex flex-col gap-5">
           <div class="card relative">
             <div class="flex items-center justify-between mb-3">
               <div class="eyebrow">The maze</div>
-              <Show when={status() === "ready" || status() === "loading"}>
-                <span
-                  class="tag"
-                  classList={{
-                    "tag-live": runState() === "solved",
-                    "tag-wip": runState() === "thinking" || generating(),
-                  }}
-                >
-                  {statusLabel()}
-                </span>
-              </Show>
+              <span
+                class="tag"
+                classList={{
+                  "tag-wip": runState() === "thinking" || generating() || status() === "loading",
+                }}
+              >
+                {statusLabel()}
+              </span>
             </div>
 
-            {/* graveyard scoreboard — no safeguards: a wall step is fatal, and
-                every death leaves a mark. This is the honest tally of the raw
-                planner's competence. */}
-            <div class="flex items-center gap-4 mb-3 font-mono text-sm">
-              <span style={{ color: "rgb(220,38,38)" }}>
-                ✗ {deathToll()} deaths
+            <div class="flex items-baseline justify-between gap-3 mb-3 font-mono text-xs text-mute tabular-nums">
+              <span>
+                maze #{Math.max(1, mazeNum())} · tick {ticksTotal() ? tickIdx() + 1 : 0}/{ticksTotal()}
               </span>
-              <span class="text-dim">✓ {solveToll()} solved</span>
-              <Show when={deaths().length > 0}>
-                <span class="text-dim">· {deaths().length} on this maze</span>
+              <Show when={routeAt()}>
+                <span>{routeAt()!.cells.length} predicted steps</span>
               </Show>
             </div>
 
@@ -1355,7 +961,7 @@ export default function Play() {
               <canvas
                 ref={mazeCanvas}
                 class="absolute inset-0 w-full h-full"
-                aria-label="maze the brain is solving"
+                aria-label="the maze, with the brain's predicted route and the shortest route"
               />
               <Show when={status() === "loading"}>
                 <div
@@ -1397,27 +1003,48 @@ export default function Play() {
               </Show>
             </div>
 
+            <Show when={result() && runState() === "idle"}>
+              <p class="text-sm text-dim mt-3 leading-relaxed">
+                Final tick: the brain's predicted route {outcome()}.
+              </p>
+            </Show>
+
             {/* legend */}
             <div class="flex flex-wrap gap-x-4 gap-y-1.5 mt-3 text-[.72rem] text-mute font-mono">
               <span class="inline-flex items-center gap-1.5">
-                <i class="w-2.5 h-2.5 rounded-full inline-block" style={{ background: "var(--accent)" }} />
-                agent
+                <i
+                  class="inline-block rounded-full"
+                  style={{
+                    width: "22px",
+                    height: "3px",
+                    background:
+                      "linear-gradient(90deg, color-mix(in srgb, var(--accent) 28%, var(--bg-card)), var(--accent))",
+                  }}
+                />
+                the brain's predicted route (early → late tick)
               </span>
               <span class="inline-flex items-center gap-1.5">
-                <i class="w-2.5 h-2.5 inline-block" style={{ background: "var(--text)", "border-radius": "2px" }} />
-                wall
+                <i
+                  class="inline-block"
+                  style={{ width: "22px", height: "0", "border-top": "1.5px dashed var(--text-mute)" }}
+                />
+                shortest route
+              </span>
+              <span class="inline-flex items-center gap-1.5">
+                <i class="w-2.5 h-2.5 rounded-full inline-block" style={{ border: "1.5px solid #e0564e" }} />
+                first step off the shortest route
+              </span>
+              <span class="inline-flex items-center gap-1.5">
+                <span style={{ color: "#e0564e" }}>✕</span>
+                predicted step into a wall
+              </span>
+              <span class="inline-flex items-center gap-1.5">
+                <i class="w-2.5 h-2.5 rounded-full inline-block" style={{ background: "var(--accent)" }} />
+                start
               </span>
               <span class="inline-flex items-center gap-1.5">
                 <i class="w-2.5 h-2.5 inline-block" style={{ background: "#3CB371", "border-radius": "2px" }} />
                 goal
-              </span>
-              <span class="inline-flex items-center gap-1.5" title="the cells the brain's multi-step prediction is aiming for">
-                <i class="w-2.5 h-2.5 rounded-full inline-block" style={{ border: "2px solid #13b7a4" }} />
-                brain's target route
-              </span>
-              <span class="inline-flex items-center gap-1.5" title="occlusion attribution: hide a cell, re-run the brain — brighter = the model relied on it for this move">
-                <i class="w-2.5 h-2.5 inline-block" style={{ background: "rgba(245,158,11,0.7)", "border-radius": "2px" }} />
-                attention
               </span>
             </div>
           </div>
@@ -1426,226 +1053,107 @@ export default function Play() {
           <div class="card">
             <div class="flex flex-wrap gap-2">
               <button
-                class="btn btn-primary flex-1 justify-center min-w-[110px]"
-                onClick={togglePlay}
-                disabled={status() !== "ready"}
-              >
-                {playing() ? "❚❚ Pause" : "▶ Play"}
-              </button>
-              <button
-                class="btn flex-1 justify-center min-w-[90px]"
-                onClick={stepOnce}
-                disabled={status() !== "ready" || playing()}
-                title="think through one move"
-              >
-                Step
-              </button>
-              <button
-                class="btn flex-1 justify-center min-w-[90px]"
-                onClick={restart}
-                disabled={status() !== "ready"}
-              >
-                Restart
-              </button>
-              <button
-                class="btn flex-1 justify-center min-w-[100px]"
-                onClick={newMaze}
-                disabled={status() !== "ready"}
+                class="btn btn-primary flex-1 justify-center min-w-[120px]"
+                onClick={requestNewMaze}
+                disabled={status() !== "ready" || generating() || modelSwitching()}
               >
                 New maze
               </button>
+              <button
+                class="btn flex-1 justify-center min-w-[120px]"
+                onClick={playTicks}
+                disabled={status() !== "ready" || !result()}
+                title="replay the brain's ticks for this maze"
+              >
+                Replay ticks
+              </button>
             </div>
 
-            {/* ── drive-mode toggle (Part A): segmented control ── */}
-            <div class="mt-4 pt-4 border-t border-line">
-              <div class="flex items-center justify-between mb-2">
-                <div class="eyebrow">Difficulty</div>
+            {/* tick scrubber */}
+            <div class="mt-4">
+              <div class="flex items-center justify-between mb-1.5">
+                <div class="eyebrow">Tick</div>
                 <div class="font-mono text-xs text-mute tabular-nums">
-                  maze #{Math.max(1, mazeNum())} · step {stepCount()}
+                  {ticksTotal() ? tickIdx() + 1 : 0} / {ticksTotal()}
                 </div>
               </div>
+              <input
+                type="range"
+                class="w-full"
+                style={{ "accent-color": "var(--accent)" }}
+                min="0"
+                max={Math.max(0, ticksTotal() - 1)}
+                step="1"
+                value={tickIdx()}
+                disabled={!result()}
+                onInput={(e) => scrubTo(parseInt(e.currentTarget.value, 10))}
+                aria-label="internal tick shown"
+              />
+            </div>
+
+            {/* brain size selector: four trained CTM widths, hot-swapped */}
+            <div class="flex items-center justify-between mt-4 pt-4 border-t border-line">
+              <div class="eyebrow">Brain size</div>
               <div
                 class="flex rounded-lg overflow-hidden border border-line"
                 role="group"
-                aria-label="how the agent decides its next move"
+                aria-label="brain size"
               >
-                <For each={["easy", "normal", "hard", "hardcore"] as DriveMode[]}>
+                <For each={BRAIN_MODELS}>
                   {(m) => {
-                    const active = () => driveMode() === m;
+                    const active = () => modelSize() === m.key;
                     return (
                       <button
-                        class="flex-1 text-xs font-mono px-2 py-1.5 capitalize transition-colors"
-                        style={{
-                          background: active() ? "var(--accent)" : "transparent",
-                          color: active() ? "#fff" : "var(--text-mute)",
-                        }}
-                        onClick={() => changeMode(m)}
-                        disabled={status() !== "ready"}
+                        class="text-xs font-mono px-2.5 py-1 transition-colors"
+                        style={segBtn(active())}
+                        onClick={() => changeModel(m.key)}
+                        disabled={status() !== "ready" || modelSwitching()}
                         aria-pressed={active()}
+                        title={`cortex width ${m.label}`}
                       >
-                        {m}
+                        {m.label}
                       </button>
                     );
                   }}
                 </For>
               </div>
-              <div class="text-sm text-dim mt-2 leading-relaxed">{modeDesc()}</div>
-
-              {/* ── brain size-selector: three trained CTM widths, hot-swapped ── */}
-              <div class="flex items-center justify-between mt-4">
-                <div class="eyebrow">Brain size</div>
-                <div
-                  class="flex rounded-lg overflow-hidden border border-line"
-                  role="group"
-                  aria-label="brain size"
-                >
-                  <For each={BRAIN_MODELS}>
-                    {(m) => {
-                      const active = () => modelSize() === m.key;
-                      return (
-                        <button
-                          class="text-xs font-mono px-2.5 py-1 transition-colors"
-                          style={{
-                            background: active() ? "var(--accent)" : "transparent",
-                            color: active() ? "#fff" : "var(--text-mute)",
-                          }}
-                          onClick={() => changeModel(m.key)}
-                          disabled={status() !== "ready" || modelSwitching()}
-                          aria-pressed={active()}
-                          title={`${m.label} brain — ${m.note}`}
-                        >
-                          {m.label}
-                        </button>
-                      );
-                    }}
-                  </For>
-                </div>
+            </div>
+            <div class="text-[.72rem] text-mute font-mono mt-1.5 leading-relaxed">
+              The same 8-region brain trained at four cortical widths, with the
+              same retina. 9×9 mazes only: the retina is built for a 9×9 image.
+              {modelSwitching() ? " Loading…" : ""}
+            </div>
+            {/* terse lineage note — the CTM is Sakana's; numbers, not prose */}
+            <div class="text-[.68rem] text-mute font-mono mt-2 leading-relaxed opacity-80 tabular-nums">
+              <div class="opacity-70">
+                CTM core is{" "}
+                <a href="/docs/continuous-thought-machine" class="underline">Sakana's</a>{" "}
+                — depth vs width:
               </div>
-              <div class="text-[.72rem] text-mute font-mono mt-1.5 leading-relaxed">
-                Same brain, five cortical widths — shared retina + folded planner.
-                {modelSwitching() ? " Loading…" : ""}
-              </div>
-              {/* terse, data-forward lineage note — the CTM is Sakana's; we go
-                  wide (regions), they go deep (ticks/synapse). Numbers, not prose. */}
-              <div class="text-[.68rem] text-mute font-mono mt-2 leading-relaxed opacity-80 tabular-nums">
-                <div class="opacity-70">
-                  CTM core is{" "}
-                  <a href="/docs/continuous-thought-machine" class="underline">Sakana's</a>{" "}
-                  — depth vs width:
-                </div>
-                <div class="mt-0.5">Sakana maze · 1×512 · 75 ticks · synapse 8</div>
-                <div>this brain · 8×(16–256) · 16 ticks · synapse 3</div>
-              </div>
-
-              {/* ── board-size selector: arbitrary-resolution retina, no retrain ── */}
-              <div class="flex items-center justify-between mt-4">
-                <div class="eyebrow">Maze size</div>
-                <div
-                  class="flex rounded-lg overflow-hidden border border-line"
-                  role="group"
-                  aria-label="board size"
-                >
-                  <For each={MAZE_SIZES}>
-                    {(s) => {
-                      const active = () => mazeSize() === s;
-                      return (
-                        <button
-                          class="text-xs font-mono px-2.5 py-1 tabular-nums transition-colors"
-                          style={{
-                            background: active() ? "var(--accent)" : "transparent",
-                            color: active() ? "#fff" : "var(--text-mute)",
-                          }}
-                          onClick={() => changeSize(s)}
-                          disabled={status() !== "ready"}
-                          aria-pressed={active()}
-                          title={`${s}×${s} board`}
-                        >
-                          {s}
-                        </button>
-                      );
-                    }}
-                  </For>
-                </div>
-              </div>
-              <div class="text-[.72rem] text-mute font-mono mt-1.5 leading-relaxed">
-                Trained on 9×9, run at any size. The planner generalizes to bigger
-                boards by running more value-iteration rounds — nothing is retrained
-                (solve-rate drops with size, honestly).
-              </div>
-
-              {/* ── stepping-speed selector: scales every tick delay live ── */}
-              <div class="flex items-center justify-between mt-4">
-                <div class="eyebrow">Speed</div>
-                <div
-                  class="flex rounded-lg overflow-hidden border border-line"
-                  role="group"
-                  aria-label="stepping speed"
-                >
-                  <For each={SPEEDS}>
-                    {(s) => {
-                      const active = () => speed() === s;
-                      return (
-                        <button
-                          class="text-xs font-mono px-2.5 py-1 tabular-nums transition-colors"
-                          style={{
-                            background: active() ? "var(--accent)" : "transparent",
-                            color: active() ? "#fff" : "var(--text-mute)",
-                          }}
-                          onClick={() => setSpeed(s)}
-                          disabled={status() !== "ready"}
-                          aria-pressed={active()}
-                          title={`${s}× stepping speed`}
-                        >
-                          {s}×
-                        </button>
-                      );
-                    }}
-                  </For>
-                </div>
-              </div>
+              <div class="mt-0.5">Sakana maze · 1×512 · 75 ticks · synapse 8</div>
+              <div>this brain · 8×(16–128) · 16 ticks · synapse 3</div>
             </div>
           </div>
 
-          {/* move bars */}
+          {/* first-step distribution at the tick on screen */}
           <div class="card">
             <div class="flex items-center justify-between mb-3">
-              <div class="flex items-center gap-2">
-                <div class="eyebrow">Brain's prediction</div>
-                <Show when={verdict()}>
-                  <span
-                    class="text-[.62rem] font-mono px-1.5 py-0.5 rounded"
-                    style={{
-                      background:
-                        verdict() === "ok"
-                          ? "color-mix(in srgb, var(--accent) 16%, transparent)"
-                          : "color-mix(in srgb, #e0564e 18%, transparent)",
-                      color: verdict() === "ok" ? "var(--accent)" : "#c63d35",
-                    }}
-                  >
-                    {verdict() === "ok"
-                      ? "✓ on the goal path"
-                      : verdict() === "wall"
-                        ? "✕ would hit a wall"
-                        : verdict() === "astray"
-                          ? "→ away from goal"
-                          : "· no move"}
-                  </span>
-                </Show>
-              </div>
+              <div class="eyebrow">First step, as predicted</div>
               <div class="font-mono text-xs text-mute">
-                motor argmax · {ticksTotal() || 16} ticks
+                tick {ticksTotal() ? tickIdx() + 1 : 0}/{ticksTotal()}
               </div>
             </div>
             <div class="flex flex-col gap-2.5">
-              <For each={MOVES}>
+              <For each={STEP_LABELS}>
                 {(label, i) => {
-                  const p = () => moveProbs()[i()] ?? 0;
-                  const chosen = () => committedMove() === i();
+                  const p = () => stepProbs()[i()] ?? 0;
+                  const top = () => !!result() && stepArgmax() === i();
+                  const isTrue = () => trueFirst() === i();
                   return (
                     <div class="flex items-center gap-3">
                       <span
                         class="w-12 text-xs font-mono shrink-0"
-                        classList={{ "text-accent": chosen(), "text-mute": !chosen() }}
+                        classList={{ "text-accent": top(), "text-mute": !top() }}
                       >
                         {label}
                       </span>
@@ -1654,16 +1162,12 @@ export default function Play() {
                           class="h-full rounded transition-all duration-200"
                           style={{
                             width: `${Math.max(2, p() * 100)}%`,
-                            background: chosen()
-                              ? "var(--accent)"
-                              : "var(--line-2)",
+                            background: top() ? "var(--accent)" : "var(--line-2)",
                           }}
                         />
                       </div>
-                      <span
-                        class="w-11 text-right text-xs font-mono tabular-nums shrink-0"
-                        classList={{ "text-base": chosen(), "text-mute": !chosen() }}
-                      >
+                      <span class="w-24 text-right text-xs font-mono tabular-nums shrink-0 text-mute">
+                        {isTrue() ? "shortest · " : ""}
                         {(p() * 100).toFixed(0)}%
                       </span>
                     </div>
@@ -1671,19 +1175,33 @@ export default function Play() {
                 }}
               </For>
             </div>
-            <Show when={moveCount() > 0}>
-              <div class="mt-3 pt-3 border-t border-line flex items-center justify-between text-xs font-mono text-mute tabular-nums">
-                <span>brain agreed with the optimal step</span>
-                <span class="text-dim">
-                  {Math.round((agreeCount() / moveCount()) * 100)}% ({agreeCount()}/
-                  {moveCount()})
-                </span>
+            <Show when={seen() > 0}>
+              <div class="mt-3 pt-3 border-t border-line flex flex-col gap-1 text-xs font-mono text-mute tabular-nums">
+                <div class="flex items-center justify-between">
+                  <span>this session · mazes</span>
+                  <span class="text-dim">{seen()}</span>
+                </div>
+                <div class="flex items-center justify-between">
+                  <span>first step right</span>
+                  <span class="text-dim">
+                    {firstRight()}/{seen()} ({pct(firstRight(), seen())}%)
+                  </span>
+                </div>
+                <div class="flex items-center justify-between">
+                  <span>steps matching the shortest route, mean</span>
+                  <span class="text-dim">{(matchSum() / seen()).toFixed(1)}</span>
+                </div>
+                <div class="flex items-center justify-between">
+                  <span>route correct to the goal</span>
+                  <span class="text-dim">
+                    {allRight()}/{seen()}
+                  </span>
+                </div>
               </div>
             </Show>
           </div>
 
-          {/* region telemetry: anchors the left column under the move bars,
-              expanded by default so the columns stay balanced. */}
+          {/* region telemetry under the left column */}
           <Show when={brainRef()}>
             <RegionTelemetry
               regions={brainRef()!.regions}
@@ -1692,217 +1210,151 @@ export default function Play() {
               exitLambda={exitLambda()}
               ticksUsed={ticksUsed()}
               ticksTotal={ticksTotal() || 16}
-              telemetry={regionTel()}
               defaultOpen
             />
           </Show>
         </div>
 
-        {/* RIGHT: the 3D brain (Model B), as the second column */}
+        {/* RIGHT: the 3D brain */}
         <Show when={brainRef()}>
-        <div class="flex flex-col gap-5">
-        <div class="card">
-          <div class="flex items-center justify-between mb-1 flex-wrap gap-2">
-            <div class="eyebrow">
-              live in 3D · <span class="grad-text">{brainRef()?.region_names.length ?? 8} regions</span>
-            </div>
-            <div class="flex items-center gap-3">
-              <Show when={brainOn()}>
-                <div class="flex items-center gap-2">
-                  <span class="font-mono text-[.7rem] text-mute">global sync</span>
-                  <div class="w-20 h-1.5 rounded-full bg-panel overflow-hidden">
-                    <div
-                      class="h-full rounded-full transition-all duration-150"
-                      style={{
-                        width: `${Math.round(brainGlobal() * 100)}%`,
-                        background: "var(--accent)",
-                      }}
-                    />
-                  </div>
+          <div class="flex flex-col gap-5">
+            <div class="card">
+              <div class="flex items-center justify-between mb-1 flex-wrap gap-2">
+                <div class="eyebrow">
+                  live in 3D · <span class="grad-text">{brainRef()?.region_names.length ?? 8} regions</span>
                 </div>
-              </Show>
-              <span class="tag" classList={{ "tag-wip": runState() === "thinking" }}>
-                the solver
-              </span>
-            </div>
-          </div>
-
-          <p class="text-dim text-sm leading-relaxed mb-4">
-            Each dot is a neuron coloured by region; a line lights when two
-            neurons fire together across a wired region edge. The cyan grids are
-            the retina → V1 → V2 → V4 feature maps.{" "}
-            <button
-              type="button"
-              class="text-accent whitespace-nowrap"
-              onClick={() => setInfoOpen(true)}
-            >
-              what am I seeing? →
-            </button>
-          </p>
-
-          <div
-            ref={brainContainer}
-            class="rounded-lg overflow-hidden relative"
-            classList={{ "rounded-none": isFullscreen() }}
-            style={{
-              background: "#0a0912",
-              ...(isFullscreen()
-                ? { width: "100vw", height: "100vh" }
-                : {}),
-            }}
-          >
-            <canvas
-              ref={(el) => {
-                brainCanvas = el;
-                el.addEventListener("wheel", brainWheel, { passive: false });
-                brainIO = new IntersectionObserver(
-                  (es) => (brainVisible = es[0]?.isIntersecting ?? true),
-                );
-                brainIO.observe(el);
-              }}
-              class="block"
-              classList={{
-                "w-full cursor-grab active:cursor-grabbing": !isFullscreen(),
-                "w-full h-full cursor-none": isFullscreen(),
-              }}
-              style={{ "touch-action": "none" }}
-              onClick={brainCanvasClick}
-              onPointerDown={brainPointerDown}
-              onPointerMove={brainPointerMove}
-              onPointerUp={brainPointerUp}
-              onPointerCancel={brainPointerUp}
-              onLostPointerCapture={brainPointerUp}
-              aria-label="the eight-region brain computing — drag to rotate, scroll to zoom; fullscreen for WASD free-fly"
-            />
-
-            {/* ── SLEEP / CONSOLIDATION flash (hippocampal sharp-wave replay) ── */}
-            <Show when={sleeping()}>
-              {(s) => (
-                // bottom bar only — the brain stays fully visible (dreaming)
-                // above it; a soft gradient keeps the text legible over spikes.
-                <div
-                  class="absolute inset-x-0 bottom-0 flex flex-col items-center justify-end pb-3 px-3 pointer-events-none"
-                  style={{
-                    background:
-                      "linear-gradient(to top, rgba(8,7,18,0.78) 0%, rgba(8,7,18,0.35) 55%, transparent 100%)",
-                  }}
-                >
-                  <div class="font-mono text-center" style={{ color: "rgba(255,255,255,0.92)" }}>
-                    <div class="text-[.92rem] tracking-wide mb-0.5 animate-pulse">💤 SLEEPING · dreaming</div>
-                    <div class="text-[.7rem] text-[rgba(255,255,255,0.72)] leading-snug">
-                      replaying {s().bookmarks} bookmarked maze{s().bookmarks === 1 ? "" : "s"}
-                      {s().nightmares > 0 ? ` · ${s().nightmares} nightmare${s().nightmares === 1 ? "" : "s"}` : ""}
-                      {" · "}
-                      {s().replays} replays · planner gap{" "}
-                      {s().lossAfter <= s().lossBefore ? (
-                        <span style={{ color: "#7ee0a8" }}>
-                          ↓ {(s().lossBefore - s().lossAfter).toFixed(3)}
-                        </span>
-                      ) : (
-                        <span>{s().lossAfter.toFixed(3)}</span>
-                      )}
+                <Show when={brainOn()}>
+                  <div class="flex items-center gap-2">
+                    <span class="font-mono text-[.7rem] text-mute">global sync</span>
+                    <div class="w-20 h-1.5 rounded-full bg-panel overflow-hidden">
+                      <div
+                        class="h-full rounded-full transition-all duration-150"
+                        style={{
+                          width: `${Math.round(brainGlobal() * 100)}%`,
+                          background: "var(--accent)",
+                        }}
+                      />
                     </div>
                   </div>
-                </div>
-              )}
-            </Show>
-
-            <div class="absolute top-2 right-2 flex items-center gap-1.5">
-              <Show when={!isFullscreen()}>
-                <button
-                  class="btn-icon text-[.68rem] font-mono px-2 py-1 rounded"
-                  style={{
-                    background: "rgba(255,255,255,0.08)",
-                    color: "rgba(255,255,255,0.75)",
-                    "backdrop-filter": "blur(4px)",
-                  }}
-                  onClick={() => setBrainAutoRotate((v) => !v)}
-                  title="toggle auto-rotation"
-                >
-                  {brainAutoRotate() ? "❚❚ stop" : "⟳ spin"}
-                </button>
-                <button
-                  class="text-[.68rem] font-mono px-2 py-1 rounded"
-                  style={{
-                    background: "rgba(255,255,255,0.08)",
-                    color: "rgba(255,255,255,0.75)",
-                    "backdrop-filter": "blur(4px)",
-                  }}
-                  onClick={() => {
-                    brainRotX = -0.32;
-                    brainRotY = 0.7;
-                    brainZoom = 1;
-                  }}
-                  title="reset view"
-                >
-                  reset
-                </button>
-              </Show>
-              <button
-                class="text-[.68rem] font-mono px-2 py-1 rounded"
-                style={{
-                  background: "rgba(255,255,255,0.08)",
-                  color: "rgba(255,255,255,0.75)",
-                  "backdrop-filter": "blur(4px)",
-                }}
-                onClick={toggleFullscreen}
-                title={isFullscreen() ? "exit fullscreen (Esc)" : "fly through the brain"}
-              >
-                {isFullscreen() ? "⛶ exit" : "⛶ fullscreen"}
-              </button>
-            </div>
-            {/* windowed hint */}
-            <Show when={!isFullscreen()}>
-              <div class="absolute bottom-2 left-3 text-[.66rem] font-mono pointer-events-none" style={{ color: "rgba(255,255,255,0.4)" }}>
-                drag to rotate · scroll / pinch to zoom · ⛶ to fly
-              </div>
-            </Show>
-            {/* fullscreen free-fly hint + live SDK-feature HUD */}
-            <Show when={isFullscreen()}>
-              <div
-                class="absolute bottom-3 left-4 text-[.7rem] font-mono pointer-events-none"
-                style={{ color: "rgba(255,255,255,0.6)" }}
-              >
-                <Show
-                  when={pointerLocked}
-                  fallback={<span>click to look · WASD move · Esc exit</span>}
-                >
-                  <span>WASD move · Q/E up·down · Shift sprint · mouse look · Esc exit</span>
                 </Show>
               </div>
-              {/* ── COCKPIT HUD: value-only live stats, overlaid on the 3D view ── */}
-              {/* TOP-LEFT: region telemetry + global-sync, exit-λ, ticks */}
+
+              <p class="text-dim text-sm leading-relaxed mb-4">
+                Each dot is a neuron, coloured by region and laid out roughly where
+                that function sits in a human brain. A line lights when two neurons
+                fire together across a wired region edge. The cyan grids are the
+                retina → V1 → V2 → V4 feature maps of the maze image.{" "}
+                <button
+                  type="button"
+                  class="text-accent whitespace-nowrap"
+                  onClick={() => setInfoOpen(true)}
+                >
+                  what am I seeing? →
+                </button>
+              </p>
+
               <div
-                class="absolute top-3 left-3 text-[.64rem] font-mono tabular-nums rounded-lg flex flex-col gap-1.5"
+                ref={brainContainer}
+                class="rounded-lg overflow-hidden relative"
+                classList={{ "rounded-none": isFullscreen() }}
                 style={{
-                  background: "rgba(10,9,18,0.72)",
-                  "backdrop-filter": "blur(4px)",
-                  border: "1px solid rgba(255,255,255,0.12)",
-                  color: "rgba(255,255,255,0.82)",
-                  padding: "10px 12px",
-                  "min-width": "186px",
-                  "pointer-events": "auto",
+                  background: "#0a0912",
+                  ...(isFullscreen() ? { width: "100vw", height: "100vh" } : {}),
                 }}
               >
-                <div class="flex items-center justify-between" style={{ color: "rgba(255,255,255,0.55)" }}>
-                  <span>regions</span>
-                  <span>rms</span>
+                <canvas
+                  ref={(el) => {
+                    brainCanvas = el;
+                    el.addEventListener("wheel", brainWheel, { passive: false });
+                    brainIO = new IntersectionObserver(
+                      (es) => (brainVisible = es[0]?.isIntersecting ?? true),
+                    );
+                    brainIO.observe(el);
+                  }}
+                  class="block"
+                  classList={{
+                    "w-full cursor-grab active:cursor-grabbing": !isFullscreen(),
+                    "w-full h-full cursor-none": isFullscreen(),
+                  }}
+                  style={{ "touch-action": "none" }}
+                  onClick={brainCanvasClick}
+                  onPointerDown={brainPointerDown}
+                  onPointerMove={brainPointerMove}
+                  onPointerUp={brainPointerUp}
+                  onPointerCancel={brainPointerUp}
+                  onLostPointerCapture={brainPointerUp}
+                  aria-label="the eight-region brain computing — drag to rotate, scroll to zoom; fullscreen for WASD free-fly"
+                />
+
+                <div class="absolute top-2 right-2 flex items-center gap-1.5">
+                  <Show when={!isFullscreen()}>
+                    <button
+                      class="text-[.68rem] font-mono px-2 py-1 rounded"
+                      style={hudBtn}
+                      onClick={() => setBrainAutoRotate((v) => !v)}
+                      title="toggle auto-rotation"
+                    >
+                      {brainAutoRotate() ? "❚❚ stop" : "⟳ spin"}
+                    </button>
+                    <button
+                      class="text-[.68rem] font-mono px-2 py-1 rounded"
+                      style={hudBtn}
+                      onClick={() => {
+                        brainRotX = 0.22;
+                        brainRotY = -0.75;
+                        brainZoom = 0.8;
+                      }}
+                      title="reset view"
+                    >
+                      reset
+                    </button>
+                  </Show>
+                  <button
+                    class="text-[.68rem] font-mono px-2 py-1 rounded"
+                    style={hudBtn}
+                    onClick={toggleFullscreen}
+                    title={isFullscreen() ? "exit fullscreen (Esc)" : "fly through the brain"}
+                  >
+                    {isFullscreen() ? "⛶ exit" : "⛶ fullscreen"}
+                  </button>
                 </div>
-                {(() => {
-                  const tel = regionTel();
-                  const names = brainRef()?.region_names ?? [];
-                  // prefer live telemetry; fall back to the current tick's per-region acts
-                  const rows = tel
-                    ? tel.map((r, i) => ({ name: r.name, rms: r.rms ?? 0, idx: i }))
-                    : names.map((nm, i) => {
-                        const acts = curBrainTick()?.acts?.[i] ?? [];
-                        const rms = acts.length
-                          ? Math.sqrt(acts.reduce((a, v) => a + v * v, 0) / acts.length)
-                          : 0;
-                        return { name: nm, rms, idx: i };
-                      });
-                  return (
-                    <For each={rows}>
+                <Show when={!isFullscreen()}>
+                  <div
+                    class="absolute bottom-2 left-3 text-[.66rem] font-mono pointer-events-none"
+                    style={{ color: "rgba(255,255,255,0.4)" }}
+                  >
+                    drag to rotate · scroll / pinch to zoom · ⛶ to fly
+                  </div>
+                </Show>
+                {/* fullscreen: free-fly hint + value-only HUD */}
+                <Show when={isFullscreen()}>
+                  <div
+                    class="absolute bottom-3 left-4 text-[.7rem] font-mono pointer-events-none"
+                    style={{ color: "rgba(255,255,255,0.6)" }}
+                  >
+                    <Show
+                      when={pointerLocked}
+                      fallback={<span>click to look · WASD move · Esc exit</span>}
+                    >
+                      <span>WASD move · Q/E up·down · Shift sprint · mouse look · Esc exit</span>
+                    </Show>
+                  </div>
+                  <div
+                    class="absolute top-3 left-3 text-[.64rem] font-mono tabular-nums rounded-lg flex flex-col gap-1.5"
+                    style={{
+                      background: "rgba(10,9,18,0.72)",
+                      "backdrop-filter": "blur(4px)",
+                      border: "1px solid rgba(255,255,255,0.12)",
+                      color: "rgba(255,255,255,0.82)",
+                      padding: "10px 12px",
+                      "min-width": "186px",
+                    }}
+                  >
+                    <div class="flex items-center justify-between" style={{ color: "rgba(255,255,255,0.55)" }}>
+                      <span>regions</span>
+                      <span>rms</span>
+                    </div>
+                    <For each={regionRows()}>
                       {(r) => (
                         <div class="flex items-center gap-2">
                           <i
@@ -1927,276 +1379,89 @@ export default function Play() {
                         </div>
                       )}
                     </For>
-                  );
-                })()}
-                <div class="flex flex-wrap gap-x-3 gap-y-0.5 pt-1.5" style={{ "border-top": "1px solid rgba(255,255,255,0.1)", color: "rgba(255,255,255,0.6)" }}>
-                  <span>global {brainGlobal().toFixed(2)}</span>
-                  <Show when={exitLambda() != null}>
-                    <span>λ {(exitLambda() ?? 0).toFixed(2)}</span>
-                  </Show>
-                  <span>ticks {ticksUsed()}/{ticksTotal() || 16}</span>
-                  <span>vision {sdkFeatureState().visionActive ? "on" : "—"}</span>
-                  <Show when={plasticityAvailable()}>
-                    <span>Δ {plasticDelta().toFixed(3)}</span>
-                  </Show>
-                </div>
-              </div>
-
-              {/* TOP-RIGHT: move distribution + agreement + verdict + maze#/step.
-                  Offset down so it clears the canvas stop/reset/fullscreen buttons. */}
-              <div
-                class="absolute right-3 text-[.64rem] font-mono tabular-nums rounded-lg flex flex-col gap-1.5"
-                style={{
-                  top: "44px",
-                  background: "rgba(10,9,18,0.72)",
-                  "backdrop-filter": "blur(4px)",
-                  border: "1px solid rgba(255,255,255,0.12)",
-                  color: "rgba(255,255,255,0.82)",
-                  padding: "10px 12px",
-                  "min-width": "176px",
-                  "pointer-events": "auto",
-                }}
-              >
-                <div class="flex items-center justify-between" style={{ color: "rgba(255,255,255,0.55)" }}>
-                  <span>move</span>
-                  <span>maze #{Math.max(1, mazeNum())} · step {stepCount()}</span>
-                </div>
-                <For each={MOVES}>
-                  {(label, i) => {
-                    const p = () => moveProbs()[i()] ?? 0;
-                    const chosen = () => committedMove() === i();
-                    return (
-                      <div class="flex items-center gap-2">
-                        <span
-                          class="w-9 shrink-0"
-                          style={{ color: chosen() ? "#fff" : "rgba(255,255,255,0.6)" }}
-                        >
-                          {label}
-                        </span>
-                        <span class="flex-1 h-2 rounded overflow-hidden" style={{ background: "rgba(255,255,255,0.1)" }}>
-                          <span
-                            class="block h-full rounded"
-                            style={{
-                              width: `${Math.max(2, p() * 100)}%`,
-                              background: chosen() ? "var(--accent)" : "rgba(255,255,255,0.32)",
-                            }}
-                          />
-                        </span>
-                        <span class="w-8 text-right" style={{ color: chosen() ? "#fff" : "rgba(255,255,255,0.55)" }}>
-                          {(p() * 100).toFixed(0)}%
-                        </span>
-                      </div>
-                    );
-                  }}
-                </For>
-                <div class="flex items-center justify-between pt-1.5" style={{ "border-top": "1px solid rgba(255,255,255,0.1)" }}>
-                  <span style={{ color: "rgba(255,255,255,0.6)" }}>
-                    agree {moveCount() ? Math.round((agreeCount() / moveCount()) * 100) : 0}% ({agreeCount()}/{moveCount()})
-                  </span>
-                  <Show when={verdict()}>
-                    <span
-                      class="px-1.5 py-0.5 rounded"
-                      style={{
-                        background:
-                          verdict() === "ok"
-                            ? "color-mix(in srgb, var(--accent) 30%, transparent)"
-                            : "rgba(224,86,78,0.3)",
-                        color: verdict() === "ok" ? "#fff" : "#ffb3ad",
-                      }}
+                    <div
+                      class="flex flex-wrap gap-x-3 gap-y-0.5 pt-1.5"
+                      style={{ "border-top": "1px solid rgba(255,255,255,0.1)", color: "rgba(255,255,255,0.6)" }}
                     >
-                      {verdict() === "ok"
-                        ? "✓ path"
-                        : verdict() === "wall"
-                          ? "✕ wall"
-                          : verdict() === "astray"
-                            ? "→ astray"
-                            : "· wait"}
-                    </span>
-                  </Show>
-                </div>
+                      <span>global {brainGlobal().toFixed(2)}</span>
+                      <Show when={exitLambda() != null}>
+                        <span>λ {(exitLambda() ?? 0).toFixed(2)}</span>
+                      </Show>
+                      <span>
+                        tick {ticksTotal() ? tickIdx() + 1 : 0}/{ticksTotal()}
+                      </span>
+                    </div>
+                  </div>
+                  <div
+                    class="absolute left-1/2 flex items-center gap-1.5 rounded-lg"
+                    style={{
+                      bottom: "16px",
+                      transform: "translateX(-50%)",
+                      background: "rgba(10,9,18,0.72)",
+                      "backdrop-filter": "blur(4px)",
+                      border: "1px solid rgba(255,255,255,0.12)",
+                      padding: "8px 10px",
+                    }}
+                  >
+                    <button
+                      class="text-[.66rem] font-mono px-2.5 py-1 rounded"
+                      style={{ background: "var(--accent)", color: "#fff" }}
+                      onClick={requestNewMaze}
+                      disabled={status() !== "ready" || generating()}
+                    >
+                      New maze
+                    </button>
+                    <button
+                      class="text-[.66rem] font-mono px-2.5 py-1 rounded"
+                      style={{ background: "rgba(255,255,255,0.1)", color: "rgba(255,255,255,0.85)" }}
+                      onClick={playTicks}
+                      disabled={!result()}
+                    >
+                      Replay ticks
+                    </button>
+                  </div>
+                </Show>
               </div>
 
-              {/* BOTTOM-CENTER: the control panel (transport + drive mode + size) */}
-              <div
-                class="absolute left-1/2 flex flex-col gap-2 rounded-lg"
-                style={{
-                  bottom: "16px",
-                  transform: "translateX(-50%)",
-                  background: "rgba(10,9,18,0.72)",
-                  "backdrop-filter": "blur(4px)",
-                  border: "1px solid rgba(255,255,255,0.12)",
-                  padding: "10px 12px",
-                  "pointer-events": "auto",
-                }}
-              >
-                <div class="flex items-center gap-1.5 justify-center">
-                  <button
-                    class="text-[.66rem] font-mono px-2.5 py-1 rounded"
-                    style={{ background: "var(--accent)", color: "#fff" }}
-                    onClick={togglePlay}
-                    disabled={status() !== "ready"}
-                  >
-                    {playing() ? "❚❚ Pause" : "▶ Play"}
-                  </button>
-                  <button
-                    class="text-[.66rem] font-mono px-2.5 py-1 rounded"
-                    style={{ background: "rgba(255,255,255,0.1)", color: "rgba(255,255,255,0.85)" }}
-                    onClick={stepOnce}
-                    disabled={status() !== "ready" || playing()}
-                  >
-                    Step
-                  </button>
-                  <button
-                    class="text-[.66rem] font-mono px-2.5 py-1 rounded"
-                    style={{ background: "rgba(255,255,255,0.1)", color: "rgba(255,255,255,0.85)" }}
-                    onClick={restart}
-                    disabled={status() !== "ready"}
-                  >
-                    Restart
-                  </button>
-                  <button
-                    class="text-[.66rem] font-mono px-2.5 py-1 rounded"
-                    style={{ background: "rgba(255,255,255,0.1)", color: "rgba(255,255,255,0.85)" }}
-                    onClick={newMaze}
-                    disabled={status() !== "ready"}
-                  >
-                    New maze
-                  </button>
-                </div>
-                <div class="flex items-center justify-center gap-3 text-[.6rem] font-mono">
-                  <div class="flex rounded overflow-hidden" style={{ border: "1px solid rgba(255,255,255,0.16)" }}>
-                    <For each={["easy", "normal", "hard", "hardcore"] as DriveMode[]}>
-                      {(m) => {
-                        const active = () => driveMode() === m;
-                        return (
-                          <button
-                            class="px-2 py-1 capitalize"
-                            style={{
-                              background: active() ? "var(--accent)" : "transparent",
-                              color: active() ? "#fff" : "rgba(255,255,255,0.6)",
-                            }}
-                            onClick={() => changeMode(m)}
-                            disabled={status() !== "ready"}
-                            aria-pressed={active()}
-                          >
-                            {m}
-                          </button>
-                        );
-                      }}
-                    </For>
-                  </div>
-                  <div class="flex rounded overflow-hidden tabular-nums" style={{ border: "1px solid rgba(255,255,255,0.16)" }}>
-                    <For each={MAZE_SIZES}>
-                      {(s) => {
-                        const active = () => mazeSize() === s;
-                        return (
-                          <button
-                            class="px-2 py-1"
-                            style={{
-                              background: active() ? "var(--accent)" : "transparent",
-                              color: active() ? "#fff" : "rgba(255,255,255,0.6)",
-                            }}
-                            onClick={() => changeSize(s)}
-                            disabled={status() !== "ready"}
-                            aria-pressed={active()}
-                            title={`${s}×${s}`}
-                          >
-                            {s}
-                          </button>
-                        );
-                      }}
-                    </For>
-                  </div>
-                </div>
-              </div>
-            </Show>
-          </div>
-
-          <div class="flex flex-wrap items-center gap-x-4 gap-y-1.5 mt-3 text-[.72rem] text-mute font-mono">
-            <span class="opacity-80">each dot = 1 neuron · brighter = spiking</span>
-            <span
-              class="inline-flex items-center gap-1.5"
-              title="homeostatic sleep pressure — rises with wall-hits and surprise; a consolidation pass fires when it fills"
-            >
-              💤 sleep&nbsp;pressure
-              <span class="inline-block w-16 h-1.5 rounded-full bg-white/10 overflow-hidden align-middle">
-                <span
-                  class="block h-full rounded-full transition-[width,background] duration-300"
-                  style={{
-                    width: `${Math.round(sleepPressure() * 100)}%`,
-                    background:
-                      sleepPressure() > 0.75 ? "#ff7a59" : "#8a7dff",
-                  }}
-                />
-              </span>
-              <Show when={napCount() > 0}>
-                <span
-                  class="opacity-90"
-                  title="consolidation passes so far this session, and the planner-gap drop from the last one"
-                >
-                  · slept {napCount()}×
-                  <Show when={lastNapGap() > 0}>
-                    <span style={{ color: "#7ee0a8" }}> (last ↓{lastNapGap().toFixed(3)})</span>
-                  </Show>
-                </span>
-              </Show>
-            </span>
-            <label class="inline-flex items-center gap-1.5" title="how long co-spike lines linger">
-              spike trail
-              <input
-                type="range"
-                min="0"
-                max="1"
-                step="0.05"
-                value={spikeHold()}
-                onInput={(e) => setSpikeHold(parseFloat(e.currentTarget.value))}
-                class="w-20 align-middle"
-              />
-            </label>
-            <For each={brainRef()?.region_names ?? []}>
-              {(nm, i) => (
-                <span class="inline-flex items-center gap-1.5">
-                  <i
-                    class="w-2.5 h-2.5 rounded-full inline-block"
-                    style={{ background: REGION_COLORS[i() % REGION_COLORS.length] }}
+              <div class="flex flex-wrap items-center gap-x-4 gap-y-1.5 mt-3 text-[.72rem] text-mute font-mono">
+                <span class="opacity-80">each dot = 1 neuron · brighter = more active</span>
+                <label class="inline-flex items-center gap-1.5" title="how long co-spike lines linger">
+                  spike trail
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value={spikeHold()}
+                    onInput={(e) => setSpikeHold(parseFloat(e.currentTarget.value))}
+                    class="w-20 align-middle"
                   />
-                  {shortRegion(nm)}
+                </label>
+                <For each={brainRef()?.region_names ?? []}>
+                  {(nm, i) => (
+                    <span class="inline-flex items-center gap-1.5">
+                      <i
+                        class="w-2.5 h-2.5 rounded-full inline-block"
+                        style={{ background: REGION_COLORS[i() % REGION_COLORS.length] }}
+                      />
+                      {shortRegion(nm)}
+                    </span>
+                  )}
+                </For>
+                <span class="inline-flex items-center gap-1.5" title="visual cortex: retina → V1 → V2 → V4">
+                  <i class="w-2.5 h-2.5 rounded-full inline-block" style={{ background: "#62e6ff" }} />
+                  vision
                 </span>
-              )}
-            </For>
-            <span class="inline-flex items-center gap-1.5" title="visual cortex: retina → V1 → V2 → V4">
-              <i class="w-2.5 h-2.5 rounded-full inline-block" style={{ background: "#62e6ff" }} />
-              vision
-            </span>
-            <span class="ml-auto opacity-80">the modgrad SDK · in WebAssembly</span>
+                <span class="ml-auto opacity-80">the modgrad SDK · in WebAssembly</span>
+              </div>
+            </div>
+
+            <SdkFeatures state={sdkFeatureState()} />
           </div>
-        </div>
-
-        {/* ── live three-factor plasticity: the headline "learns" panel, kept
-            open right under the brain ── */}
-        <Show when={plasticityAvailable()}>
-          <PlasticityPanel
-            enabled={plasticityAvailable()}
-            signal={signal()}
-            neuromod={neuromod()}
-            plasticDelta={plasticDelta()}
-            verdict={verdict()}
-            reached={reachedNow()}
-            loss={loss()}
-            lr={lr()}
-            efficiency={efficiency()}
-            efficiencyFinal={efficiencyFinal()}
-            onReset={resetPlasticity}
-          />
-        </Show>
-
-        {/* ── SDK features: expanded by default; click the header to collapse ── */}
-        <SdkFeatures state={sdkFeatureState()} />
-        </div>
         </Show>
       </div>
 
-      {/* ── info: the factual reference, consolidated (no marketing) ── */}
+      {/* ── info: the factual reference ── */}
       <div class="card mt-8">
         <button
           type="button"
@@ -2218,75 +1483,55 @@ export default function Play() {
         <Show when={infoOpen()}>
           <div class="mt-4 grid gap-5 text-sm leading-relaxed text-dim md:grid-cols-2">
             <div>
-              <div class="eyebrow mb-1.5">The planner</div>
-              A learned Value Iteration Network (Tamar et al., 2016), distributed
-              across three brain regions the way model-based planning is in the
-              brain (hippocampal map &amp; replay × striatal value → action). The{" "}
-              <strong>basal ganglia</strong> project a per-cell reward and value
-              (the striatal value head; dopamine = reward-prediction error). The{" "}
-              <strong>hippocampus</strong> holds the cognitive map — a
-              traversability gate — and runs the <strong>replay</strong> that
-              propagates value across it: K rounds of a 3×3 backup, the reverse
-              replay that is a Bellman update. <strong>Motor</strong> reads the
-              decision ego-centrically at the agent's own cell. It's handed the
-              decoded maze (open vs wall, and the goal) — what's learned is the{" "}
-              <em>planning</em>, not the perception: the walls and goal are given
-              to it, not seen.
+              <div class="eyebrow mb-1.5">What the brain does</div>
+              It sees one image: the 9×9 maze as pixels, with the start in red and
+              the goal in green. The retina → V1 → V2 → V4 stack turns that image
+              into feature tokens, and eight CTM regions think over them for up to
+              16 internal ticks. At every tick its output head predicts 20 moves
+              (up, down, left, right or wait). The line on the maze is that
+              prediction decoded, argmax per step, at the tick shown.
             </div>
             <div>
-              <div class="eyebrow mb-1.5">Trained, then on its own</div>
-              It was trained offline (supervised, on solver-labelled mazes, like
-              the Sakana CTM) — the answers live in training only. At inference
-              there is no solver: it plans from the decoded maze alone. Because the
-              value propagation is iterative, it generalizes to mazes bigger than
-              it trained on by running more rounds — the VIN signature, and the
-              reason this is planning rather than memorizing.
+              <div class="eyebrow mb-1.5">What does not happen</div>
+              No planner, solver or search runs alongside it, and no agent walks
+              the maze. Nothing corrects the prediction: a predicted step into a
+              wall is drawn as a cross where it happens. The shortest route is
+              computed by breadth-first search only to draw the dashed reference
+              line; the brain never sees it.
+            </div>
+            <div>
+              <div class="eyebrow mb-1.5">How good it is</div>
+              Early. Measured on {MEASURED.n} random 9×9 mazes with the default
+              (cortex 32) brain: first step right in {MEASURED.firstStep}; on
+              average the first {MEASURED.meanMatch} of about {MEASURED.meanLen}{" "}
+              steps match the shortest route; {MEASURED.fullyCorrect} of{" "}
+              {MEASURED.n} routes correct all the way to the goal. Most routes end
+              in a predicted step into a wall. The other widths are no better on
+              the first step (87–98%); the cortex-64 brain got 12 of 200 routes
+              fully right in the same test, the others none.
+              The session numbers on this page are your own sample.
+            </div>
+            <div>
+              <div class="eyebrow mb-1.5">How it was trained</div>
+              Supervised, offline: on generated mazes, to predict the
+              solver-labelled route from the start image, like the maze task in
+              Sakana's CTM paper. Labels exist only in training. The mazes here come
+              from the same generator; they have not been checked against the
+              training set, so some may have appeared in it.
             </div>
             <div>
               <div class="eyebrow mb-1.5">Vision</div>
-              retina → V1 → V2 → V4 feed the input region; the cyan grids are those
-              feature maps, what the model actually sees. The retina is
-              convolutional, so any maze size runs zero-shot. Nothing is retrained.
-            </div>
-            <div>
-              <div class="eyebrow mb-1.5">Difficulty</div>
-              Every level runs the same learned planner — the dial is how much
-              bio-help it gets. Easy / Normal / Hard add a live escape: a
-              frustration neuromodulator heats exploration and a per-cell plastic
-              bias adapts to break out of loops, with a tightening budget as you
-              go up. Hardcore turns the escape off entirely — the raw frozen
-              planner, no plasticity, no neuromodulator. It can get stuck and
-              fail. That's the planner's true, unaided solve-rate.
-            </div>
-            <div>
-              <div class="eyebrow mb-1.5">Generalization</div>
-              Trained on 9×9, it solves bigger boards (11×11, 13×13…) by running
-              more value-iteration rounds, no retraining. Solve-rate drops with
-              size, honestly, as the planning gets harder — but it does plan, not
-              memorize.
-            </div>
-            <div>
-              <div class="eyebrow mb-1.5">Sleep &amp; consolidation</div>
-              Modelled on hippocampal sharp-wave ripples. While solving, the agent{" "}
-              <strong>bookmarks</strong> salient episodes — wall-hits
-              (“nightmares”), goal reaches, high-surprise steps — tagging them by
-              salience. Every few mazes it <strong>sleeps</strong>: the
-              highest-salience bookmarks win a competition and are replayed,
-              repeatedly, to fine-tune the durable planner toward each maze's
-              optimal move. The frozen value-iteration core is untouched; only the
-              readout consolidates. Answers appear <em>only</em> in this dream —
-              never during live planning — and you watch the planner's gap drop.
+              retina → V1 → V2 → V4 feed the input region; the cyan grids in the
+              3D view are those feature maps for the current image. The retina is
+              built for a fixed 9×9 input, which is why the demo has no maze-size
+              control.
             </div>
             <div>
               <div class="eyebrow mb-1.5">Engine — all SDK</div>
-              The browser engine is the modgrad SDK's own crates
-              (<code class="text-[0.85em]">modgrad-ctm</code> +{" "}
+              The browser engine is the modgrad SDK's own crates (
+              <code class="text-[0.85em]">modgrad-ctm</code> +{" "}
               <code class="text-[0.85em]">modgrad-codec</code>) compiled to
-              WebAssembly — the same forward pass that runs on the server, in
-              your tab. The planner, the retina pathway, the 8-region brain and
-              the replay-based consolidation are all composable SDK primitives:
-              modgrad builds brains by wiring regions (vision, planning, motor),
-              not by hand-coding the task.
+              WebAssembly: the same forward pass that runs natively, in your tab.
             </div>
           </div>
         </Show>
@@ -2294,7 +1539,3 @@ export default function Play() {
     </div>
   );
 }
-
-// The maze + brain drawing primitives (roundRect, start/goal markers) now live
-// in their respective modules (viz/maze.ts, viz/brain3d.ts), so Play.tsx no
-// longer carries inlined canvas helpers.

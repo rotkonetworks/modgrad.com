@@ -2,7 +2,7 @@ export const site = {
   name: "modgrad",
   tagline: "a Rust SDK for composable brains",
   description:
-    "A Rust SDK for Continuous Thought Machines and multi-region brains: graph composition, bio-inspired learning, and GPU-resident training. No framework, no YAML.",
+    "Rust crates for Continuous Thought Machines and multi-region networks of them: backpropagation through every tick, optional bio-inspired learning rules, CPU and GPU backends. Open source, early research.",
   url: "https://modgrad.com",
   repo: "https://github.com/rotkonetworks/modgrad",
   discussions: "https://github.com/rotkonetworks/modgrad/discussions",

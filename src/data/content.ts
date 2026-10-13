@@ -1,58 +1,72 @@
-// Landing-page content. Every number here is grounded in the modgrad
-// source tree (maze benchmark, GPU benches, crate manifest). Keep it honest.
+// Landing-page content. Every number here comes from the modgrad source tree
+// (the SDK README's maze benchmark and GPU numbers, the crate manifests) or
+// from a measurement noted next to it. Keep it that way.
 
+// Measured headless with the shipped wasm engine and weights (the /play brain,
+// cortex 32): 200 random 9×9 mazes, the final-tick route predicted from the
+// start image, argmax per step, compared with the unique shortest route.
 export const proofStat = {
-  headline: "187k-param brain beats a 450k single model",
-  detail: "21×21 maze routing, 5000 steps, 3 seeds, held-out eval.",
+  headline: "The /play brain on 200 random 9×9 mazes",
+  detail: "Its predicted route from the start image, compared with the shortest route.",
   rows: [
-    { label: "8-region brain", params: "187k", metric: "79.2%", pos: true },
-    { label: "single CTM", params: "450k", metric: "51.3%", pos: false },
+    { label: "first step right", value: "199 / 200", width: "99.5%" },
+    { label: "steps matching", value: "4.3 / 17.4", width: "24.7%" },
+    { label: "route correct to goal", value: "0 / 200", width: "0%" },
   ],
-  foot: "first-step accuracy · the brain wins every metric with 2.4× fewer parameters",
+  foot:
+    "It gets the first steps right and drifts after; most routes end in a predicted step into a wall. This is where the in-browser model stands today.",
 };
 
-export const runningToday = [
-  ["Qwen2.5-0.5B inference", "Loads safetensors, decodes coherent text on the resident GPU runtime."],
-  ["End-to-end LM training", "lm_validate drives cross-entropy 5.72 → 0.74 in 10 steps on real text."],
-  ["Full-residency GPU path", "Weights stay on-device across steps, up to 5.6× faster per call (1024×512, RX 7600M XT)."],
-  ["Live 3D brain debugger", "Attach over TCP and watch neurons, token streams, and sync in real time."],
+export const runningToday: [string, string][] = [
+  ["Qwen2.5-0.5B inference", "Loads safetensors and decodes text on the GPU-resident runtime (qwen_chat)."],
+  ["End-to-end LM training", "lm_validate trains the transformer stack on real text and reports held-out loss."],
+  ["GPU residency", "Weights stay on the device across steps: 5.6× faster per call than copying through the host, at 1024×512 on an RX 7600M XT."],
+  ["3D brain debugger", "Attach over TCP to a running brain and watch its neurons, token streams and synchronization."],
+];
+
+// Short, factual research status. Update when it changes.
+export const researchStatus: [string, string][] = [
+  ["Models", "The SDK has the CTM and the CMM (Continuous Memory Machine, Sakana 2026)."],
+  ["Episodic memory for frozen LLMs", "A memory read that starts from the model's own retrieval heads recalls stored facts with their text absent, on the fact types it was trained on. It does not yet transfer to unseen fact types."],
+  ["Mazes", "A supervised CTM trained as in the paper solves 45% of 11×11 mazes and fails on larger boards."],
+  ["Regions vs one block", "A pre-registered, parameter-matched test found a graph of regions no better than a single CTM block on two tasks, so new work uses a single block. An earlier 21×21 result that favoured the 8-region brain predates a synchronization bug fix and has not been re-run."],
 ];
 
 export const pillars = [
   {
     tag: "core",
     title: "Continuous Thought Machine",
-    body: "A neuron pool that thinks over internal ticks instead of stacking layers. NLM memory traces, U-Net synapse, sync readout, learned early-exit, full BPTT through every tick.",
+    body: "A neuron pool iterated over internal ticks instead of stacked layers: per-neuron memory traces, a U-Net synapse, a synchronization read-out, a learned early-exit gate, and full backpropagation through every tick.",
     href: "/docs/continuous-thought-machine",
   },
   {
     tag: "compose",
     title: "Multi-region brains",
-    body: "Wire many CTMs into a directed graph of cortical and subcortical regions with learned routing and episodic memory. From 187k params to a billion.",
+    body: "Several CTMs wired into a directed graph of regions, connected by learned inter-region synapses and routing. The 8-region preset is 187k parameters.",
     href: "/docs/brain-composition",
   },
   {
     tag: "learn",
     title: "Bio-inspired learning",
-    body: "Pain as relative surprise, neuromodulators, dream consolidation during sleep, episodic replay, and multiple personalities sharing one set of weights. Opt in per module.",
+    body: "Optional modules: pain as relative surprise, neuromodulators, dream replay and sleep consolidation, episodic replay, several personalities sharing one set of weights. Experimental; most have not yet shown a measured benefit.",
     href: "/docs/bio-inspired",
   },
   {
     tag: "run",
-    title: "Full-residency compute",
-    body: "CPU (AVX-512), CUDA, AMD ROCm, KFD, and Vulkan behind one backend trait. Resident kernels keep weights on the GPU; quantized loaders target 7B-class models on 8 GB.",
+    title: "Compute backends",
+    body: "CPU (AVX-512) and AMD ROCm are tested; CUDA, KFD and Vulkan sit behind the same backend trait, with CUDA not yet validated on NVIDIA hardware. Resident kernels keep weights on the GPU between steps.",
     href: "/docs/compute-gpu",
   },
   {
     tag: "sense",
     title: "Unified token space",
-    body: "Text bytes, image VQ codes, audio frames, timestamps, and actions share one embedding table and one next-token objective. A learnable V1→V4 visual cortex feeds the brain.",
+    body: "Text bytes, image VQ codes, audio frames, timestamps and actions share one embedding table and one next-token objective. A trainable retina → V1 → V4 cascade turns images into tokens.",
     href: "/docs/multimodal",
   },
   {
     tag: "transformers",
     title: "Transformers & foundation models",
-    body: "A full transformer stack (MHA, RoPE, KV cache, resident GPT) runs native Qwen2.5 inference today. Plus a byte-latent transformer (BLT) and mounting a frozen LLM as the brain's cerebellum.",
+    body: "A transformer stack (MHA, RoPE, KV cache, resident GPT) that runs Qwen2.5 inference, a byte-latent transformer, and a frozen LLM mounted as a brain's cerebellum.",
     href: "/docs/foundation-models",
   },
 ];
@@ -69,50 +83,52 @@ export const regions = [
 ];
 
 export const crates: [string, string][] = [
-  ["modgrad-ctm", "single CTM + graph composition, NeuralComputer, bio modules"],
+  ["modgrad-ctm", "the CTM and CMM, graph composition, NeuralComputer, bio modules"],
   ["modgrad-compute", "Linear, tensor ops, batched + resident GPU dispatch"],
-  ["modgrad-device", "CPU / CUDA / ROCm / KFD / Vulkan backends, resident kernels"],
-  ["modgrad-transformer", "blocks, MHA, RoPE, KV cache, resident GPT, Qwen loader"],
-  ["modgrad-blt", "byte-latent transformer: entropy patcher, byteify recipe"],
-  ["modgrad-substrate", "Q4_K residency, streaming loaders, 7B on 8 GB target"],
-  ["modgrad-codec", "VisualRetina V1→V4, VQ-VAE, audio codec, FSQ"],
-  ["modgrad-ffn", "SwiGLU language prior + FrozenCerebellum trait"],
-  ["modgrad-data", "type-safe multimodal tokenization + streaming"],
-  ["modgrad-training", "AdamW / Adam / SGD, schedulers, dream replay"],
-  ["modgrad-memory", "episodic memory with valence, content-addressable recall"],
-  ["modgrad-io", "telemetry, safetensors + ONNX + GGUF backends"],
-  ["modgrad-persist", "wincode / JSON save-load, f32/f16/i8 quantization"],
-  ["modgrad-traits", "Brain, Encoder, LossFn: the compile-time foundation"],
+  ["modgrad-device", "GPU / hardware backends, resident kernels"],
+  ["modgrad-transformer", "transformer blocks, MHA, RoPE, KV cache, Qwen loader"],
+  ["modgrad-blt", "byte-latent transformer with entropy-based patching"],
+  ["modgrad-codec", "modality codecs: visual cortex V1→V4, audio, text"],
+  ["modgrad-ffn", "SwiGLU MLP language model"],
+  ["modgrad-data", "tokenization and streaming data pipeline"],
+  ["modgrad-training", "optimizers, schedulers, checkpointing"],
+  ["modgrad-memory", "episodic memory and gated-delta fast weights"],
+  ["modgrad-lm-memory", "episodic memory for a frozen LLM: store + read paths"],
+  ["modgrad-io", "IO, serialization and inference backends"],
+  ["modgrad-persist", "serialization and persistence"],
+  ["modgrad-traits", "core traits: Brain, LossFn, Optimizer"],
+  ["modgrad-substrate", "host observability: CPU frequency, throttling, thermals"],
+  ["modgrad-wasm", "WebAssembly bindings (the engine behind /play)"],
 ];
 
 export const differentiators = [
-  ["Crates, not a framework", "modgrad-compute doesn't know about modgrad-ctm. Import one crate or fourteen. You own the training loop; nothing runs behind your back."],
-  ["A compile-time brain/host boundary", "The Brain trait is pure: (Weights, State, Input) → (Output, State). The type system stops a brain from doing I/O. State is explicit and checkpointable, never hidden behind &mut self."],
-  ["Depth from thinking, not size", "A CTM gets its depth from deliberation time, not parameter count. Harder inputs get more compute through learned exit gates."],
-  ["A faithful port, with tests", "A line-for-line Rust port of the Sakana AI CTM (arXiv 2505.05522), with full BPTT. No architectural shortcuts, and the tests to back it."],
+  ["Crates, not a framework", "modgrad-compute doesn't know about modgrad-ctm. Import one crate or several. You write the training loop; nothing runs behind your back."],
+  ["A brain/host boundary in the types", "The Brain trait is pure: (Weights, State, Input) → (Output, State). A brain can't do I/O, and its state is explicit and checkpointable rather than hidden behind &mut self."],
+  ["Depth from ticks, not layers", "A CTM's depth is the number of internal ticks it runs. A learned exit gate lets easy inputs stop early."],
+  ["Follows the paper, checked by tests", "The CTM implements Sakana AI's design (arXiv 2505.05522) with full backpropagation through time; finite-difference tests check the gradients."],
 ];
 
 export const howItWorks: [string, string][] = [
   [
     "It thinks",
-    "A Continuous Thought Machine iterates a single neuron pool over internal ticks, reading its memory, attending to the input, and accumulating evidence, then exits when it's confident. Depth comes from deliberation time, not stacked layers.",
+    "A Continuous Thought Machine iterates one neuron pool over internal ticks. Each tick it reads its neurons' recent history, attends to the input and updates a synchronization read-out; a learned gate can stop it early.",
   ],
   [
     "It composes",
-    "Wire many CTMs into a directed graph of specialized regions that route information, remember, and feed action back into perception. Eight regions at 187k parameters beat a single 450k model.",
+    "Several CTMs can be wired into a graph of regions that pass activations to each other. Whether that beats one larger block is an open question; our latest parameter-matched test found no difference.",
   ],
   [
     "It learns",
-    "Full backpropagation through every tick. And, if you want, from its own surprise: pain relative to expectation, neuromodulators, dream replay, and sleep consolidation.",
+    "Backpropagation through every tick. Optionally, experimental bio-inspired signals as well: pain relative to expectation, neuromodulators, dream replay.",
   ],
 ];
 
 export const useCases: [string, string][] = [
-  ["Language models", "Byte-level CTMs and byte-latent transformers. No tokenizer, raw bytes in."],
-  ["Reasoning agents", "The NeuralComputer holds state across turns: generate, observe, act, repeat."],
-  ["Multimodal systems", "One embedding table for text, images, audio, timestamps, and actions."],
-  ["Bio-inspired research", "Episodic memory, neuromodulated learning, even multiple selves on one brain."],
-  ["LLM composition", "Mount a frozen Qwen2.5 (or a byte-latent transformer) as the cerebellum."],
+  ["Language models", "Byte-level CTMs and byte-latent transformers: raw bytes in, no tokenizer."],
+  ["Agents with state", "The NeuralComputer keeps state across turns: generate, observe, act, repeat."],
+  ["Multimodal models", "One embedding table for text, images, audio, timestamps and actions."],
+  ["Memory research", "Episodic memory for CTM brains and for frozen LLMs."],
+  ["LLM composition", "Mount a frozen Qwen2.5 (or a byte-latent transformer) as a brain's cerebellum."],
 ];
 
 export const heroCode = `use modgrad_ctm::graph::{RegionalConfig, RegionalWeights,
@@ -128,7 +144,7 @@ let mut opt = RegionalAdamW::new(&w).with_lr(3e-4);
 let mut g = RegionalGradients::zeros(&w);
 for (token, target) in your_data {
     let (loss, _) = regional_train_token(&w, &mut g, token, target);
-    opt.step(&mut w, &g);
+    opt.step(&mut w, &mut g);
     g.zero();
 }
 

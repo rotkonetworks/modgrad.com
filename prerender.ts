@@ -42,7 +42,7 @@ function emit(path: string, html: string) {
 }
 
 const DEFAULT_DESC =
-  "Composable Rust crates for building brains: Continuous Thought Machines, multi-region composition, bio-inspired learning, and full-residency GPU training. No framework. No YAML. Just functions.";
+  "Rust crates for Continuous Thought Machines and multi-region networks of them: backpropagation through every tick, optional bio-inspired learning rules, CPU and GPU backends. Open source, early research.";
 
 // home
 emit("/", variant("modgrad — build your own brain", DEFAULT_DESC, "/"));
@@ -62,7 +62,7 @@ emit(
   "/play",
   variant(
     "Watch it think — modgrad",
-    "A real modgrad learned planner solves mazes live in your browser — a Value Iteration Network with no solver at inference — while the Continuous Thought Machine brain's neurons fire and attention sweeps the maze. Runs entirely client-side via wasm.",
+    "A small 8-region CTM brain looks at a maze image and predicts a 20-step route over its internal ticks, live in your browser. Nothing else plans or decides. It is early: it usually gets the first steps right and then drifts. Runs client-side via wasm.",
     "/play",
   ),
 );

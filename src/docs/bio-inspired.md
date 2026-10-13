@@ -2,14 +2,14 @@
 title: Bio-inspired learning
 section: Architecture
 order: 50
-description: The exact mechanics: pain as z-scored surprise, a four-neuromodulator state machine, salience gating, cerebellar forward models, homeostatic sleep pressure, dream replay, and gradient-free spindle-ripple consolidation.
+description: The mechanics: pain as z-scored surprise, a three-neuromodulator state machine, salience gating, cerebellar forward models, homeostatic sleep pressure, dream replay, and gradient-free spindle-ripple consolidation.
 ---
 
 # Bio-inspired learning
 
-Beyond plain gradient descent, modgrad ships optional modules that let a brain
-**regulate its own learning**. They learn from relative surprise rather than
-absolute loss, gate updates by salience, and consolidate offline during sleep.
+Beyond plain gradient descent, modgrad has optional modules that modulate a
+brain's own learning: they scale updates by relative surprise rather than absolute
+loss, gate updates by salience, and consolidate offline during "sleep".
 They live in `modgrad-ctm` (`bio::*`). The core CTM trains without any of them; you
 opt in per module. (For episodic memory, multiple selves, and the orchestrator that
 ties everything together, see [Memory & multiplicity](/docs/memory).)
@@ -26,30 +26,27 @@ surprise = (loss − ema) / sqrt(variance_ema)
 
 So loss only hurts when it's *worse than expected*, and beating the baseline
 produces relief. Pain is **amplified by confidence**, so being certain and wrong
-hurts more (`pain = surprise · scale · (1 + confidence·1.5)`). That is exactly
-the signal you want a learner to attend to. A retrieved memory with negative
+hurts more (`pain = surprise · scale · (1 + confidence·1.5)`). A retrieved memory with negative
 valence below `−0.3` triggers an **avoidance** response that biases the exit gate
 to deliberate longer. The module exposes an adaptive learning-rate multiplier
 bounded to **`[0.5, 2.0]`**: a sigmoid of dopamine, curiosity, anxiety, and
-serotonin that speeds learning when the brain is curious and slows it when anxious.
+serotonin, higher when curiosity dominates and lower when anxiety does.
 
 ## Neuromodulators
 
-`bio::neuromod` is a four-signal state machine, each bounded and decaying toward a
-resting baseline so nothing saturates:
+`bio::neuromod` is a three-signal state machine, each signal clamped to a range
+and decaying toward a resting value:
 
 | signal | range | resting | driven by |
 |--------|-------|---------|-----------|
 | **dopamine** | 0.1–3.0 | 1.0 | prediction error / surprise |
 | **serotonin** | 0.1–2.0 | 1.0 | learning progress (mood) |
 | **norepinephrine** | 0.1–2.0 | 0.5 | arousal / urgency |
-| **acetylcholine** | n/a | n/a | attention gain |
 
 **Curiosity** and **anxiety** are derived in an active-inference style: prediction
 error × dopamine × (calm) becomes curiosity, while prediction error × dopamine ×
-(arousal) becomes anxiety. The same surprise pushes the brain to *explore* when
-calm and to *freeze* when aroused, and these levels are what the other modules read
-to decide how fast, and whether, to learn.
+(arousal) becomes anxiety. The same surprise reads as curiosity when calm and as
+anxiety when aroused; other modules read these levels to scale or skip updates.
 
 ## Salience gating
 
@@ -62,8 +59,8 @@ a clear winner lowers it:
 value = rpe · (0.3 + 0.7 · motor_conflict),   gate = value > 0.05 ? value : 0
 ```
 
-High surprise *and* an unsettled decision means learn hard; a confident decision in
-a steady state means skip the update entirely. The gate scales the effective
+High surprise with an unsettled decision gives a large gate; a confident decision
+with little surprise gives zero, and the update is skipped. The gate scales the
 learning rate in the three-factor rule.
 
 ## Three-factor plasticity
@@ -71,8 +68,8 @@ learning rate in the three-factor rule.
 `bio::three_factor` is REINFORCE with **Titans-style adaptive eligibility traces**.
 The trace accumulates a post × pre product whose decay `η_t` is itself data-dependent
 (high salience speeds accumulation, low salience speeds decay); the advantage comes
-from a reward baseline; and the salience gate sets the learning rate. Below a
-threshold, it returns exactly zero updates, so it never learns from noise.
+from a reward baseline; and the salience gate sets the learning rate. Below the
+gate threshold it returns zero updates.
 
 ## Cerebellar forward model
 
@@ -96,8 +93,8 @@ dopamine burst (surprise); low error lets dopamine decay back toward 1.0.
 | surprise EMA | 0.10 | sustained high surprise |
 
 The total maps to four zones: **GREEN** (< 0.5, work indefinitely), **YELLOW**
-(0.5–0.8), **RED** (0.8–1.0, sleep soon), and **FORCED** (> 1.0, sleep now). Output
-quality degrades as pressure rises. Sleep runs two phases that clear
+(0.5–0.8), **RED** (0.8–1.0, sleep soon), and **FORCED** (> 1.0, sleep now). A
+configurable output-quality factor falls as pressure rises. Sleep runs two phases that clear
 different components: **NREM** drains activation, drift, and buffers; **REM** drains
 sync divergence, emotional pressure, and surprise.
 
@@ -107,11 +104,11 @@ During sleep, `bio::dream` replays the **most painful episodes**. The caller
 re-evaluates each with the current weights. If performance improved past +10% and
 the answer is now correct it counts as *overcoming* (firing a relief burst); if it
 regressed past −10% the pain deepens. Then every painful memory is **reappraised**,
-its valence faded in proportion to how much the brain has since improved ("was the
-pain justified, given what I know now?"). `prime_state` blends a retrieved trajectory
+its valence faded in proportion to how much the brain has since improved.
+`prime_state` blends a retrieved trajectory
 into a region's state *before* the forward pass, so computation starts from an
 episodically-informed prior rather than zero. An adaptive focus weights positions the
-brain keeps failing on up to 6× more heavily.
+brain keeps failing on more heavily (0.5× to 3.0× by failure rate).
 
 ## Reverse replay: credit assignment
 
@@ -119,13 +116,12 @@ Dream replay is the **sleep-time** mode. Its awake counterpart is
 `modgrad-training::replay`: roll a policy out, and wherever its action disagrees
 with an expert, those states are the mistakes to learn from. On a *failed* rollout
 the mistakes are ordered **backward from the failure**, assigning blame from the
-point of failure outward — the reverse-replay sweeps the hippocampus runs after an
-error (Foster & Wilson, 2006), versus the consolidation replay it runs at rest
-(Wilson & McNaughton, 1994). It is a generic SDK primitive (`mistake_states`,
+point of failure outward, by analogy with hippocampal reverse replay after an
+error (Foster & Wilson, 2006) as opposed to replay at rest (Wilson & McNaughton,
+1994). It is a generic SDK primitive (`mistake_states`,
 `prioritized_replay`) over an abstract `(state, action)` trajectory and an
-expert closure — no model or task baked in, so it drives a grid planner or a
-language policy alike. Focusing training on a policy's own failure distribution is
-the standard fix for compounding behaviour-cloning error.
+expert closure, with no model or task baked in. Training on a policy's own failure
+states is the standard remedy for compounding behaviour-cloning error (as in DAgger).
 
 ## Consolidation: spindle-ripple
 
@@ -134,14 +130,14 @@ sleep spindle-ripple rhythm: a Rademacher weight perturbation (the spindle), eva
 loss at `±amplitude` (the ripples), and step a momentum term toward the improvement
 (synaptic capture). It is **Pareto-constrained**: the change is capped at ~1% per
 sleep and accepted only if the mean improves *and* no stored trace regresses beyond a
-1% slack. The brain itself never computes a gradient here; it wakes up with better
-weights.
+1% slack. No gradient is computed.
 
 ## What's integrated vs. experimental
 
 The cerebellar, salience, neuromodulator, and three-factor modules are integrated and
 tested. Pain, dream, homeostasis, and consolidation compile, run, and are wired into
-the runtime, but are best treated as research surface rather than settled defaults.
+the runtime, but they are research code, not settled defaults; we have not shown
+that they improve results on a benchmark. None of them run in the /play demo.
 
 Next: how it all [runs on the GPU →](/docs/compute-gpu), or the
 [memory & multiplicity →](/docs/memory) systems built on top.

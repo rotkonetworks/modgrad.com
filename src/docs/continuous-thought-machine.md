@@ -2,18 +2,18 @@
 title: Continuous Thought Machine
 section: Architecture
 order: 30
-description: The exact mechanics of a CTM. The per-tick loop, U-Net synapse, non-local memory, synchronization read-out, learned early-exit, the loss blend, and full BPTT.
+description: The mechanics of a CTM in modgrad. The per-tick loop, U-Net synapse, non-local memory, synchronization read-out, learned early exit, the loss blend, and backpropagation through time.
 ---
 
 # Continuous Thought Machine
 
 The Continuous Thought Machine (CTM) is the core of modgrad: a recurrent
-architecture whose depth comes from **thinking time**, not stacked layers. A
-single shared neuron pool of width `d_model` is iterated over `T` internal ticks,
-accumulating evidence before it commits to an answer. It is a faithful Rust port
-of the [Sakana AI CTM](https://arxiv.org/abs/2505.05522). The forward pass
-matches `ContinuousThoughtMachine.forward()` and the synapse matches `SynapseUNET`
-from the reference implementation, with full backpropagation through time.
+architecture whose depth comes from **internal ticks**, not stacked layers. A
+single neuron pool of width `d_model` is iterated over `T` ticks before it
+commits to an answer. It is a Rust port of the
+[Sakana AI CTM](https://arxiv.org/abs/2505.05522), following the reference
+`ContinuousThoughtMachine.forward()` and `SynapseUNET`, with gradients through
+every tick.
 
 ## The tick loop
 
@@ -34,16 +34,14 @@ post-activation vector; the model then:
 5. **Predicts.** The output synchronization is projected to a prediction and a
    certainty for this tick.
 
-Because the loop is recurrent over a single pool, a deeper "thought" costs more
+Because the loop is recurrent over a single pool, more thinking costs more
 ticks, not more parameters.
 
 ## The U-Net synapse
 
-Inter-neuron mixing is not a single linear layer. The synapse is a
-skip-connected **U-Net** whose intermediate widths are laid out with a `linspace`
-bottleneck (`SynapseUNet`), so information is compressed and re-expanded with
-residual skips at each level. This component gives a CTM its
-expressivity per tick.
+Inter-neuron mixing is not a single linear layer. The synapse (`SynapseUNet`) is
+a skip-connected U-Net whose intermediate widths follow a `linspace` bottleneck,
+so the signal is compressed and re-expanded with a residual skip at each level.
 
 ## Non-local memory (NLM)
 
@@ -54,8 +52,8 @@ variants ship:
 - **deep**: a two-stage SuperLinear map `M → H → 2` with GLU gating;
 - **shallow**: a single `M → 2` map.
 
-NLM lets a neuron's behavior depend on its own recent trajectory rather
-than only the instantaneous input.
+So a neuron's output depends on its own recent trajectory, not only on the
+current input.
 
 ## Synchronization read-out
 
@@ -63,64 +61,61 @@ The CTM's output is not the raw activations. Neurons are paired by random left/
 right index sets, and for each pair the model accumulates a **decaying
 multiplicative synchronization** across ticks (an `α ⊙ β` term with a learnable
 per-pair decay). Two synchronization vectors are produced: one drives the output
-projection, one drives the action/attention query. On the 8-region brain this
-scales to on the order of a thousand sync pairs.
+projection, one drives the action/attention query. The 8-region brains on
+[/play](/play) read out 96 to 256 global sync pairs, depending on width.
 
-## Adaptive early-exit
+## Adaptive early exit
 
-A CTM can stop thinking when it is confident. `CtmConfig::exit_strategy` selects
-one of three modes:
+A CTM can stop before its tick budget. `CtmConfig::exit_strategy` selects one of
+three modes:
 
 | strategy | behavior |
 |----------|----------|
 | **None** | run all `T` ticks |
-| **Certainty** | halt when the prediction's entropy drops below a threshold |
-| **AdaptiveGate** | a learned linear halt gate on the output synchronization, regularized with a KL term and tuned per region (β on the order of 0.05–0.15, threshold near 0.99) |
+| **Certainty** | halt when an entropy-derived certainty exceeds a threshold |
+| **AdaptiveGate** | a learned linear halt gate on the output synchronization, regularized with a KL term; per-region β of 0.05–0.15 and a threshold of 0.99 in the 8-region presets |
 
-This is how variable-difficulty inputs receive variable compute.
+Details in [adaptive compute](/docs/adaptive-compute).
 
 ## Loss
 
 The default `CtmLoss` does not take the last tick. It blends the **lowest-loss
-tick** with the **most-certain tick** (a 50/50 combination), so the model is
-trained both to be right at some point and to know when it is right. Two optional
-losses extend this:
+tick** with the **most-certain tick** (50/50), so the model is trained both to
+be right at some tick and to be confident when it is right. Two optional losses
+extend this:
 
-- **ThinkingLoss** rewards monotonic improvement across ticks;
+- **ThinkingLoss** rewards improvement across ticks;
 - an **imagination** loss splits the tick budget into a silent "imagination"
   phase and a graded "commit" phase.
 
 ## Data structures
 
-A CTM is a handful of explicit, serializable structs, with no hidden state:
+A CTM is a handful of explicit, serializable structs:
 
 | type | role |
 |------|------|
 | `CtmConfig` | hyperparameters: `iterations`/ticks, `d_model`, `memory_length`, synapse depth, exit strategy |
 | `CtmWeights` | all trainable parameters: synapse U-Net blocks, NLM stages, query/KV projections + LayerNorm, MHA in/out, sync decays, output projection, optional exit gate |
-| `CtmState` | per-forward ephemeral state: activations, NLM history, sync accumulators, optional episodic ring buffer |
-| `CtmCache` | tick-by-tick intermediates retained for the backward pass |
+| `CtmState` | per-forward state: activations, NLM history, sync accumulators, optional episodic ring buffer |
+| `CtmCache` | tick-by-tick intermediates kept for the backward pass |
 | `CtmGradients` | accumulated gradients, mirroring `CtmWeights` |
 
 For inspection, `ctm_forward_with_attn_trace` returns the attention weights for
 every tick and head (`[ticks][heads][tokens]`).
 
-## Full backpropagation through time
+## Backpropagation through time
 
-Training unrolls all `T` ticks and computes gradients for **every** weight: the
+Training unrolls all `T` ticks and computes gradients for every weight: the
 U-Net blocks, both NLM stages, the sync decays, the attention projections, the
-output projection, and the exit gate. There are no stop-gradient shortcuts, and a
-dedicated test (`small_scale_bptt`) checks the unrolled backward against a
-reference. Every hot-path operation (matmul, layer norm, SiLU/GLU backward,
-outer products) routes through `modgrad-device`, so the identical forward and
-backward run on CPU or any GPU backend.
+output projection, and the exit gate. The unrolled backward is checked against
+finite differences in the test suite. Hot-path operations (matmul, layer norm,
+SiLU/GLU backward, outer products) go through `modgrad-device`, so the same
+forward and backward run on CPU or a GPU backend.
 
-## Fidelity
+## Related: the CMM
 
-The implementation tracks the published Sakana AI CTM rather than re-inventing
-it: the forward pass, the U-Net synapse, and the synchronization mechanism each
-correspond to the reference code, and the config presets are covered by tests.
-That faithfulness is the point. modgrad is the architecture you can read,
-re-derive, and trust.
+`modgrad-ctm` also contains a CTM core with a pluggable working memory, after
+the Continuous Memory Machine (CMM; Regan et al., Sakana, 2026), in
+`modgrad_ctm::cmm`.
 
 Next: compose many CTMs into a [multi-region brain →](/docs/brain-composition).

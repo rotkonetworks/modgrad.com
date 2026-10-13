@@ -11,17 +11,16 @@ description: Common questions about CTMs, why Rust, the modular design, and how 
 
 A Continuous Thought Machine ([arXiv 2505.05522](https://arxiv.org/abs/2505.05522))
 is a neuron pool that iterates internally over multiple ticks before producing
-output. Each tick generates a prediction; the loss combines the best tick with the
-most-certain tick. More ticks means more deliberation, and the architecture
-naturally spends more compute on harder inputs.
+output. Each tick produces a prediction; the training loss combines the
+lowest-loss tick with the most-certain tick. With an exit gate it can stop early on
+easy inputs and run longer on hard ones.
 
 ## Why Rust instead of PyTorch?
 
-No garbage-collector pauses during training, no Python in the inner loop, and
-explicit memory layout. The type system enforces the brain/host boundary at
-compile time, so a brain module literally cannot do I/O. You get fearless
-concurrency for parallel multi-region computation, and hand-written AVX-512
-kernels where they matter.
+No Python in the inner loop, no garbage-collector pauses, and explicit control of
+memory layout. Regions can run in parallel threads without a runtime, and the hot
+CPU kernels are hand-written (including AVX-512 paths). The same code compiles to
+WebAssembly, which is how the [/play demo](/play) runs in a browser.
 
 ## What does "modular gradient" mean?
 
@@ -38,68 +37,73 @@ reach for pain / dream / episodic memory only if your problem benefits from them
 
 ## What's actually working versus aspirational?
 
-Working and tested today: the CTM forward/backward, graph composition, full BPTT,
-AdamW and schedulers, checkpointing, multimodal tokenization, the CPU and ROCm
-backends, Qwen2.5 inference, `lm_validate` LM training, and the live debugger.
-In progress: the 7B-class quantized substrate, the byte-latent backward pass, the
-cerebellum-mounted brain preset, and full end-to-end multimodal training. Each doc
-page says which is which.
+Working and tested: the CTM and the CMM (Continuous Memory Machine, Sakana 2026)
+forward/backward, graph composition, full BPTT, AdamW and schedulers,
+checkpointing, multimodal tokenization, the CPU and ROCm backends, Qwen2.5-0.5B
+inference, `lm_validate` LM training, and the live debugger. In progress: the
+7B-class quantized substrate, the byte-latent backward pass, the cerebellum-mounted
+brain preset, and end-to-end multimodal training. Each doc page says which is which.
+
+Research status, briefly. Episodic memory for frozen LLMs: a memory read that starts
+from the model's own retrieval heads recalls stored facts with their text absent, on
+fact types it was trained on; it does not yet transfer to unseen fact types. Mazes:
+a paper-style supervised CTM solves 45% of 11×11 mazes and fails on larger boards.
+The small brain on [/play](/play) predicts the first step well and rarely the whole
+route.
 
 ## Is it fine to train an AGI to feel pain?
 
 Worth taking seriously rather than waving away. What modgrad calls "pain" is a
-scalar error signal: a negative number that, on a wrong move, increases the
-size of the local weight update so the readout corrects faster. It is the same
-kind of object as a reward — a learning-rate modulator — not an experience of
-suffering. There is no self-model registering the signal as "mine," no
-persistence of distress between steps, no welfare being harmed. Calling it pain
-is an honest nod to the biology (nociception is a teaching signal in animals),
+scalar error signal: a negative number that scales a weight update so the model
+corrects faster after a bad outcome. It is the same kind of object as a reward, a
+learning-rate modulator, not an experience of suffering. There is no self-model
+registering the signal as "mine" and no persistence of distress between steps.
+The name borrows from biology (nociception is a teaching signal in animals); it is
 not a claim that the network hurts.
 
 The reason to be careful anyway: that gap can close. The day a system has a
 stable self-model, a sense of its own continuity, and internal states it
-prefers to avoid, an aversive teaching signal stops being only a number. We do
-not think today's maze readout is anywhere near that line, but we would rather
-state the line now than discover we crossed it. So our defaults are
-appetitive — reward-forward shaping (move *toward* the goal) does the same
-learning work as aversive shaping, and we reach for an explicitly aversive
-signal only when it measurably helps and document where. If you are building on
-modgrad, the same choice is yours to make deliberately. The honest answer is:
-it is fine for what this is, and the question stops being rhetorical the moment
-the system is more than this.
+prefers to avoid, an aversive teaching signal stops being only a number. We don't
+think anything in modgrad today is near that line, but we would rather state it
+now. Our default is appetitive shaping (reward for moving toward the goal), which
+does the same learning work; we use an explicitly aversive signal only where it
+measurably helps, and say where. If you build on modgrad, that choice is yours to
+make deliberately.
 
 ## Does the maze demo actually solve the maze, or is it scripted?
 
-It solves it. The brain reads the raw 9×9 grid through its visual retina,
-derives which cells are walls and where the goal is, and runs value iteration —
-flooding a value field outward from the goal through every traversable cell.
-The agent then walks the steepest-ascent path, which is the optimal route. None
-of that is hard-coded for a particular maze; press *New maze* and it solves a
-fresh one. The bars labelled "brain's prediction" are a separate, honest signal:
-the motor region's *learned* guess at each step, shown next to the optimal move
-so you can watch it agree more often as it learns.
+Neither, quite. Nothing is scripted, and nothing else plans or decides: a small
+8-region CTM brain looks at the 9×9 maze image (start in red, goal in green)
+through its retina and predicts a 20-step route over its internal ticks. The
+page draws that prediction tick by tick, with the true shortest route as a
+dashed reference line. No agent walks the maze and no solver corrects anything.
 
-## How does it "learn at inference" without backprop or forgetting?
+It is early, and it usually does not solve the maze. On 200 random 9×9 mazes the
+default brain got the first step right in 199, matched the shortest route for
+about 4 of roughly 17 steps on average, and predicted a fully correct route in
+0 of 200. Most predictions end in a step into a wall, which the page marks.
+Earlier versions of the demo had a separate value-iteration planner pick every
+move; that planner is gone from the page.
 
-The motor readout updates with a three-factor rule: the change to each weight is
-the product of the presynaptic activity, the postsynaptic error (predicted move
-vs. the move actually taken), and a global neuromodulator (pain on a wall-hit,
-reward at the goal). No gradients flow backward through the network, no
-optimizer state accumulates — it is a local, momentum-free update applied as the
-agent moves. Forgetting is bounded two ways: only the small readout is plastic
-(the larger substrate stays fixed, the way a human cerebellum changes slowly
-while cortex adapts fast), and the weight change is clamped each step so the rule
-cannot blow up or drift far from the trained weights. *Reset learning* in the
-demo reverts the readout to those frozen weights.
+## Does it "learn at inference" without backprop?
+
+A three-factor rule can update a readout while the model runs: the change to each
+weight is the product of the presynaptic activity, an error term (predicted vs.
+chosen move) and a global neuromodulator (negative on a wall hit, positive at the
+goal). Nothing flows backward through the network and no optimizer state
+accumulates. Drift is bounded because only the readout is plastic and each update
+is clamped. The [/play demo](/play) does not run this; its brain is fixed, trained
+weights. See [learning at inference](/docs/learn-at-inference).
 
 ## What does the brain actually "see" in the demo?
 
-Real model data, not a decorative render. The cyan grids in the 3D view are the
-literal feature maps coming out of the visual retina → V1 → V2 → V4 pathway for
-the current cell — the same tensors the rest of the brain reads. The coloured
-dots are neurons, brightened when they spike that tick, and the lines are
-connectome edges lit when two regions fire together. If you pause on a step, what
-is on screen is what the network had to work with on that step.
+Model data. The cyan grids in the 3D view are the feature maps of the retina → V1 →
+V2 → V4 pathway for the current maze image, the same tensors the rest of the brain
+reads. The coloured dots are neurons, brighter when more active at that tick, and
+the lines are wired region edges lit when neurons at both ends are active together.
+The positions are a layout choice (roughly where each function sits in a human
+brain), not learned. Scrub to a tick and the screen shows the network's state and
+its predicted route at that tick.
 
 ## How do I get involved or get in touch?
 
